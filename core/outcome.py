@@ -63,6 +63,7 @@ WHY FACTS AND NOT SENTENCES
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -74,6 +75,18 @@ UNVERIFIED = "unverified"
 FAILED = "failed"
 ASK = "ask"
 STARTED = "started"
+
+# Shared adapter recovery signals consumed by task plans and the HUD.
+RECOVERY_KINDS = frozenset({
+    "focus_lost",
+    "window_changed",
+    "page_changed",
+    "control_missing",
+    "target_ambiguous",
+    "timeout",
+    "effect_ambiguous",
+    "state_unreadable",
+})
 
 
 def _render(value: Any) -> str:
@@ -101,8 +114,15 @@ def done(action: str, /, **facts: Any) -> str:
     exists, a window that went away, a text box that emptied. If the only
     evidence is that a call returned without raising, the honest answer is
     `unverified`, and saying so costs nothing: the model tells the user it has
-    asked and cannot confirm, which is exactly true.
+    asked and cannot confirm, which is exactly true. Requiring an explicit
+    boolean `verified=True` makes that contract fail-safe for every caller.
     """
+    if facts.get("verified") is not True:
+        facts.pop("verified", None)
+        reason = facts.pop("reason", None)
+        if not isinstance(reason, str) or not reason:
+            reason = "completion was not explicitly marked as verified"
+        return unverified(action, reason, **facts)
     return _line(DONE, action, facts)
 
 
@@ -183,6 +203,10 @@ def ask(action: str, question: str, /, **facts: Any) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 _OPEN = "<<<UNTRUSTED source={source}>>>"
 _CLOSE = "<<<END UNTRUSTED>>>"
+_LEGACY_FAILURE_RE = re.compile(
+    r"^(?:[A-Za-z_ ]+error:|processing failed:|failed to |could not )",
+    re.IGNORECASE,
+)
 
 
 def untrusted(source: str, content: str) -> str:
@@ -227,6 +251,119 @@ def untrusted(source: str, content: str) -> str:
     text = text.replace("<<<UNTRUSTED", "<<<UNTRUSTED-ESCAPED")
     label = re.sub(r"[^a-z0-9_-]", "", str(source or "external").lower())[:24]
     return f"{_OPEN.format(source=label or 'external')}\n{text}\n{_CLOSE}"
+
+
+def normalize_dispatch_result(tool: str, result: object) -> str:
+    """Keep structured outcomes and mark legacy free-form tool replies unverified."""
+    text = result if isinstance(result, str) else ""
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("status") in {
+            DONE, UNVERIFIED, FAILED, ASK, STARTED,
+        }:
+            status = payload["status"]
+            output = untrusted(tool, stripped)
+            if status == DONE:
+                if payload.get("verified") is not True:
+                    return unverified(
+                        "tool_dispatch",
+                        "the tool claimed completion without explicit verified=true",
+                        tool=tool,
+                        tool_output=output,
+                    )
+                return done(
+                    "tool_dispatch",
+                    tool=tool,
+                    tool_output=output,
+                    verified=True,
+                )
+            reason = payload.get("reason")
+            safe_reason = (
+                reason[:500] if isinstance(reason, str) and reason.strip()
+                else f"{tool} returned status={status}"
+            )
+            if status == UNVERIFIED:
+                return unverified(
+                    "tool_dispatch", safe_reason, tool=tool, tool_output=output
+                )
+            if status == FAILED:
+                return failed(
+                    "tool_dispatch", safe_reason, tool=tool, tool_output=output
+                )
+            if status == ASK:
+                question = payload.get("question")
+                safe_question = (
+                    question[:500] if isinstance(question, str) and question.strip()
+                    else f"{tool} requires user input"
+                )
+                return ask(
+                    "tool_dispatch", safe_question, tool=tool,
+                    tool_output=output,
+                )
+            return started(
+                "tool_dispatch", tool=tool, tool_output=output
+            )
+
+    status_match = re.match(
+        r"^status=(done|unverified|failed|ask|started)\b", stripped
+    )
+    if status_match:
+        if status_match.group(1) == DONE and not re.search(
+            r"(?:^|\s)verified=true(?:\s|$)", stripped
+        ):
+            return unverified(
+                "tool_dispatch",
+                "the tool claimed completion without explicit verified=true",
+                tool=tool,
+                tool_output=untrusted(tool, stripped),
+            )
+        return stripped
+    if stripped.startswith("[CONFIRMATION_PENDING]"):
+        return stripped
+    if stripped.startswith("[VISION_ACTIVE]"):
+        return started(
+            "screen_process",
+            evidence="capture attached to the current exchange",
+        ) + " " + stripped
+    if stripped.startswith("status=opening "):
+        source = stripped.partition("source=")[2].strip()
+        return started("video_player", source=untrusted("tool_result", source))
+    if stripped.startswith("Tool '") and " failed:" in stripped:
+        error_type = stripped.partition(" failed:")[2].strip()
+        return failed(
+            "tool_dispatch",
+            f"{tool} reported a failure ({error_type or 'unknown error'})",
+            tool=tool,
+        )
+    if (" plugin failed (" in stripped.lower()
+            or stripped.startswith("Action '") and " failed (" in stripped):
+        return failed(
+            "tool_dispatch",
+            f"{tool} reported a failure",
+            tool=tool,
+        )
+    if _LEGACY_FAILURE_RE.match(stripped):
+        return failed(
+            "tool_dispatch",
+            f"{tool} returned a failure",
+            tool=tool,
+        )
+    if stripped.endswith(" is not available.") or "plugin' is currently disabled" in stripped.lower():
+        return failed(
+            "tool_dispatch",
+            f"{tool} is not available or enabled",
+            tool=tool,
+        )
+    return unverified(
+        "tool_dispatch",
+        "the tool returned free-form text without an explicit verification status",
+        tool=tool,
+        tool_output=untrusted(tool, stripped or "No result was returned."),
+    )
 
 
 _WRAP_RE = re.compile(r"<<<UNTRUSTED source=[^>]*>>>\n?(.*?)\n?<<<END UNTRUSTED>>>",

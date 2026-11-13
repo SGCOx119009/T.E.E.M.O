@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from core import outcome
+
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
 _CTX_KEYS = ("player", "speak", "response", "session_memory")
@@ -157,13 +159,31 @@ class ActionRegistry:
     def run(self, name: str, parameters: dict, ctx: dict | None = None) -> str:
         rec = self._actions.get(name)
         if rec is None or not rec.valid:
-            return f"Action '{name}' is not available."
+            return outcome.failed(
+                "action_loader",
+                "the requested action is not available",
+                tool=name,
+            )
+        if not isinstance(parameters, dict):
+            return outcome.failed(
+                "action_loader",
+                "action parameters must be an object",
+                tool=name,
+            )
         try:
-            return _call_handler(rec.handler, parameters, ctx or {}) or "Done."
+            result = _call_handler(rec.handler, parameters, ctx or {})
+            return outcome.normalize_dispatch_result(name, result)
         except Exception as e:
-            self._logger(f"Action '{name}' crashed during run(): {e}")
-            traceback.print_exc()
-            return f"Tool '{name}' failed: {e}"
+            # The exception's own message may carry a secret (a path, a token,
+            # a query string). Only its TYPE is logged and returned.
+            error_type = type(e).__name__
+            self._logger(f"Action '{name}' failed ({error_type}).")
+            return outcome.failed(
+                "action_loader",
+                "the action raised an exception",
+                tool=name,
+                error=error_type,
+            )
 
 
 def _call_handler(fn: Callable, parameters: dict, ctx: dict) -> str:

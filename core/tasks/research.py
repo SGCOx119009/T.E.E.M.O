@@ -344,7 +344,8 @@ class ResearchRunner:
         with (self.wd / "findings.jsonl").open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self.e._event(self.tid, "finding", f"[{src['n']}] {claim}")
-        reply = outcome.done("record_finding", source=src["n"], quote_check=support)
+        reply = outcome.done("record_finding", source=src["n"], quote_check=support,
+                             verified=True)
         if support == "unread":
             reply += " -- The page could not be read, so this finding counts as unverified."
         elif support == "missing":
@@ -553,7 +554,7 @@ Investigate ONE question from the plan.
                                    f"searched and there are none; then call this again and say so."), False)
         self._mark(sid, status="done", summary=str(args.get("summary") or ""),
                    confidence=str(args.get("confidence") or "")[:8])
-        return outcome.done("subquestion_done", question=sid), True
+        return outcome.done("subquestion_done", question=sid, verified=True), True
 
     def _digest(self, findings: list[dict], renumber: dict | None = None, limit: int = 60_000) -> str:
         plan = self._state()["plan"]

@@ -1235,7 +1235,8 @@ class ToolBox:
             return outcome.done("home_computer", online=info["online"],
                                 last_seen_seconds=info["seconds_since_seen"],
                                 accepts_commands=bool(info.get("accept_commands")), can_wake=can_wake,
-                                queued_commands=len(self.state.pending_commands()))
+                                queued_commands=len(self.state.pending_commands()),
+                                verified=True)
         if ctx.get("origin") != "telegram":
             return outcome.failed("home_computer", "background work can never reach the user's computer")
         if ctx.get("tainted"):
@@ -1245,7 +1246,8 @@ class ToolBox:
                 "message"))
         if action == "wake":
             if info["online"]:
-                return outcome.done("home_computer", note="it is already on and connected")
+                return outcome.done("home_computer", note="it is already on and connected",
+                                    verified=True)
             sent = send_wake(wake_cfg)
             self.rt.watch_wake(chat)
             return outcome.started("home_computer", what="wake signal sent", detail=sent,
@@ -1304,13 +1306,14 @@ class ToolBox:
         if task is None:
             return outcome.failed("cloud_jobs", "no such job" if jid else "no job is running")
         if action == "steer":
-            return (outcome.done("cloud_jobs", job_id=task["id"], note_added=True)
+            return (outcome.done("cloud_jobs", job_id=task["id"], note_added=True, verified=True)
                     if rt.tasks.steer(task["id"], a.get("note") or "")
                     else outcome.failed("cloud_jobs", "steer needs a running job and a note"))
         if not rt.tasks.cancel(task["id"], finish=action == "finish"):
             return outcome.failed("cloud_jobs", "that job is not running")
         return (outcome.started("cloud_jobs", job_id=task["id"], note="stopping and writing up what was found")
-                if action == "finish" else outcome.done("cloud_jobs", job_id=task["id"], cancelled=True))
+                if action == "finish" else outcome.done("cloud_jobs", job_id=task["id"],
+                                                        cancelled=True, verified=True))
 
     def _t_schedule(self, a, ctx):
         from core import outcome
@@ -1339,12 +1342,13 @@ class ToolBox:
                                  options={"chat": ctx.get("chat"), "origin": origin,
                                           "notify": "both" if origin == "desk" else "phone"})
             return outcome.done("schedule", id=saved["id"], kind="reminder" if text else "task",
-                                repeats=describe_rule(rule, now.tzinfo), first=f"{first:%Y-%m-%d %H:%M}")
+                                repeats=describe_rule(rule, now.tzinfo), first=f"{first:%Y-%m-%d %H:%M}",
+                                verified=True)
         if action == "remove":
             sid = str(a.get("id") or "").strip()
             found = next((r for r in self.rt.scheduled()
                           if sid and sid in (r["id"], (r.get("options") or {}).get("legacy_id"))), None)
-            return (outcome.done("schedule", removed=sid) if found and routines.remove(found["id"])
+            return (outcome.done("schedule", removed=sid, verified=True) if found and routines.remove(found["id"])
                     else outcome.failed("schedule", "no entry with that id"))
         rows = []
         for r in self.rt.scheduled():
@@ -1370,7 +1374,7 @@ class ToolBox:
             current = self.rt.merge_briefing(dict(current, **changes, updated=time.time()))
         shown = {k: v for k, v in current.items() if k != "updated"}
         return outcome.done("briefing", **{k: (",".join(map(str, v)) if isinstance(v, list) else v)
-                                           for k, v in shown.items()})
+                                           for k, v in shown.items()}, verified=True)
 
     def _t_workspace(self, a, ctx):
         from core import outcome
@@ -1393,13 +1397,13 @@ class ToolBox:
             p = _inside(root, rel)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(str(a.get("content") or ""), encoding="utf-8")
-            return outcome.done("workspace", wrote=rel, bytes=p.stat().st_size)
+            return outcome.done("workspace", wrote=rel, bytes=p.stat().st_size, verified=True)
         if action == "delete":
             p = _inside(root, rel)
             if not p.is_file():
                 return outcome.failed("workspace", "delete takes one existing file")
             p.unlink()
-            return outcome.done("workspace", deleted=rel)
+            return outcome.done("workspace", deleted=rel, verified=True)
         if action == "send":
             p = _inside(root, rel)
             if not p.is_file():
@@ -1426,7 +1430,7 @@ class ToolBox:
         facts.update(disk_free_gb=round(du.free / 2 ** 30, 1), disk_total_gb=round(du.total / 2 ** 30, 1),
                      os=f"{platform.system()} {platform.release()}",
                      running_jobs=self.rt.running_jobs())
-        return outcome.done("server_status", **facts)
+        return outcome.done("server_status", verified=True, **facts)
 
     def _t_manage_monitor(self, a, ctx):
         from actions.background_monitor import add_monitor, list_monitors, remove_monitor

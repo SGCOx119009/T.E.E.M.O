@@ -106,6 +106,39 @@ def get_base_dir():
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent
 
+
+def _execute_planned_tool(
+    name,
+    arguments,
+    action_registry,
+    plugin_registry,
+    context,
+):
+    """Dispatch an approved plan step to an available action or plugin.
+
+    A plan step is not a free pass: the step's tool and arguments go through
+    the same dispatcher-level confirmation as any other call, so a plan cannot
+    become a way around the gate.
+    """
+    from core import action_policy
+    if action_registry.has(name):
+        run = lambda: action_registry.run(name, arguments, context)
+    elif plugin_registry.has(name):
+        run = lambda: plugin_registry.run(
+            name,
+            arguments,
+            player=context.get("player"),
+            session_memory=context.get("session_memory"),
+        )
+    else:
+        return outcome.failed(
+            "task_planner",
+            "the planned tool is not available",
+            tool=name,
+        )
+    return action_policy.dispatch(name, arguments, run)
+
+
 BASE_DIR        = get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 PROMPT_PATH     = BASE_DIR / "core" / "prompt.txt"

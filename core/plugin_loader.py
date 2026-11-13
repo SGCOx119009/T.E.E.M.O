@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from memory.config_manager import get_plugin_enabled, get_plugin_config
+from core import outcome
 
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
@@ -117,16 +118,38 @@ class PluginRegistry:
     def run(self, name: str, parameters: dict, player=None, session_memory=None) -> str:
         rec = self._plugins.get(name)
         if rec is None or not rec.valid:
-            return f"Plugin '{name}' is not available."
+            return outcome.failed(
+                "plugin_loader",
+                "the requested plugin is not available",
+                tool=name,
+            )
+        if not isinstance(parameters, dict):
+            return outcome.failed(
+                "plugin_loader",
+                "plugin parameters must be an object",
+                tool=name,
+            )
         if not get_plugin_enabled(name):
-            return f"The '{name}' plugin is currently disabled."
+            return outcome.failed(
+                "plugin_loader",
+                "the plugin is disabled",
+                tool=name,
+            )
         try:
-            return _call_run(rec.run, parameters, player, session_memory) or "Done."
+            result = _call_run(rec.run, parameters, player, session_memory)
+            return outcome.normalize_dispatch_result(name, result)
         except Exception as e:
-            self._logger(f"Plugin '{name}' crashed during run(): {e}")
-            self._notify(f"Plugin '{name}' failed — see the console for details.")
-            traceback.print_exc()
-            return f"Sir, the '{name}' plugin failed: {e}"
+            # Only the exception TYPE is shown: its message can carry a path,
+            # a token or a query string that must not reach the model.
+            error_type = type(e).__name__
+            self._logger(f"Plugin '{name}' failed ({error_type}).")
+            self._notify(f"Plugin '{name}' failed ({error_type}).")
+            return outcome.failed(
+                "plugin_loader",
+                "the plugin raised an exception",
+                tool=name,
+                error=error_type,
+            )
 
     # -- called by ui.py's settings tab to render per-plugin config forms --
     def settings_schemas(self) -> list[dict]:

@@ -63,11 +63,11 @@ def routines(parameters: dict, player=None) -> str:
                         quiet=a.get("quiet"))
             return outcome.done("routines", id=r["id"], name=r["name"], when=eng.describe(r),
                                 next=datetime.fromtimestamp(r["next_ts"]).strftime("%Y-%m-%d %H:%M")
-                                if r.get("next_ts") else None)
+                                if r.get("next_ts") else None, verified=True)
 
         if action == "quiet_hours":
             value = eng.set_quiet_hours(a.get("between") or "")
-            return outcome.done("routines", quiet_hours=value or "off")
+            return outcome.done("routines", quiet_hours=value or "off", verified=True)
 
         rid = str(a.get("id") or "").strip()
         if not rid and a.get("builtin"):
@@ -99,14 +99,14 @@ def routines(parameters: dict, player=None) -> str:
                 except Exception as e:
                     print(f"[Routines] MORNING BRIEF setting not updated: {e}")
             return outcome.done("routines", id=r["id"], name=r["name"], enabled=r["enabled"],
-                                when=eng.describe(r), changed=",".join(fields))
+                                when=eng.describe(r), changed=",".join(fields), verified=True)
 
         if action == "remove":
-            return (outcome.done("routines", removed=rid) if eng.remove(rid)
+            return (outcome.done("routines", removed=rid, verified=True) if eng.remove(rid)
                     else outcome.failed("routines", "no routine with that id"))
 
         if action == "run_now":
-            return outcome.done("routines", id=rid, result=eng.run_now(rid))
+            return outcome.done("routines", id=rid, result=eng.run_now(rid), verified=True)
 
         return outcome.failed("routines", f"unknown action '{action}'")
     except ValueError as e:

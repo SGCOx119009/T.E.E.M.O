@@ -12,6 +12,7 @@ Install deps:  pip install fastapi "uvicorn[standard]" cryptography
 import asyncio
 import base64
 import hashlib
+import json
 import re
 import secrets
 import socket
@@ -53,6 +54,51 @@ STATIC_DIR  = Path(__file__).parent / "static"
 PORT        = 8000      # HTTP, redirects to SECURE_PORT
 SECURE_PORT = 8001      # HTTPS, the dashboard itself
 MAX_UPLOAD_MB = 500
+
+# ── The command channel has a budget ─────────────────────────────────────────
+# The dashboard is a remote-control channel: anything that can reach it can ask
+# the assistant to do things. Three limits, all of them inherited from the
+# sibling branch's dashboard:
+#
+#   * a command is at most _MAX_COMMAND_CHARS characters / _MAX_COMMAND_BYTES
+#     bytes, and the whole request body at most _MAX_COMMAND_BODY_BYTES — a
+#     phone that sends a megabyte of text gets a 413 instead of a queue full
+#     of noise;
+#   * a client address may send _COMMANDS_PER_MINUTE commands, because a
+#     partner app in a loop is a bug and a flood is an attack, and the two look
+#     the same from here;
+#   * the queue holds _COMMAND_QUEUE_SIZE commands, and a full queue is
+#     refused rather than grown without limit.
+_MAX_COMMAND_CHARS = 4_000
+_MAX_COMMAND_BYTES = 16 * 1024
+_MAX_COMMAND_BODY_BYTES = 32 * 1024
+_COMMANDS_PER_MINUTE = 30
+_COMMAND_QUEUE_SIZE = 100
+
+
+class _CommandThrottle:
+    """Bound remote requests per client address."""
+
+    def __init__(self, limit: int):
+        self._limit = limit
+        self._commands: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def consume(self, who: str) -> bool:
+        now = time.time()
+        with self._lock:
+            for address, timestamps in list(self._commands.items()):
+                active = [t for t in timestamps if now - t < 60.0]
+                if active:
+                    self._commands[address] = active
+                else:
+                    self._commands.pop(address, None)
+            timestamps = self._commands.get(who, [])
+            if len(timestamps) >= self._limit:
+                return False
+            timestamps.append(now)
+            self._commands[who] = timestamps
+            return True
 
 
 def _make_uploads_dir() -> Path:
@@ -727,7 +773,8 @@ class DashboardServer:
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
         self._history: list[dict]         = []
-        self._command_queue               = asyncio.Queue()
+        self._command_queue               = asyncio.Queue(maxsize=_COMMAND_QUEUE_SIZE)
+        self._command_throttle            = _CommandThrottle(_COMMANDS_PER_MINUTE)
         self._wake_callback               = None
         self._connect_callback            = None
         self._pending_keys: dict[str, float] = {}
@@ -750,6 +797,23 @@ class DashboardServer:
         key = ''.join(secrets.choice(_KEY_CHARS) for _ in range(8))
         self._pending_keys[key] = now + expiry_secs
         return key
+
+    @staticmethod
+    def _https_requested() -> bool:
+        """Did the user EXPLICITLY ask for HTTPS?
+
+        False by default — see _ssl_enabled() for why the dashboard speaks
+        plain HTTP until it is told otherwise. True means "dashboard_https" is
+        set in the configuration, and an explicit request is never quietly
+        downgraded to clear HTTP.
+        """
+        try:
+            import json as _json
+            with open(BASE_DIR / "config" / "api_keys.json", "r",
+                      encoding="utf-8") as f:
+                return bool(_json.load(f).get("dashboard_https"))
+        except Exception:
+            return False
 
     @staticmethod
     def _ssl_enabled() -> bool:
@@ -868,6 +932,56 @@ class DashboardServer:
         def _who(req: Request) -> str:
             """The client address a throttle counts against."""
             return (getattr(getattr(req, "client", None), "host", "") or "unknown")
+
+        def _queue_command(text: str, who: str) -> tuple[int, str] | None:
+            """Put a command on the queue, or say why it did not go on.
+
+            The three refusals are different problems with different fixes, so
+            they get different answers: too long is the caller's fault, a full
+            queue is ours, and too many commands is a rate limit the caller
+            should wait out.
+            """
+            if not text:
+                return None
+            if (len(text) > _MAX_COMMAND_CHARS
+                    or len(text.encode("utf-8")) > _MAX_COMMAND_BYTES):
+                return 413, "Command is too long"
+            if self._command_queue.full():
+                return 503, "Command queue is full"
+            if not self._command_throttle.consume(who):
+                return 429, "Too many commands; wait before sending more"
+            try:
+                self._command_queue.put_nowait(text)
+            except asyncio.QueueFull:
+                return 503, "Command queue is full"
+            if self._wake_callback:
+                self._wake_callback()
+            return None
+
+        async def _read_json_object(
+            req: Request, max_bytes: int = _MAX_COMMAND_BODY_BYTES
+        ) -> tuple[dict | None, int | None]:
+            """Read a JSON object, refusing a body that is too large."""
+            content_length = req.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > max_bytes:
+                        return None, 413
+                except ValueError:
+                    return None, 400
+
+            chunks = bytearray()
+            async for chunk in req.stream():
+                chunks.extend(chunk)
+                if len(chunks) > max_bytes:
+                    return None, 413
+            try:
+                body = json.loads(chunks)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return None, 400
+            if not isinstance(body, dict):
+                return None, 400
+            return body, None
 
         @app.get("/login", response_class=HTMLResponse)
         async def login_page():
@@ -1016,19 +1130,29 @@ class DashboardServer:
         async def command(req: Request):
             if not _auth(req):
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
-            body  = await req.json()
+            body, error = await _read_json_object(req)
+            if error is not None:
+                return JSONResponse({"error": "Invalid command request"},
+                                    status_code=error)
             token = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
             enc   = body.get("enc", "")
+            if not isinstance(enc, str):
+                return JSONResponse({"error": "Invalid command request"},
+                                    status_code=400)
             if enc:
                 text = self._decrypt(token, enc)
                 if text is None:
                     return JSONResponse({"error": "Decryption failed"}, status_code=400)
             else:
-                text = (body.get("text") or "").strip()
-            if text:
-                await self._command_queue.put(text)
-                if self._wake_callback:
-                    self._wake_callback()
+                text = body.get("text") or ""
+                if not isinstance(text, str):
+                    return JSONResponse({"error": "Invalid command request"},
+                                        status_code=400)
+                text = text.strip()
+            refused = _queue_command(text, _who(req))
+            if refused:
+                status, message = refused
+                return JSONResponse({"error": message}, status_code=status)
             return JSONResponse({"ok": True})
 
         @app.post("/api/wake")
@@ -1170,14 +1294,46 @@ class DashboardServer:
                     break
             try:
                 while True:
-                    data = await websocket.receive_json()
+                    raw = await websocket.receive_text()
+                    if len(raw.encode("utf-8")) > _MAX_COMMAND_BODY_BYTES:
+                        await websocket.send_json(
+                            {"type": "error", "error": "Command request is too large"}
+                        )
+                        continue
+                    try:
+                        data = json.loads(raw)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        await websocket.send_json(
+                            {"type": "error", "error": "Invalid command request"}
+                        )
+                        continue
+                    if not isinstance(data, dict):
+                        await websocket.send_json(
+                            {"type": "error", "error": "Invalid command request"}
+                        )
+                        continue
                     if data.get("type") == "command":
                         enc = data.get("enc", "")
-                        t   = self._decrypt(tok, enc) if enc else (data.get("text") or "").strip()
-                        if t:
-                            await self._command_queue.put(t)
-                            if self._wake_callback:
-                                self._wake_callback()
+                        if not isinstance(enc, str):
+                            await websocket.send_json(
+                                {"type": "error", "error": "Invalid command request"}
+                            )
+                            continue
+                        t = self._decrypt(tok, enc) if enc else (data.get("text") or "")
+                        if not isinstance(t, str):
+                            await websocket.send_json(
+                                {"type": "error", "error": "Invalid command request"}
+                            )
+                            continue
+                        t = t.strip()
+                        refused = _queue_command(
+                            t, websocket.client.host if websocket.client else "unknown"
+                        )
+                        if refused:
+                            _, error = refused
+                            await websocket.send_json(
+                                {"type": "error", "error": error}
+                            )
             except WebSocketDisconnect:
                 pass
             finally:
@@ -1237,14 +1393,26 @@ class DashboardServer:
 
         # Only make a certificate if HTTPS was actually asked for. Generating
         # one nobody uses just leaves a private key on disk.
-        try:
-            import json as _json
-            with open(BASE_DIR / "config" / "api_keys.json", "r",
-                      encoding="utf-8") as f:
-                if _json.load(f).get("dashboard_https"):
-                    _ensure_certs()
-        except Exception:
-            pass
+        #
+        # HTTPS IS OPT-IN HERE, and the default is plain HTTP on purpose: a
+        # self-signed certificate makes a phone's browser show a full-page
+        # warning with no way past it, which is a dashboard nobody can reach —
+        # see _ssl_enabled() for the full argument.
+        #
+        # But an EXPLICIT request is never downgraded. If the user asked for
+        # HTTPS and the certificate cannot be made, the dashboard does not
+        # start: it would otherwise carry commands and tokens across the
+        # network in clear, which is not what was asked for.
+        use_tls = self._https_requested()
+        if use_tls and not _ensure_certs():
+            self._bind_error = (
+                "HTTPS was requested but the certificate could not be created; "
+                "the dashboard was not started to avoid exposing commands and "
+                "tokens over HTTP. Set \"dashboard_https\": false to opt into "
+                "unencrypted HTTP."
+            )
+            print(f"[Dashboard] {self._bind_error}")
+            return
 
         use_ssl  = self._ssl_enabled()
         ssl_key  = BASE_DIR / "config" / "certs" / "jarvis.key"

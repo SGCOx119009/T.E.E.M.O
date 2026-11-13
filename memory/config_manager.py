@@ -1,7 +1,10 @@
 import functools
+import hashlib
 import json
 import os
+import platform
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -14,6 +17,12 @@ def get_base_dir() -> Path:
 BASE_DIR    = get_base_dir()
 CONFIG_DIR  = BASE_DIR / "config"
 CONFIG_FILE = CONFIG_DIR / "api_keys.json"
+
+# The secure store is the Windows Credential Locker (via `keyring`). The service
+# name is the product's own identity — never a predecessor's — so the entries in
+# the vault belong to T.E.E.M.O. and to nothing else.
+_KEYRING_SERVICE = "T.E.E.M.O."
+_KEYRING_ACCOUNT = "gemini_api_key"
 
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -86,16 +95,259 @@ def _read_for_write() -> dict:
         pass
     return {}
 
-@_locked
-def save_api_keys(gemini_api_key: str) -> None:
+
+# ── Secure credential storage ───────────────────────────────────────────────
+# A key typed into the settings panel is a long-lived secret. In a JSON file
+# next to the application it is one backup, one sync folder or one stray
+# screenshot away from being exposed. The Credential Locker is what Windows
+# offers for this, and `keyring` is how Python reaches it.
+#
+# There is NO plaintext fallback. If the vault is unavailable, the honest answer
+# is that the credential cannot be stored — not that it can be stored somewhere
+# less safe and mentioned in a log.
+_CREDENTIAL_LOCK = threading.RLock()
+
+
+def _secure_keyring():
+    """Return a credential backend that meets this platform's storage policy."""
+    try:
+        import keyring
+
+        backend = keyring.get_keyring()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Secure credential storage is unavailable ({type(exc).__name__})."
+        ) from exc
+
+    backend_type = type(backend)
+    if backend_type.__name__.casefold().startswith("plaintext"):
+        raise RuntimeError("Plaintext credential backends are not supported.")
+    if platform.system() == "Windows" and backend_type.__name__ != "WinVaultKeyring":
+        raise RuntimeError(
+            "Windows credential storage requires the Windows Credential Locker."
+        )
+    priority = getattr(backend, "priority", None)
+    if not isinstance(priority, (int, float)) or priority < 0:
+        raise RuntimeError("The configured secure credential backend is unavailable.")
+    return keyring
+
+
+def _read_secure_secret(account: str) -> str | None:
+    keyring = _secure_keyring()
+    try:
+        return keyring.get_password(_KEYRING_SERVICE, account)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Secure credential lookup failed ({type(exc).__name__})."
+        ) from exc
+
+
+def _store_secure_secret(account: str, secret: str) -> None:
+    keyring = _secure_keyring()
+    try:
+        keyring.set_password(_KEYRING_SERVICE, account, secret)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Secure credential storage failed ({type(exc).__name__})."
+        ) from exc
+
+
+def _remove_secure_secret(account: str) -> None:
+    keyring = _secure_keyring()
+    try:
+        keyring.delete_password(_KEYRING_SERVICE, account)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Secure credential removal failed ({type(exc).__name__})."
+        ) from exc
+
+
+def _read_secure_key() -> str | None:
+    return _read_secure_secret(_KEYRING_ACCOUNT)
+
+
+def _store_secure_key(key: str) -> None:
+    _store_secure_secret(_KEYRING_ACCOUNT, key)
+
+
+def _remove_secure_key() -> None:
+    _remove_secure_secret(_KEYRING_ACCOUNT)
+
+
+def _restore_secure_secret(account: str, previous: str | None) -> None:
+    """Put the secure store back the way it was, after a failed write."""
+    if previous:
+        _store_secure_secret(account, previous)
+        return
+    current = _read_secure_secret(account)
+    if current:
+        _remove_secure_secret(account)
+
+
+def _invalidate_gemini_key_cache() -> None:
+    """A newly stored key must reach the live client, not the cached one."""
+    module = sys.modules.get("core.gemini")
+    invalidate = getattr(module, "invalidate_api_key_cache", None)
+    if callable(invalidate):
+        invalidate()
+
+
+def _write_api_config(data: dict) -> None:
+    """Write the configuration file atomically.
+
+    The credential path uses this rather than `_write_config` because a failed
+    write here has to leave the previous file AND the previous credential
+    intact — the two are restored together, never one without the other.
+    """
     ensure_config_dir()
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=CONFIG_DIR,
+            prefix=".api_keys.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(json.dumps(data, indent=2))
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        for attempt in range(20):
+            try:
+                os.replace(temp_path, CONFIG_FILE)
+                return
+            except PermissionError:
+                # Windows: an antivirus scan or a reader can hold the file for
+                # a moment. Worth a short wait, never a lost setting.
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
-    data = _read_for_write()
 
-    data["gemini_api_key"] = gemini_api_key.strip()
-    if data["gemini_api_key"]:
-        data.pop("local_only", None)     # a key given is a choice to use Gemini again
-    _write_config(data)
+def _read_api_config_for_update() -> dict:
+    """The configuration file, read strictly for a credential operation.
+
+    Unlike `_read_for_write` this does NOT repair a damaged file by replacing
+    it: a file that cannot be parsed may still hold the user's key, and the
+    honest response is to say so.
+    """
+    if not CONFIG_FILE.exists():
+        return {}
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("The API configuration file is unreadable.") from exc
+    if not isinstance(data, dict):
+        raise ValueError("The API configuration must contain a JSON object.")
+    return data
+
+
+def _provider_key_account(provider_id: str) -> str:
+    provider = str(provider_id or "").strip()
+    if not provider or len(provider) > 128 or not all(
+        char.isalnum() or char in "._-@" for char in provider
+    ):
+        raise ValueError("Provider identifier is invalid.")
+    return f"provider:{provider}:api_key"
+
+
+def _migrate_provider_keys(data: dict) -> dict:
+    """Move provider API keys out of the JSON file and into the secure store."""
+    providers = data.get("providers")
+    if not isinstance(providers, dict):
+        return {}
+    creds = providers.get("creds")
+    if not isinstance(creds, dict):
+        return dict(providers)
+
+    updated_providers = dict(providers)
+    updated_creds = dict(creds)
+    staged: list[tuple[str, str]] = []
+    changed = False
+    try:
+        for provider_id, values in creds.items():
+            if not isinstance(values, dict) or "api_key" not in values:
+                continue
+            account = _provider_key_account(provider_id)
+            legacy_key = values.get("api_key")
+            if legacy_key is not None and not isinstance(legacy_key, str):
+                raise ValueError("A provider API key must be text.")
+            stored_key = _read_secure_secret(account)
+            if not stored_key and legacy_key:
+                staged.append((account, legacy_key))
+                _store_secure_secret(account, legacy_key)
+            clean_values = dict(values)
+            clean_values.pop("api_key", None)
+            updated_creds[provider_id] = clean_values
+            changed = True
+
+        if changed:
+            updated_providers["creds"] = updated_creds
+            updated_data = dict(data)
+            updated_data["providers"] = updated_providers
+            _write_api_config(updated_data)
+    except Exception as exc:
+        rollback_errors = []
+        for account, secret in reversed(staged):
+            try:
+                if _read_secure_secret(account) == secret:
+                    _remove_secure_secret(account)
+            except Exception as rollback_exc:
+                rollback_errors.append(type(rollback_exc).__name__)
+        if rollback_errors:
+            raise RuntimeError(
+                "Provider credential migration failed and secure-store "
+                f"rollback was incomplete ({', '.join(rollback_errors)})."
+            ) from exc
+        if isinstance(exc, ValueError):
+            raise
+        raise RuntimeError(
+            "Provider credential migration failed; newly stored credentials "
+            "were rolled back and legacy values remain."
+        ) from exc
+    return updated_providers
+
+
+def save_api_keys(gemini_api_key: str) -> None:
+    """Store the Gemini key in the Credential Locker, never in the file."""
+    if not isinstance(gemini_api_key, str):
+        raise ValueError("Gemini API key must be text.")
+    key = gemini_api_key.strip()
+    if not key:
+        raise ValueError("Gemini API key cannot be empty")
+
+    with _CREDENTIAL_LOCK:
+        data = _read_api_config_for_update()
+        previous = _read_secure_key()
+        _store_secure_key(key)
+        data.pop("gemini_api_key", None)
+        if key:
+            data.pop("local_only", None)  # a key given is a choice to use Gemini again
+        try:
+            _write_api_config(data)
+        except Exception as exc:
+            try:
+                _restore_secure_secret(_KEYRING_ACCOUNT, previous)
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    "Configuration could not be updated and the previous "
+                    "credential could not be restored "
+                    f"({type(rollback_exc).__name__})."
+                ) from exc
+            raise RuntimeError(
+                "Configuration could not be updated; the previous credential "
+                "was restored."
+            ) from exc
+        _invalidate_gemini_key_cache()
+
 
 def load_api_keys() -> dict:
     if not CONFIG_FILE.exists():
@@ -113,8 +365,71 @@ def load_api_keys() -> dict:
             time.sleep(0.05)
     return {}
 
+
 def get_gemini_key() -> str | None:
-    return load_api_keys().get("gemini_api_key")
+    """The Gemini key, from the Credential Locker.
+
+    A key left in the file by an older version is moved into the vault the
+    first time it is read, and removed from the file — a migration that can
+    fail loudly rather than quietly leaving a secret in plain text.
+    """
+    with _CREDENTIAL_LOCK:
+        secure_key = _read_secure_key()
+        data = _read_api_config_for_update()
+        legacy_key = data.get("gemini_api_key")
+        if legacy_key is not None and not isinstance(legacy_key, str):
+            raise ValueError("The legacy Gemini API key must be text.")
+
+        if secure_key:
+            if legacy_key is not None:
+                data.pop("gemini_api_key", None)
+                try:
+                    _write_api_config(data)
+                except Exception as exc:
+                    raise RuntimeError(
+                        "A stale plaintext Gemini credential could not be "
+                        "removed from the configuration file."
+                    ) from exc
+            return secure_key
+        if not legacy_key:
+            return None
+
+        _store_secure_key(legacy_key)
+        data.pop("gemini_api_key", None)
+        try:
+            _write_api_config(data)
+        except Exception as exc:
+            try:
+                if _read_secure_key() == legacy_key:
+                    _remove_secure_key()
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    "Legacy credential cleanup failed and secure-store "
+                    f"rollback was incomplete ({type(rollback_exc).__name__})."
+                ) from exc
+            raise RuntimeError(
+                "Legacy credential cleanup failed; the newly stored key was "
+                "rolled back and the legacy copy remains."
+            ) from exc
+        return legacy_key
+
+
+def delete_gemini_key() -> bool:
+    """Remove the Gemini key from the vault and from the legacy file copy."""
+    with _CREDENTIAL_LOCK:
+        data = _read_api_config_for_update()
+        removed = "gemini_api_key" in data
+        secure_key = _read_secure_key()
+        if removed:
+            data.pop("gemini_api_key", None)
+            _write_api_config(data)
+        if secure_key:
+            _remove_secure_key()
+            removed = True
+        if removed:
+            _invalidate_gemini_key_cache()
+        return removed
+
 
 def is_configured() -> bool:
     key = get_gemini_key()
@@ -399,11 +714,128 @@ def get_plugin_enabled(plugin_name: str) -> bool:
 # drop-in model intact. Values live under plugin_config[<namespace>][<key>].
 # A namespace defaults to the plugin name, but a suite of plugins (e.g. the
 # several printer plugins) can share ONE namespace.
-def get_plugin_config(namespace: str) -> dict:
+#
+# A field whose NAME or declared TYPE says it is a secret (password, token,
+# api_key, private_key...) does not live in this file at all: it goes to the
+# Credential Locker, and only the fact that it exists is remembered here.
+def _plugin_secret_account(namespace: str, key: str) -> str:
+    if not isinstance(namespace, str) or not namespace.strip() or len(namespace) > 256:
+        raise ValueError("Plugin settings namespace is invalid.")
+    if not isinstance(key, str) or not key.strip() or len(key) > 128:
+        raise ValueError("Plugin secret field is invalid.")
+    value = f"{namespace}\0{key}".encode("utf-8")
+    return "plugin:" + hashlib.sha256(value).hexdigest()
+
+
+def _normalize_plugin_secret_keys(secret_keys) -> set[str]:
+    if secret_keys is None:
+        return set()
+    if isinstance(secret_keys, (str, bytes)):
+        raise ValueError("Plugin secret fields must be a sequence of names.")
+    keys = set()
+    for key in secret_keys:
+        if not isinstance(key, str) or not key.strip() or len(key) > 128:
+            raise ValueError("Plugin secret field is invalid.")
+        keys.add(key)
+    return keys
+
+
+_SECRET_FIELD_MARKERS = (
+    "password", "passwd", "secret", "token", "credential", "api_key",
+    "authorization", "private_key", "otp",
+)
+
+
+def is_plugin_secret_field(key: object, field_type: object = None) -> bool:
+    """Whether a plugin setting's key or declared type identifies a secret."""
+    for candidate in (key, field_type):
+        if not isinstance(candidate, str):
+            continue
+        normalized = candidate.casefold().replace("-", "_")
+        if any(marker in normalized for marker in _SECRET_FIELD_MARKERS):
+            return True
+    return False
+
+
+def _looks_like_secret_field(key: object) -> bool:
+    return is_plugin_secret_field(key)
+
+
+def _load_plugin_config(namespace: str, secret_keys=()) -> dict:
+    """Read a namespace's settings, moving any secret field into the vault."""
+    with _CREDENTIAL_LOCK:
+        data = _read_api_config_for_update()
+        stored = data.get("plugin_config")
+        stored = stored if isinstance(stored, dict) else {}
+        values = stored.get(namespace)
+        values = dict(values) if isinstance(values, dict) else {}
+
+        secret_fields = data.get("plugin_secret_fields")
+        secret_fields = secret_fields if isinstance(secret_fields, dict) else {}
+        known = secret_fields.get(namespace, [])
+        known = set(known) if isinstance(known, list) else set()
+        requested = _normalize_plugin_secret_keys(secret_keys)
+        inferred = {
+            key for key, value in values.items()
+            if _looks_like_secret_field(key)
+            and (isinstance(value, str) or value is None)
+        }
+        all_secrets = known | requested | inferred
+        staged: list[tuple[str, str]] = []
+        changed = all_secrets != known and bool(requested)
+
+        try:
+            for key in all_secrets:
+                account = _plugin_secret_account(namespace, key)
+                legacy = values.pop(key, None)
+                if legacy is not None and not isinstance(legacy, str):
+                    raise ValueError("A plugin secret must be text.")
+                secret = _read_secure_secret(account)
+                if not secret and legacy:
+                    staged.append((account, legacy))
+                    _store_secure_secret(account, legacy)
+                    secret = legacy
+                if secret:
+                    values[key] = secret
+                if legacy is not None:
+                    changed = True
+
+            if changed:
+                saved_values = dict(values)
+                for key in all_secrets:
+                    saved_values.pop(key, None)
+                updated_stored = dict(stored)
+                updated_stored[namespace] = saved_values
+                updated_fields = dict(secret_fields)
+                updated_fields[namespace] = sorted(all_secrets)
+                data["plugin_config"] = updated_stored
+                data["plugin_secret_fields"] = updated_fields
+                _write_api_config(data)
+        except Exception as exc:
+            rollback_errors = []
+            for account, secret in reversed(staged):
+                try:
+                    if _read_secure_secret(account) == secret:
+                        _remove_secure_secret(account)
+                except Exception as rollback_exc:
+                    rollback_errors.append(type(rollback_exc).__name__)
+            if rollback_errors:
+                raise RuntimeError(
+                    "Plugin credential migration failed and secure-store "
+                    f"rollback was incomplete ({', '.join(rollback_errors)})."
+                ) from exc
+            if isinstance(exc, ValueError):
+                raise
+            raise RuntimeError(
+                "Plugin credential migration failed; newly stored credentials "
+                "were rolled back and legacy values remain."
+            ) from exc
+        return values
+
+
+def get_plugin_config(namespace: str, secret_keys=()) -> dict:
     """All stored values for a namespace (empty dict if none set yet)."""
-    cfg = load_api_keys().get("plugin_config")
-    val = cfg.get(namespace) if isinstance(cfg, dict) else None
-    return dict(val) if isinstance(val, dict) else {}
+    return _load_plugin_config(namespace, secret_keys)
 
 
 def get_plugin_setting(namespace: str, key: str, default=None):
@@ -411,22 +843,80 @@ def get_plugin_setting(namespace: str, key: str, default=None):
     return get_plugin_config(namespace).get(key, default)
 
 
-@_locked
-def save_plugin_config(namespace: str, values: dict) -> None:
+def save_plugin_config(namespace: str, values: dict, secret_keys=()) -> None:
     """Merge `values` into a namespace's stored config (read-modify-write, like
     every other helper here). Only the provided keys are touched."""
-    ensure_config_dir()
-    data = _read_for_write()
-    pc = data.get("plugin_config")
-    if not isinstance(pc, dict):
-        pc = {}
-    cur = pc.get(namespace)
-    if not isinstance(cur, dict):
-        cur = {}
-    cur.update(values)
-    pc[namespace] = cur
-    data["plugin_config"] = pc
-    _write_config(data)
+    with _CREDENTIAL_LOCK:
+        secret_fields = _normalize_plugin_secret_keys(secret_keys)
+        updates = dict(values or {})
+        inferred = {
+            key for key, value in updates.items()
+            if _looks_like_secret_field(key)
+            and (isinstance(value, str) or value is None)
+        }
+        secret_fields |= inferred
+        _load_plugin_config(namespace, secret_fields)
+        data = _read_api_config_for_update()
+        pc = data.get("plugin_config")
+        pc = dict(pc) if isinstance(pc, dict) else {}
+        cur = pc.get(namespace)
+        cur = dict(cur) if isinstance(cur, dict) else {}
+        fields = data.get("plugin_secret_fields")
+        fields = dict(fields) if isinstance(fields, dict) else {}
+        known = fields.get(namespace, [])
+        known = set(known) if isinstance(known, list) else set()
+        all_secrets = known | secret_fields
+        staged: list[tuple[str, str | None]] = []
+        removals: list[str] = []
+
+        try:
+            for key in all_secrets:
+                if key not in updates:
+                    continue
+                new_secret = updates.pop(key)
+                if new_secret is None:
+                    new_secret = ""
+                if not isinstance(new_secret, str):
+                    raise ValueError("A plugin secret must be text.")
+                new_secret = new_secret.strip()
+                account = _plugin_secret_account(namespace, key)
+                previous = _read_secure_secret(account)
+                if new_secret:
+                    if new_secret != previous:
+                        staged.append((account, previous))
+                        _store_secure_secret(account, new_secret)
+                elif previous:
+                    removals.append(account)
+
+            cur.update(updates)
+            for key in all_secrets:
+                cur.pop(key, None)
+            pc[namespace] = cur
+            fields[namespace] = sorted(all_secrets)
+            data["plugin_config"] = pc
+            data["plugin_secret_fields"] = fields
+            _write_api_config(data)
+        except Exception as exc:
+            rollback_errors = []
+            for account, previous in reversed(staged):
+                try:
+                    _restore_secure_secret(account, previous)
+                except Exception as rollback_exc:
+                    rollback_errors.append(type(rollback_exc).__name__)
+            if rollback_errors:
+                raise RuntimeError(
+                    "Plugin configuration failed and credential rollback "
+                    f"was incomplete ({', '.join(rollback_errors)})."
+                ) from exc
+            if isinstance(exc, ValueError):
+                raise
+            raise RuntimeError(
+                "Plugin configuration failed; prior credentials were restored."
+            ) from exc
+
+        for account in removals:
+            if _read_secure_secret(account):
+                _remove_secure_secret(account)
 
 
 @_locked
@@ -498,9 +988,15 @@ def _upgrade_ids(block: dict) -> dict:
 
 
 def get_providers() -> dict:
-    """The whole providers block, or an empty dict."""
-    val = load_api_keys().get("providers")
-    return _upgrade_ids(dict(val)) if isinstance(val, dict) else {}
+    """The whole providers block, or an empty dict.
+
+    Reading it also migrates any provider key still sitting in the JSON file
+    into the Credential Locker, and removes it from the file.
+    """
+    with _CREDENTIAL_LOCK:
+        data = _read_api_config_for_update()
+        migrated = _migrate_provider_keys(data)
+        return _upgrade_ids(dict(migrated)) if isinstance(migrated, dict) else {}
 
 
 def get_provider_mode() -> str:
@@ -512,9 +1008,14 @@ def get_provider_mode() -> str:
 
 def get_provider_config(provider_id: str) -> dict:
     """Stored settings for one provider — address, model, key, limits."""
+    account = _provider_key_account(provider_id)
     creds = get_providers().get("creds")
     val = creds.get(provider_id) if isinstance(creds, dict) else None
-    return dict(val) if isinstance(val, dict) else {}
+    config = dict(val) if isinstance(val, dict) else {}
+    secret = _read_secure_secret(account)
+    if secret:
+        config["api_key"] = secret
+    return config
 
 
 def get_pipeline() -> dict:
@@ -552,20 +1053,118 @@ def save_provider_mode(mode: str) -> None:
                      else PROVIDER_MODE_GEMINI)
 
 
-@_locked
 def save_provider_config(provider_id: str, values: dict) -> None:
     """Merge settings for one provider. Only the given keys are touched, so the
-    panel can save one field without reading and rewriting the rest."""
-    p = get_providers()
-    creds = p.get("creds")
-    if not isinstance(creds, dict):
-        creds = {}
-    cur = creds.get(provider_id)
-    cur = dict(cur) if isinstance(cur, dict) else {}
-    cur.update(values or {})
-    creds[provider_id] = cur
-    p["creds"] = creds
-    _patch_config(providers=p)
+    panel can save one field without reading and rewriting the rest.
+
+    The API key goes to the Credential Locker; the rest stays in the file.
+    """
+    _save_provider_configs({provider_id: values})
+
+
+def _save_provider_configs(provider_values: dict, block_updates: dict | None = None) -> None:
+    with _CREDENTIAL_LOCK:
+        get_providers()
+        data = _read_api_config_for_update()
+        block = data.get("providers")
+        block = _upgrade_ids(dict(block)) if isinstance(block, dict) else {}
+        creds = block.get("creds")
+        creds = dict(creds) if isinstance(creds, dict) else {}
+        staged: list[tuple[str, str | None]] = []
+        removals: list[str] = []
+
+        try:
+            for provider_id, values in provider_values.items():
+                account = _provider_key_account(provider_id)
+                if not isinstance(values, dict):
+                    raise ValueError("Provider settings must be an object.")
+                updates = dict(values)
+                if "api_key" in updates:
+                    new_key = updates.pop("api_key")
+                    if new_key is None:
+                        new_key = ""
+                    if not isinstance(new_key, str):
+                        raise ValueError("A provider API key must be text.")
+                    new_key = new_key.strip()
+                    previous = _read_secure_secret(account)
+                    if new_key:
+                        if new_key != previous:
+                            staged.append((account, previous))
+                            _store_secure_secret(account, new_key)
+                    elif previous:
+                        removals.append(account)
+
+                current = creds.get(provider_id)
+                current = dict(current) if isinstance(current, dict) else {}
+                current.pop("api_key", None)
+                current.update(updates)
+                creds[provider_id] = current
+
+            block["creds"] = creds
+            block.update(block_updates or {})
+            data["providers"] = block
+            _write_api_config(data)
+        except Exception as exc:
+            rollback_errors = []
+            for account, previous in reversed(staged):
+                try:
+                    _restore_secure_secret(account, previous)
+                except Exception as rollback_exc:
+                    rollback_errors.append(type(rollback_exc).__name__)
+            if rollback_errors:
+                raise RuntimeError(
+                    "Provider configuration failed and credential rollback "
+                    f"was incomplete ({', '.join(rollback_errors)})."
+                ) from exc
+            if isinstance(exc, ValueError):
+                raise
+            raise RuntimeError(
+                "Provider configuration failed; prior credentials were restored."
+            ) from exc
+
+        for account in removals:
+            if _read_secure_secret(account):
+                _remove_secure_secret(account)
+
+
+def delete_provider_credentials(provider_id: str) -> bool:
+    """Delete one provider's stored credentials and disable its selection."""
+    provider = str(provider_id or "").strip()
+    if not provider:
+        return False
+    account = _provider_key_account(provider)
+    with _CREDENTIAL_LOCK:
+        get_providers()
+        data = _read_api_config_for_update()
+        block = data.get("providers")
+        block = _upgrade_ids(dict(block)) if isinstance(block, dict) else {}
+        changed = False
+        creds = block.get("creds")
+        if isinstance(creds, dict) and provider in creds:
+            creds = dict(creds)
+            creds.pop(provider, None)
+            block["creds"] = creds
+            changed = True
+        if block.get("sidecar") == provider:
+            block["sidecar"] = ""
+            changed = True
+        pipeline = block.get("pipeline")
+        if isinstance(pipeline, dict):
+            pipeline = dict(pipeline)
+            for slot, selected in tuple(pipeline.items()):
+                if selected == provider:
+                    pipeline[slot] = ""
+                    changed = True
+            block["pipeline"] = pipeline
+
+        secure_key = _read_secure_secret(account)
+        if changed:
+            data["providers"] = block
+            _write_api_config(data)
+        if secure_key:
+            _remove_secure_secret(account)
+            changed = True
+        return changed
 
 
 @_locked
@@ -633,36 +1232,22 @@ def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
     `None` leaves a section alone; `creds` is merged per provider so a panel
     that only edited one does not have to send the others.
     """
-    ensure_config_dir()
-    data = _read_for_write()
-
-    block = data.get("providers")
-    block = _upgrade_ids(dict(block)) if isinstance(block, dict) else {}
-
+    block_updates = {}
     if mode is not None:
         m = str(mode).strip().lower()
-        block["mode"] = m if m in (PROVIDER_MODE_GEMINI,
-                                   PROVIDER_MODE_PIPELINE) else PROVIDER_MODE_GEMINI
+        block_updates["mode"] = (m if m in (PROVIDER_MODE_GEMINI,
+                                            PROVIDER_MODE_PIPELINE)
+                                 else PROVIDER_MODE_GEMINI)
     if pipeline is not None:
-        current = block.get("pipeline")
+        current = get_providers().get("pipeline")
         current = dict(current) if isinstance(current, dict) else {}
         current.update({k: str(v or "").strip() for k, v in pipeline.items()})
-        block["pipeline"] = current
-    if creds is not None:
-        store = block.get("creds")
-        store = dict(store) if isinstance(store, dict) else {}
-        for pid, values in (creds or {}).items():
-            one = store.get(pid)
-            one = dict(one) if isinstance(one, dict) else {}
-            one.update(values or {})
-            store[pid] = one
-        block["creds"] = store
+        block_updates["pipeline"] = current
     if sidecar is not None:
-        block["sidecar"] = str(sidecar or "").strip()
+        block_updates["sidecar"] = str(sidecar or "").strip()
     if sidecar_first is not None:
-        block["sidecar_first"] = bool(sidecar_first)
+        block_updates["sidecar_first"] = bool(sidecar_first)
     if coding is not None:
-        block["coding"] = str(coding or "").strip()
+        block_updates["coding"] = str(coding or "").strip()
 
-    data["providers"] = block
-    _write_config(data)
+    _save_provider_configs(creds or {}, block_updates)

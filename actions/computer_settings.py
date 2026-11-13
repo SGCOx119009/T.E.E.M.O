@@ -1089,7 +1089,7 @@ def computer_settings(
         enter_after = str(params.get("press_enter", "false")).lower() in ("true", "1", "yes")
         type_text(text, press_enter_after=enter_after)
         return outcome.done("computer_settings", wanted=action,
-                            typed=text[:60])
+                            typed=text[:60], verified=True)
 
     if action == "press_key":
         key = str(value or params.get("key", "")).strip()
@@ -1100,13 +1100,13 @@ def computer_settings(
         for _ in range(times):
             press_key(key)
         return outcome.done("computer_settings", wanted=action, key=key,
-                            times=times if times > 1 else None)
+                            times=times if times > 1 else None, verified=True)
 
     if action in ("reload_n", "refresh_n", "reload_page_n"):
         try:
             reload_page_n(int(value or 1))
             return outcome.done("computer_settings", wanted=action,
-                                times=value or 1)
+                                times=value or 1, verified=True)
         except Exception as e:
             return outcome.failed("computer_settings",
                                   f"the reload failed: {e}", wanted=action)
@@ -1119,7 +1119,8 @@ def computer_settings(
             notches = max(1, round(notches / 120))
         notches = max(1, min(60, notches))
         (scroll_up if action == "scroll_up" else scroll_down)(notches)
-        return outcome.done("computer_settings", wanted=action, notches=notches)
+        return outcome.done("computer_settings", wanted=action, notches=notches,
+                            verified=True)
 
     if action in ("brightness_set", "set_brightness"):
         target = _number(value)
@@ -1287,7 +1288,7 @@ def computer_settings(
                             **{kind: now}, changed_by=step, verified=True)
 
     return outcome.done("computer_settings", wanted=action,
-                        times=times if times > 1 else None)
+                        times=times if times > 1 else None, verified=True)
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────

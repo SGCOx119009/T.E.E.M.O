@@ -220,7 +220,7 @@ class TaskTools:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(f"- [{time.strftime('%H:%M')}] {text}\n")
             count = sum(1 for _ in path.open(encoding="utf-8"))
-            return outcome.done("notes", added=True, total_notes=count)
+            return outcome.done("notes", added=True, total_notes=count, verified=True)
         if not path.exists():
             return "No notes yet."
         return path.read_text(encoding="utf-8")[-60_000:]
@@ -232,4 +232,5 @@ class TaskTools:
         target = _inside(self.workdir / "files", str(args.get("path") or "").strip() or "output.txt")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        return outcome.done("write_file", saved=str(target), bytes=target.stat().st_size)
+        return outcome.done("write_file", saved=str(target), bytes=target.stat().st_size,
+                            verified=True)

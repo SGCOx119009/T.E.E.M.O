@@ -636,7 +636,13 @@ def computer_control(
             secs = float(params.get("seconds", 1.0))
             secs = min(secs, 30.0)
             time.sleep(secs)
-            return f"Waited {secs}s"
+            return outcome.done(
+                "computer_control",
+                action="wait",
+                duration_seconds=secs,
+                evidence="wait completed",
+                verified=True,
+            )
 
         if action == "clear_field":
             return _clear_field()

@@ -95,12 +95,14 @@ def background_tasks(parameters: dict, player=None) -> str:
         return outcome.done("background_tasks", task_id=task["id"], status=task["status"],
                             agent=task["agent"], title=task["title"], time=_minutes(task),
                             rounds=f"{task['used']['rounds']}/{task['budget']['rounds']}",
-                            recent=" | ".join(recent) or None, error=task.get("error") or None)
+                            recent=" | ".join(recent) or None, error=task.get("error") or None,
+                            verified=True)
     if action == "result":
         if task["status"] != "done":
             return outcome.done("background_tasks", task_id=task["id"], status=task["status"],
-                                note="not finished yet")
-        return (outcome.done("background_tasks", task_id=task["id"], report=task.get("report") or None)
+                                note="not finished yet", verified=True)
+        return (outcome.done("background_tasks", task_id=task["id"], report=task.get("report") or None,
+                             verified=True)
                 + "\n" + outcome.untrusted("task-result", (task.get("result") or "")[:12_000]))
     if action == "finish":
         ok = eng.cancel(task["id"], finish=True)
@@ -109,11 +111,11 @@ def background_tasks(parameters: dict, player=None) -> str:
                 if ok else outcome.failed("background_tasks", "that task is not running"))
     if action == "cancel":
         ok = eng.cancel(task["id"])
-        return (outcome.done("background_tasks", task_id=task["id"], cancelled=True)
+        return (outcome.done("background_tasks", task_id=task["id"], cancelled=True, verified=True)
                 if ok else outcome.failed("background_tasks", "that task is not running"))
     if action == "steer":
         ok = eng.steer(task["id"], a.get("note") or "")
-        return (outcome.done("background_tasks", task_id=task["id"], note_added=True)
+        return (outcome.done("background_tasks", task_id=task["id"], note_added=True, verified=True)
                 if ok else outcome.failed("background_tasks", "needs a running task and a note"))
     return outcome.failed("background_tasks", f"unknown action '{action}'")
 

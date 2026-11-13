@@ -20,8 +20,9 @@ THE DESIGN HERE
       1. An action calls `request(...)` with a callable that does the real work.
       2. This module hands the UI a banner with CONFIRM / CANCEL and returns
          IMMEDIATELY with a sentence for the model to say out loud.
-      3. If — and only if — the user presses CONFIRM, the UI calls `resolve()`,
-         which runs the stored callable off the Qt thread.
+      3. If — and only if — the user presses CONFIRM or an opted-in voice
+         handler recognizes an explicit approval, the action runs off the
+         Qt thread.
 
     Nothing blocks. The model keeps talking while the banner is up, so this
     costs no latency at all; in fact it is cheaper than the old gate, which
@@ -38,12 +39,16 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
+
+from core import outcome, tool_audit
 
 # A pending confirmation is abandoned after this long. Chosen to outlast a
 # normal "hang on, let me look at the screen" pause without leaving a live
 # shutdown button sitting on the HUD for the rest of the day.
 TIMEOUT_SECONDS = 90.0
+MAX_TITLE_LENGTH = 240
+MAX_DETAIL_LENGTH = 20_000
 
 
 @dataclass
@@ -53,6 +58,16 @@ class _Pending:
     detail:  str
     run:     Callable[[], str]
     at:      float
+    voice_handler: Optional[Callable[[str], "VoiceDecision"]] = None
+    button_enabled: bool = True
+
+
+@dataclass(frozen=True)
+class VoiceDecision:
+    action: Literal["accept", "cancel", "update", "ignore"]
+    title: str = ""
+    detail: str = ""
+    button_enabled: bool = True
 
 
 _pending: Optional[_Pending] = None
@@ -79,7 +94,13 @@ def _log(msg: str) -> None:
             pass
 
 
-def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
+def request(
+    key: str,
+    title: str,
+    detail: str,
+    run: Callable[[], str],
+    voice_handler: Optional[Callable[[str], VoiceDecision]] = None,
+) -> str:
     """Park an irreversible action behind the on-screen gate.
 
     Returns the sentence the tool should hand back to the model — phrased as an
@@ -87,24 +108,62 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     rather than reading an English string verbatim."""
     global _pending
 
-    if _show_cb is None:
-        # No interface bound (headless, or a very early call). Refuse rather
-        # than silently performing something irreversible.
-        return (f"I cannot confirm '{title}' right now because the interface is "
-                f"not available, so I have not done it.")
+    if not isinstance(title, str) or not isinstance(detail, str):
+        return "I cannot ask for confirmation because its title and details must be text. Nothing was done."
+    if len(title) > MAX_TITLE_LENGTH:
+        return (
+            f"I cannot ask for confirmation because the title exceeds "
+            f"{MAX_TITLE_LENGTH} characters. Nothing was done."
+        )
+    if len(detail) > MAX_DETAIL_LENGTH:
+        return (
+            f"I cannot ask for confirmation because the details exceed "
+            f"{MAX_DETAIL_LENGTH} characters. Nothing was done."
+        )
 
+    pending = _Pending(
+        key=key, title=title, detail=detail, run=run, at=time.monotonic(),
+        voice_handler=voice_handler,
+    )
     with _lock:
-        _pending = _Pending(key=key, title=title, detail=detail,
-                            run=run, at=time.monotonic())
+        if _show_cb is None:
+            # No interface bound (headless, or a very early call). Refuse rather
+            # than silently performing something irreversible.
+            return (f"I cannot confirm '{title}' right now because the interface is "
+                    f"not available, so I have not done it.")
+
+        if _pending is not None:
+            if time.monotonic() - _pending.at <= TIMEOUT_SECONDS:
+                return (
+                    f"[CONFIRMATION_PENDING] Another action is already awaiting "
+                    f"human confirmation: {_pending.title}. Nothing was done for "
+                    f"'{title}'. Ask the user to resolve the visible confirmation "
+                    "first."
+                )
+            _pending = None
+
+        show_cb = _show_cb
+        _pending = pending
 
     try:
-        _show_cb(title, detail)
+        show_cb(title, detail)
     except Exception as e:
         with _lock:
-            _pending = None
-        return f"Could not ask for confirmation: {e}. Nothing was done."
+            if _pending is pending:
+                _pending = None
+        return (
+            "Could not display the confirmation "
+            f"({type(e).__name__}). Nothing was done."
+        )
 
-    _log(f"SYS: Awaiting confirmation — {title}")
+    _log(f"SYS: Awaiting confirmation — {key}")
+    if voice_handler is not None:
+        return (
+            f"[CONFIRMATION_PENDING] A confirmation is visible for: {title}. "
+            "Ask the user to review the recipient and full message in the popup, "
+            "then say clearly whether to send it, correct a field, or cancel. "
+            "Do not interpret your own response or a tool argument as approval."
+        )
     return (
         f"[CONFIRMATION_PENDING] I have put a confirmation on screen for: {title}. "
         f"Say ONE short sentence in the user's own language telling them you need "
@@ -112,43 +171,184 @@ def request(key: str, title: str, detail: str, run: Callable[[], str]) -> str:
     )
 
 
-def resolve(accepted: bool) -> None:
-    """Called by the UI when the user presses CONFIRM or CANCEL.
-
-    Runs the stored callable on a worker thread — this is invoked from the Qt
-    thread, and shutting the machine down from inside a button handler would
-    freeze the interface on its way out."""
-    global _pending
-
-    with _lock:
-        p, _pending = _pending, None
-
+def _finish(p: Optional[_Pending], accepted: bool) -> None:
     if _hide_cb:
         try:
             _hide_cb()
-        except Exception:
-            pass
+        except Exception as error:
+            _log(
+                "ERR: Confirmation panel could not be hidden "
+                f"({type(error).__name__})"
+            )
 
     if p is None:
         return
 
     if time.monotonic() - p.at > TIMEOUT_SECONDS:
-        _log(f"SYS: Confirmation expired — {p.title}")
+        _log(f"SYS: Confirmation expired — {p.key}")
+        return
+
+    if not isinstance(accepted, bool):
+        _log(f"ERR: Invalid confirmation decision — {p.key}; action was not run")
         return
 
     if not accepted:
-        _log(f"SYS: Cancelled — {p.title}")
+        _log(f"SYS: Cancelled — {p.key}")
         return
 
     def _worker():
         try:
-            result = p.run() or "Done."
-            _log(f"SYS: Confirmed — {p.title}. {result}")
+            result = p.run()
+            normalized = outcome.normalize_dispatch_result(p.key, result)
+            status = tool_audit.classify_status(normalized)
+            effect = tool_audit.classify_effect(status)
+            _log(
+                f"SYS: Confirmation accepted — {p.key}; "
+                f"action status={status}; effect={effect}"
+            )
         except Exception as e:
-            _log(f"ERR: {p.title} failed — {e}")
+            normalized = outcome.failed(
+                "confirmation",
+                "the confirmed action raised an exception",
+                action=p.key,
+                error=type(e).__name__,
+            )
+            status = tool_audit.classify_status(normalized)
+            effect = tool_audit.classify_effect(status)
+            _log(
+                f"SYS: Confirmation accepted — {p.key}; "
+                f"action status={status}; effect={effect}"
+            )
 
     threading.Thread(target=_worker, daemon=True,
                      name=f"confirm-{p.key}").start()
+
+
+def resolve(accepted: bool) -> None:
+    """Resolve the visible confirmation from a UI button."""
+    global _pending
+
+    blocked: Optional[tuple[Callable[[str, str], None], str, str, str]] = None
+    button_blocked = False
+    with _lock:
+        p = _pending
+        if p is not None and accepted and not p.button_enabled:
+            button_blocked = True
+            if _show_cb is not None:
+                blocked = (_show_cb, p.title, p.detail, p.key)
+        else:
+            _pending = None
+
+    if button_blocked:
+        key = blocked[3] if blocked is not None else "pending-action"
+        _log(f"SYS: Confirmation requires the requested voice edit — {key}")
+        if blocked is None:
+            _log("ERR: Confirmation panel is unavailable; action remains unapproved")
+            return
+        try:
+            blocked[0](blocked[1], blocked[2])
+        except Exception as error:
+            _log(
+                "ERR: Confirmation panel could not be restored "
+                f"({type(error).__name__}); action remains unapproved"
+            )
+        return
+
+    if not isinstance(accepted, bool):
+        _log("ERR: Invalid confirmation decision; action was not run")
+        _finish(p, False)
+        return
+    _finish(p, accepted)
+
+
+def handle_voice(transcript: str) -> bool:
+    """Handle a completed user utterance for a confirmation that opted in.
+
+    The Boolean says whether this utterance belongs to the confirmation flow;
+    callers use it to prevent model-generated tool calls from treating the
+    approval phrase as a new instruction.
+    """
+    global _pending
+    if not isinstance(transcript, str) or not transcript.strip():
+        return False
+
+    expired = False
+    show_update: Optional[tuple[Callable[[str, str], None], str, str]] = None
+    resolution: Optional[tuple[_Pending, bool]] = None
+    with _lock:
+        pending = _pending
+        if pending is None or pending.voice_handler is None:
+            return False
+        if time.monotonic() - pending.at > TIMEOUT_SECONDS:
+            _pending = None
+            expired = True
+        else:
+            try:
+                decision = pending.voice_handler(transcript)
+            except Exception as error:
+                _log(
+                    "ERR: Voice confirmation parser failed "
+                    f"({type(error).__name__}); action remains unapproved"
+                )
+                return True
+
+            if not isinstance(decision, VoiceDecision):
+                _log("ERR: Invalid voice confirmation decision; action remains unapproved")
+                return True
+            if decision.action == "accept":
+                _pending = None
+                resolution = (pending, True)
+            elif decision.action == "cancel":
+                _pending = None
+                resolution = (pending, False)
+            elif decision.action == "update":
+                if (
+                    not isinstance(decision.title, str)
+                    or not isinstance(decision.detail, str)
+                    or len(decision.title) > MAX_TITLE_LENGTH
+                    or len(decision.detail) > MAX_DETAIL_LENGTH
+                ):
+                    _log("ERR: Voice edit exceeds confirmation display limits")
+                    return True
+                pending.title = decision.title
+                pending.detail = decision.detail
+                pending.at = time.monotonic()
+                pending.button_enabled = decision.button_enabled
+                if _show_cb is not None:
+                    show_update = (_show_cb, pending.title, pending.detail)
+            elif decision.action != "ignore":
+                _log("ERR: Unknown voice confirmation decision; action remains unapproved")
+                return True
+
+    if expired:
+        _log("SYS: Confirmation expired")
+        if _hide_cb:
+            try:
+                _hide_cb()
+            except Exception as error:
+                _log(f"ERR: Confirmation panel could not be hidden ({type(error).__name__})")
+    elif resolution is not None:
+        _finish(*resolution)
+    elif show_update is not None:
+        try:
+            show_update[0](show_update[1], show_update[2])
+        except Exception as error:
+            with _lock:
+                if _pending is pending:
+                    _pending = None
+            if _hide_cb:
+                try:
+                    _hide_cb()
+                except Exception as hide_error:
+                    _log(
+                        "ERR: Confirmation panel could not be hidden "
+                        f"({type(hide_error).__name__})"
+                    )
+            _log(
+                "ERR: Updated confirmation could not be displayed "
+                f"({type(error).__name__}); action remains unapproved"
+            )
+    return True
 
 
 def pending_title() -> str:
@@ -159,3 +359,13 @@ def pending_title() -> str:
         if time.monotonic() - _pending.at > TIMEOUT_SECONDS:
             return ""
         return _pending.title
+
+
+def voice_pending() -> bool:
+    """Whether an unexpired action is waiting on its opted-in voice gate."""
+    with _lock:
+        return (
+            _pending is not None
+            and _pending.voice_handler is not None
+            and time.monotonic() - _pending.at <= TIMEOUT_SECONDS
+        )

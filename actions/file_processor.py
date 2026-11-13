@@ -843,7 +843,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
         # goes to the model marked as data. See core/outcome.untrusted().
         return outcome.untrusted(f"file:{path.suffix.lstrip('.') or 'text'}",
                                  result) if result else outcome.done(
-            "file_processor", file=path.name, note="nothing to report")
+            "file_processor", file=path.name, note="nothing to report", verified=True)
     except Exception as e:
         import traceback
         traceback.print_exc()
