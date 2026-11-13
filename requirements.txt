@@ -52,6 +52,14 @@ psutil>=5.9,<8
 send2trash                   # file_controller — recoverable deletes
 python-pptx                  # file_processor — presentation reading
 
+# ── Credential storage ────────────────────────────────────────────────────────
+# The Gemini key, the provider keys and the plugins' secrets live in the
+# Windows Credential Locker, not in api_keys.json. `keyring` is how Python
+# reaches that vault; there is no plaintext fallback, so without this package
+# the app refuses to store a credential rather than storing it somewhere less
+# safe. On Windows it uses the Credential Locker backend (WinVaultKeyring).
+keyring>=25,<26
+
 # ── Remote dashboard (control from your phone) ────────────────────────────────
 fastapi>=0.110,<1
 uvicorn[standard]>=0.27,<1
