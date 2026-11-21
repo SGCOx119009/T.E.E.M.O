@@ -200,6 +200,24 @@ class TeemoUI:
         self._win.on_wake_manual = cb
 
     @property
+    def on_set_tool_context(self):
+        """Set by main.py: choose which operator's tools the model is offered."""
+        return self._win.on_set_tool_context
+
+    @on_set_tool_context.setter
+    def on_set_tool_context(self, cb):
+        self._win.on_set_tool_context = cb
+
+    @property
+    def get_tool_contexts(self):
+        """Set by main.py: the contexts that exist, for the selector."""
+        return self._win.get_tool_contexts
+
+    @get_tool_contexts.setter
+    def get_tool_contexts(self, cb):
+        self._win.get_tool_contexts = cb
+
+    @property
     def wake_get_state(self):
         return self._win.wake_get_state
 

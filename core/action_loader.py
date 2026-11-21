@@ -19,36 +19,38 @@ The handler is invoked through signature introspection: it receives ``parameters
 plus whichever of ``player`` / ``speak`` / ``response`` / ``session_memory`` it
 actually declares — so existing action signatures work unchanged.
 
-Discovery runs once at startup; import errors, validation errors, and name
-collisions are logged and the offending file is skipped — they NEVER raise out
-of discover_actions() and never abort the scan of the remaining files.
+THIS FILE IS A FACADE
+    The discovery engine now lives in ``core/tool_loader.py``, shared with the
+    plugin loader: an action and a plugin are the same kind of thing with a
+    different address, and the two copies of that machinery had drifted apart.
+    Everything public here is unchanged — the same names, the same signatures,
+    the same behaviour — so the rest of the app does not know that the engine
+    moved.
+
+TWO WAYS TO DISCOVER
+    ``eager=True`` (the default) imports every module now and binds its
+    handler: everything is known, and a file that explodes is reported as
+    rejected at discovery time.
+
+    ``eager=False`` reads the declaration out of the source WITHOUT running
+    the module, and imports it later, when the tool is first called. The
+    bundled actions cost 961 ms to import and 127 ms to read this way, which
+    is the difference between a slow start and a fast one.
 """
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import re
-import sys
-import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from core import outcome
+from core import tool_loader
 
 _NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _DEFAULT_PARAMS = {"type": "OBJECT", "properties": {}}
 _CTX_KEYS = ("player", "speak", "response", "session_memory")
-
-
-# A tool may declare that the model should NOT be held up waiting for it.
-# `behavior` goes to the API with the declaration; `scheduling` decides when the
-# eventual result is allowed back into the conversation:
-#   WHEN_IDLE  — wait for a gap in the speech (the sane default)
-#   SILENT     — record it, do not prompt a reply (the tool already announced)
-#   INTERRUPT  — cut in immediately (only when the answer cannot wait)
-_BEHAVIORS = ("BLOCKING", "NON_BLOCKING")
-_SCHEDULING = ("WHEN_IDLE", "SILENT", "INTERRUPT")
 
 
 # Keys this project puts on a declaration for its own bookkeeping. They live
@@ -79,23 +81,11 @@ def strip_meta(decls):
     return out
 
 
-def _opt_upper(value, allowed: tuple[str, ...]) -> Optional[str]:
-    v = str(value or "").strip().upper()
-    return v if v in allowed else None
-
-def _opt_tier(value) -> Optional[str]:
-    """"core" or "extra" from a declaration, or None when it did not say.
-
-    Anything else is treated as "did not say" rather than as an error: a typo
-    should fall back to the default ranking, not stop a working tool loading.
-    """
-    text = str(value or "").strip().lower()
-    return text if text in ("core", "extra") else None
-
-
-def _opt_text(value) -> Optional[str]:
-    text = str(value or "").strip()
-    return text or None
+# Kept importable from here: both loaders used to define them, and other code
+# may still ask for one of them by name.
+_opt_upper = tool_loader.opt_upper
+_opt_tier = tool_loader.opt_tier
+_opt_text = tool_loader.opt_text
 
 
 @dataclass
@@ -118,6 +108,31 @@ class ActionRecord:
     #          is in force. Nothing is deleted: Gemini still gets the full text.
     tier: Optional[str] = None
     brief: Optional[str] = None
+    # Where the module lives when it has not been imported yet.
+    module_name: str = ""
+    module_path: str = ""
+
+    def resolve(self) -> Optional[Callable]:
+        """The handler, importing the module first if it has not been imported.
+
+        Returns None when the module cannot be loaded; the reason is left in
+        `error`. Never raises.
+        """
+        if self.handler is not None:
+            return self.handler
+        if not self.module_path:
+            return None
+        try:
+            module = tool_loader.load_module(Path(self.module_path), self.module_name)
+        except Exception as exc:
+            self.error = tool_loader.safe_error(exc)
+            return None
+        decl = getattr(module, "TOOL", None)
+        if isinstance(decl, dict):
+            self.handler = decl.get("handler")
+        if self.handler is None:
+            self.error = "the tool has no callable handler"
+        return self.handler
 
 
 class ActionRegistry:
@@ -155,6 +170,37 @@ class ActionRegistry:
     def names(self) -> set[str]:
         return set(self._actions.keys())
 
+    def entries(self) -> dict[str, ActionRecord]:
+        """The valid records, by name — for the operator layer above."""
+        return dict(self._actions)
+
+    def records(self) -> list[ActionRecord]:
+        """Every record, valid or not — for the UI and for the tests."""
+        return list(self._all_records)
+
+    def validate_pending(self) -> list[str]:
+        """Import every module that has not been imported yet.
+
+        Used by the AST-first path, where the declarations were read out of
+        the source and no module has been run: a file that explodes on import
+        is noticed HERE rather than when its tool is first called. The files
+        that failed are marked invalid, so they stop being offered to the
+        model, and their names are returned for the log.
+
+        The exception's message is not repeated: it can carry a path or a
+        token, and this ends up in a log people paste into bug reports.
+        """
+        failed: list[str] = []
+        for name, rec in list(self._actions.items()):
+            if rec.handler is not None or not rec.module_path:
+                continue
+            handler = rec.resolve()
+            if handler is None:
+                rec.valid = False
+                failed.append(f"{rec.file} — {rec.error or 'could not be loaded'}")
+                self._actions.pop(name, None)
+        return failed
+
     # -- called by main.py from _execute_tool --
     def run(self, name: str, parameters: dict, ctx: dict | None = None) -> str:
         rec = self._actions.get(name)
@@ -171,7 +217,17 @@ class ActionRegistry:
                 tool=name,
             )
         try:
-            result = _call_handler(rec.handler, parameters, ctx or {})
+            handler = rec.handler if rec.handler is not None else rec.resolve()
+            if handler is None:
+                # The module could not be loaded. Its own message is not
+                # repeated here: it may carry a path or a token.
+                self._logger(f"Action '{name}' could not be loaded.")
+                return outcome.failed(
+                    "action_loader",
+                    "the action could not be loaded",
+                    tool=name,
+                )
+            result = _call_handler(handler, parameters, ctx or {})
             return outcome.normalize_dispatch_result(name, result)
         except Exception as e:
             # The exception's own message may carry a secret (a path, a token,
@@ -202,100 +258,88 @@ def _call_handler(fn: Callable, parameters: dict, ctx: dict) -> str:
 def _validate(module, filename: str) -> ActionRecord:
     """Returns an ActionRecord; .valid=False + .error set on any problem. Never raises."""
     tool = getattr(module, "TOOL", None)
+    record = tool_loader.validate_declaration(
+        tool if isinstance(tool, dict) else {},
+        filename,
+        tool_loader.ORIGIN_ACTION,
+        handler=(tool.get("handler") if isinstance(tool, dict) else None),
+    )
     if not isinstance(tool, dict):
-        return ActionRecord(name=Path(filename).stem, file=filename,
-                            error="No module-level TOOL dict (not a discoverable action).")
-
-    name = tool.get("name")
-    if not isinstance(name, str) or not _NAME_RE.match(name):
-        return ActionRecord(name=str(name or Path(filename).stem), file=filename,
-                            error="TOOL['name'] missing or not a valid identifier.")
-
-    description = tool.get("description")
-    if not isinstance(description, str) or not description.strip():
-        return ActionRecord(name=name, file=filename,
-                            error="TOOL['description'] missing or empty.")
-
-    parameters = tool.get("parameters", _DEFAULT_PARAMS)
-    if not isinstance(parameters, dict) or parameters.get("type") != "OBJECT":
-        return ActionRecord(name=name, file=filename,
-                            error="TOOL['parameters'] must be a dict with \"type\": \"OBJECT\".")
-
-    handler = tool.get("handler")
-    if not callable(handler):
-        return ActionRecord(name=name, file=filename,
-                            error="TOOL['handler'] missing or not callable.")
-
-    return ActionRecord(name=name, description=description.strip(), parameters=parameters,
-                        handler=handler, file=filename, valid=True, error="",
-                        behavior=_opt_upper(tool.get("behavior"), _BEHAVIORS),
-                        scheduling=_opt_upper(tool.get("scheduling"), _SCHEDULING),
-                        tier=_opt_tier(tool.get("tier")),
-                        brief=_opt_text(tool.get("brief")))
+        record.error = "No module-level TOOL dict (not a discoverable action)."
+    return ActionRecord(
+        name=record.name,
+        description=record.description,
+        parameters=record.parameters,
+        handler=record.handler,
+        file=record.file,
+        valid=record.valid,
+        error=record.error,
+        behavior=record.behavior,
+        scheduling=record.scheduling,
+        tier=record.tier,
+        brief=record.brief,
+    )
 
 
 def discover_actions(actions_dir: Path, reserved_names: set[str] | None = None,
-                     logger: Callable[[str], None] = print) -> ActionRegistry:
+                     logger: Callable[[str], None] = print,
+                     eager: bool = True) -> ActionRegistry:
     """
     Scans actions_dir for *.py files (skips files starting with '_'). A file is
     only treated as an action if it exposes a module-level TOOL dict; files
     without one (shared helpers, capture-only modules) are silently ignored.
     Import/validation errors and name collisions are logged and the file is
     skipped — they NEVER raise out of this function.
+
+    With ``eager=False`` the modules are not imported at all: the declaration
+    is read out of the source and the module is imported when the tool is
+    first called. See core/tool_loader.py for why that is worth having.
     """
-    reserved = reserved_names or set()
-    actions_dir.mkdir(parents=True, exist_ok=True)
-    valid: dict[str, ActionRecord] = {}
-    all_records: list[ActionRecord] = []
+    valid, all_records = tool_loader.scan(
+        actions_dir,
+        tool_loader.ORIGIN_ACTION,
+        reserved_names=reserved_names,
+        logger=logger,
+        eager=eager,
+        module_prefix="actions",
+    )
 
-    files = sorted(actions_dir.glob("*.py"), key=lambda p: p.name)  # deterministic order
-    for path in files:
-        if path.name.startswith("_"):
-            continue
-        try:
-            module_name = f"actions.{path.stem}"
-            # Reuse the already-imported module when present so handlers are the
-            # same objects the rest of the app holds.
-            module = sys.modules.get(module_name)
-            if module is None:
-                spec = importlib.util.spec_from_file_location(module_name, path)
-                if spec is None or spec.loader is None:
-                    raise ImportError("could not build import spec")
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = module
-                try:
-                    spec.loader.exec_module(module)
-                except Exception:
-                    sys.modules.pop(module_name, None)
-                    raise
+    actions: dict[str, ActionRecord] = {}
+    records: list[ActionRecord] = []
+    for rec in valid.values():
+        actions[rec.name] = ActionRecord(
+            name=rec.name,
+            description=rec.description,
+            parameters=rec.parameters,
+            handler=rec.handler,
+            file=rec.file,
+            valid=rec.valid,
+            error=rec.error,
+            behavior=rec.behavior,
+            scheduling=rec.scheduling,
+            tier=rec.tier,
+            brief=rec.brief,
+            module_name=rec.module_name,
+            module_path=rec.module_path,
+        )
+    for rec in all_records:
+        records.append(ActionRecord(
+            name=rec.name,
+            description=rec.description,
+            parameters=rec.parameters,
+            handler=rec.handler,
+            file=rec.file,
+            valid=rec.valid,
+            error=rec.error,
+            behavior=rec.behavior,
+            scheduling=rec.scheduling,
+            tier=rec.tier,
+            brief=rec.brief,
+            module_name=rec.module_name,
+            module_path=rec.module_path,
+        ))
 
-            if getattr(module, "TOOL", None) is None:
-                continue   # not an action file — a helper/capture-only module
-
-            rec = _validate(module, path.name)
-
-            if rec.valid and rec.name in reserved:
-                rec = ActionRecord(name=rec.name, file=path.name,
-                                   error=f"Name '{rec.name}' collides with a reserved core tool — rejected.")
-            elif rec.valid and rec.name in valid:
-                other = valid[rec.name].file
-                rec = ActionRecord(name=rec.name, file=path.name,
-                                   error=f"Name '{rec.name}' already used by action '{other}' — rejected.")
-
-        except Exception as e:
-            rec = ActionRecord(name=path.stem, file=path.name,
-                               error=f"Failed to load: {e}")
-            traceback.print_exc()
-
-        all_records.append(rec)
-        if rec.valid:
-            valid[rec.name] = rec
-            logger(f"Action loaded: {rec.name} ({path.name})")
-        else:
-            # Only log a rejection if the file actually tried to be an action.
-            logger(f"Action rejected: {path.name} — {rec.error}")
-
-    registry = ActionRegistry(valid, logger)
-    registry._all_records = all_records
-    logger(f"Action discovery complete: {len(valid)} active.")
+    registry = ActionRegistry(actions, logger)
+    registry._all_records = records
+    logger(f"Action discovery complete: {len(actions)} active.")
     return registry

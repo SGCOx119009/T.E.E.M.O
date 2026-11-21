@@ -92,6 +92,7 @@ from core                      import undo as undo_stack
 from core                      import confirm as confirm_gate
 from core                      import audio_devices
 from core.action_loader        import discover_actions
+from core.operators           import CONTEXT_ALL, OperatorRegistry
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
 from core.wake_word            import (
@@ -721,10 +722,19 @@ class TeemoLive:
         # File-backed tools: every actions/*.py with a TOOL dict, discovered the
         # same way plugins are. Reserved names = the inline tools above, so an
         # action can never shadow one.
+        #
+        # eager=False: the declarations are read out of the source WITHOUT
+        # importing the modules, and each one is imported the first time its
+        # tool is called. Importing all twenty-one actions costs a measured
+        # 961 ms on the launch path — they pull in pyautogui, Pillow, opencv
+        # and playwright between them — and reading them costs 127 ms. The
+        # modules are still imported, and still validated, by the warm-up
+        # below.
         self._action_registry = discover_actions(
             actions_dir=_base_dir / "actions",
             reserved_names=_inline_names,
             logger=lambda msg: print(f"[Actions] {msg}"),
+            eager=False,
         )
 
         # Plugins must not collide with either an inline tool or a discovered action.
@@ -737,7 +747,28 @@ class TeemoLive:
             # the expected case and does not belong in their conversation.
             logger=lambda msg: print(f"[Plugins] {msg}"),
             notify=lambda msg: self.ui.write_log(f"SYS: {msg}"),
+            # Same trade as the actions above: the declarations are read out of
+            # the source, and the modules are imported by the warm-up below.
+            eager=False,
         )
+
+        # The operators: the layer that says which tools belong together, and
+        # which of them the model is offered. With no context active it offers
+        # exactly the same list, in the same order, as before — see
+        # core/operators/__init__.py.
+        self._operator_registry = OperatorRegistry.from_registries(
+            action_registry=self._action_registry,
+            plugin_registry=self._plugin_registry,
+            inline_declarations=TOOL_DECLARATIONS,
+            logger=lambda msg: print(f"[Operators] {msg}"),
+        )
+        self._tool_context = CONTEXT_ALL
+
+        # The modules are imported in the background, off the launch path: a
+        # file that explodes on import is reported and dropped, exactly as it
+        # was when discovery did the importing. Doing it here rather than in
+        # the loader is what makes the start fast.
+        self._warm_action_modules()
         self.ui.get_plugins = self._plugin_registry.list_for_ui
         self.ui.get_plugin_settings = self._plugin_registry.settings_schemas  # ⚙ settings tab
         self.ui.request_say = self.plugin_say   # plugins: mid-task speech channel
@@ -806,6 +837,72 @@ class TeemoLive:
         self.ui.on_wake_toggle   = self._ui_wake_toggle   # (enable: bool) -> str
         self.ui.on_wake_manual   = self._ui_wake_manual   # () -> toggle awake/asleep
         self.ui.on_wake_install  = self._ui_wake_install  # () -> (ok, msg)
+        # The context selector in the CONTROLS drawer: which operator's tools
+        # the model is offered. Narrowing it makes the prompt smaller, which
+        # is the cost the forty-five-tools list carried.
+        self.ui.get_tool_contexts = self._operator_registry.contexts
+        self.ui.on_set_tool_context = self._on_tool_context
+
+    # ── Operators: context and the background module warm-up ────────────────
+
+    def _warm_action_modules(self) -> None:
+        """Import the action and plugin modules in the background, off the launch path.
+
+        The declarations were read out of the source without running
+        anything, so a file that explodes on import has not been noticed
+        yet. This is where it is noticed: the module is imported here, on a
+        worker thread, and the failure is reported the same way it always
+        was — by name, with the exception TYPE and not its message, because
+        the message can carry a path or a token.
+
+        A file that fails stops being offered to the model, so the session
+        that is already open may still carry it until the next connection.
+        That is the price of a fast start, and it is a price worth naming
+        rather than hiding.
+        """
+        def work():
+            try:
+                failed = self._action_registry.validate_pending()
+            except Exception as e:
+                print(f"[Actions] warm-up failed ({type(e).__name__}).")
+                failed = []
+            for item in failed:
+                print(f"[Actions] rejected: {item}")
+            try:
+                broken = self._plugin_registry.validate_pending()
+            except Exception as e:
+                print(f"[Plugins] warm-up failed ({type(e).__name__}).")
+                return
+            for item in broken:
+                print(f"[Plugins] rejected: {item}")
+        threading.Thread(target=work, daemon=True, name="action-warmup").start()
+
+    def set_tool_context(self, context: str) -> str:
+        """Choose which operator's tools the model is offered.
+
+        The tool list is fixed when the session connects — that is a property
+        of the Live API, not of this app — so a change here takes effect at
+        the next connection. Returns the context in force.
+        """
+        chosen = self._operator_registry.set_context(context)
+        self._tool_context = chosen
+        count = len(self._operator_registry.declarations(chosen))
+        print(f"[Operators] context '{chosen}' — {count} tools offered")
+        return chosen
+
+    def _on_tool_context(self, context: str) -> str:
+        """The CONTROLS drawer asked for a different set of tools.
+
+        The session is rebuilt, keeping the conversation: the same thing that
+        happens when the voice or the microphone changes, for the same reason
+        — the server fixes the tool list when the session is made, and the
+        only way to change it is to make a new session.
+        """
+        chosen = self.set_tool_context(context)
+        self.ui.write_log(
+            f"SYS: Tools narrowed to '{chosen}' — reconnecting.")
+        self.request_reconnect(keep_context=True, reason="tool context")
+        return chosen
 
     # ── Wake word: state machine ─────────────────────────────────────────────
 
@@ -1456,9 +1553,11 @@ class TeemoLive:
         # the host, the capability list from the registries that were just
         # discovered. Rename the assistant, add a plugin or move to another OS
         # and this follows without anyone editing a prompt.
-        _all_decls = (TOOL_DECLARATIONS
-                      + self._action_registry.get_tool_declarations()
-                      + self._plugin_registry.get_tool_declarations())
+        #
+        # The declarations come from the operator registry, which offers the
+        # tools of the ACTIVE CONTEXT. With no context active that is the
+        # whole list, in the same order it has always been in.
+        _all_decls = self._operator_registry.declarations(self._tool_context)
 
         # An engine that cannot do something is not offered the tool for it.
         #
@@ -1774,14 +1873,19 @@ class TeemoLive:
                     self.ui.show_content(_label, outcome.unwrap(r))
 
             else:
-                if self._plugin_registry.has(name):
-                    r = await loop.run_in_executor(
-                        None,
-                        lambda: self._plugin_registry.run(name, args, player=self.ui, session_memory=None)
-                    )
-                    result = r or "Done."
-                else:
-                    result = f"Unknown tool: {name}"
+                # One dispatch point. The operator registry knows which
+                # registry owns the tool and hands it the arguments it
+                # declares; a name nobody owns comes back as "Unknown tool",
+                # exactly as before.
+                r = await loop.run_in_executor(
+                    None,
+                    lambda: self._operator_registry.run(
+                        name, args,
+                        {"player": self.ui, "speak": self.speak,
+                         "response": None, "session_memory": None},
+                    ),
+                )
+                result = r or "Done."
 
         except Exception as e:
             result = f"Tool '{name}' failed: {e}"
@@ -1803,8 +1907,7 @@ class TeemoLive:
         # something like a phone call already ringing, is exactly the noise the
         # non-blocking call was meant to avoid. Tools that declared nothing get
         # the API default and behave as they always have.
-        _sched = (self._action_registry.scheduling(name)
-                  or self._plugin_registry.scheduling(name))
+        _sched = self._operator_registry.scheduling(name)
         _extra = {"scheduling": _sched} if _sched else {}
         return types.FunctionResponse(
             id=fc.id, name=name,

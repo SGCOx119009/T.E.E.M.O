@@ -151,6 +151,8 @@ class MainWindow(QMainWindow):
         self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by TeemoLive
         self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by TeemoLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
+        self.on_set_tool_context = None  # callable: (context: str) -> str, set by TeemoLive
+        self.get_tool_contexts = None   # callable: () -> list[str], set by TeemoLive
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self.wake_get_state    = None   # callable: () -> dict {enabled, awake, ready}
@@ -1606,6 +1608,32 @@ class MainWindow(QMainWindow):
         self._wake_phrase_edit.editingFinished.connect(self._save_wake_phrase)
         lay.addWidget(self._wake_phrase_edit)
 
+        # Which operator's tools the model is offered. Forty-five tools is a
+        # lot of prompt for a conversation about one of them, and this is the
+        # switch that narrows it — but the tool list is fixed when the session
+        # connects, so the change takes effect on the next connection, which
+        # the app arranges by reconnecting.
+        self._ctx_combo = QComboBox()
+        self._ctx_combo.setFixedHeight(30)
+        self._ctx_combo.setFont(px_font(11))
+        self._ctx_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 2px 7px;
+            }}
+            QComboBox:focus {{ border-color: {C.PRI_DIM}; }}
+            QComboBox QAbstractItemView {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                selection-background-color: {C.PRI_GHO};
+            }}
+        """)
+        self._ctx_combo.setToolTip(
+            "The tools the assistant is given. Narrowing it makes the prompt "
+            "smaller and the model less likely to reach for the wrong one.")
+        self._ctx_combo.activated.connect(self._on_tool_context)
+        lay.addWidget(self._ctx_combo)
+        self._refresh_context_combo()
+
         self._ptt_btn = _row(QPushButton())
         self._ptt_btn.clicked.connect(self._toggle_ptt)
         self._refresh_talk_btns()
@@ -2396,6 +2424,47 @@ class MainWindow(QMainWindow):
         if after != before:
             self._log_sig.emit(f"SYS: Wake phrase is now '{after}'.")
         self._refresh_wake_phrase_field()
+
+    def _refresh_context_combo(self):
+        """Fill the context selector with the contexts that exist.
+
+        Called when the drawer is built and whenever the set changes. The
+        signals are blocked while it fills: the app sets the item itself
+        after the user picks one, and a signal firing on that would ask for
+        another reconnect for a change the user did not make.
+        """
+        combo = getattr(self, "_ctx_combo", None)
+        if combo is None or not self.get_tool_contexts:
+            return
+        try:
+            contexts = list(self.get_tool_contexts() or [])
+        except Exception:
+            return
+        if not contexts:
+            return
+        current = combo.currentText()
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItems(contexts)
+            index = combo.findText(current)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            combo.blockSignals(False)
+
+    def _on_tool_context(self, index: int):
+        """The user picked a different set of tools for the assistant."""
+        combo = getattr(self, "_ctx_combo", None)
+        if combo is None or not self.on_set_tool_context:
+            return
+        context = combo.itemText(index)
+        if not context:
+            return
+        chosen = self.on_set_tool_context(context)
+        if chosen and chosen != context:
+            # The app refused it (an unknown context keeps the previous one);
+            # put the selector back where it was.
+            self._refresh_context_combo()
 
     def _refresh_talk_btns(self):
         """Repaint the push-to-talk row from the saved setting."""
