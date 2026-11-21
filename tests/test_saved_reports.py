@@ -10,12 +10,13 @@ from actions import flight_finder, youtube_video
 
 class SavedReportTests(unittest.TestCase):
     def test_youtube_play_never_claims_playback_from_open_request(self) -> None:
+        """Opening the browser is not the same as playing the video.
+
+        The browser route is the FALLBACK: it happens when the video could not
+        be played on the display. Reporting it as "Playing:" would be claiming
+        an outcome nobody observed."""
         with (
-            patch.object(
-                youtube_video,
-                "_scrape_first_video_url",
-                return_value="https://www.youtube.com/watch?v=abcdefghijk",
-            ),
+            patch.object(youtube_video, "_ytdlp_installed", return_value=False),
             patch.object(youtube_video, "_open_url", return_value=True) as open_url,
         ):
             result = youtube_video._handle_play({"query": "synthetic video"}, None)
@@ -23,17 +24,11 @@ class SavedReportTests(unittest.TestCase):
         self.assertIn("status=unverified", result)
         self.assertIn("playback could not be verified", result)
         self.assertNotIn("Playing:", result)
-        open_url.assert_called_once_with(
-            "https://www.youtube.com/watch?v=abcdefghijk"
-        )
+        open_url.assert_called_once()
 
     def test_youtube_play_reports_browser_launch_failure(self) -> None:
         with (
-            patch.object(
-                youtube_video,
-                "_scrape_first_video_url",
-                return_value="https://www.youtube.com/watch?v=abcdefghijk",
-            ),
+            patch.object(youtube_video, "_ytdlp_installed", return_value=False),
             patch.object(youtube_video, "_open_url", return_value=False),
         ):
             result = youtube_video._handle_play({"query": "synthetic video"}, None)

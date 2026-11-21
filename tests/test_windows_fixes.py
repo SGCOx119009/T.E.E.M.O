@@ -297,6 +297,295 @@ class PiperDownloadTests(unittest.TestCase):
                 pass
 
 
+class _FakeSoundDevice:
+    """A stand-in for `sounddevice`, with the shape this module uses.
+
+    Two host APIs, and on the output side one endpoint that opens and
+    swallows everything: the silent sink the whole file exists to avoid.
+    """
+
+    def __init__(self, silent_outputs=(), rate=16000):
+        self.silent_outputs = set(silent_outputs)
+        self.rate = rate
+        self.opened = []
+        self._devices = [
+            # (name, host api index, is input, max channels)
+            ("Microphone (Realtek(R) Audio)", 0, True, 2),
+            ("Speakers (Realtek(R) Audio)", 1, False, 2),
+            ("Headset Microphone (Plugged)", 0, True, 2),
+            ("Silent Output Device", 1, False, 2),
+        ]
+        self._apis = ["Windows DirectSound", "Windows MME"]
+
+    # -- enumeration ------------------------------------------------------
+    def query_devices(self):
+        return [
+            {"name": name, "hostapi": api, "max_input_channels": 2 if is_in else 0,
+             "max_output_channels": 0 if is_in else 2}
+            for name, api, is_in, _c in self._devices
+        ]
+
+    def query_hostapis(self):
+        return [{"name": n} for n in self._apis]
+
+    # -- streams ----------------------------------------------------------
+    class _Stream:
+        """A stream that behaves like a real one.
+
+        A real output stream is rate-limited by the hardware clock: writing
+        silence takes as long as the audio lasts. The silent sink that this
+        whole file exists to detect is exactly a stream that swallows the
+        buffer instantly. A real input stream delivers blocks to its
+        callback while it runs — so the fake delivers from a thread.
+        """
+
+        def __init__(self, index, kind, sink=False, callback=None, rate=16000):
+            self.index = index
+            self.kind = kind
+            self.sink = sink
+            self.callback = callback
+            self.rate = rate
+            self._running = False
+            self._pump = None
+
+        def start(self):
+            if self.kind != "input" or not self.callback:
+                self._running = True
+                return
+            self._running = True
+            frames = self.rate // 20          # 50 ms of audio per block
+
+            def _pump():
+                while self._running:
+                    try:
+                        self.callback(bytes(frames * 2), frames)
+                    except Exception:
+                        pass
+                    time.sleep(0.02)
+
+            self._pump = threading.Thread(target=_pump, daemon=True)
+            self._pump.start()
+
+        def stop(self):
+            self._running = False
+            if self._pump is not None:
+                self._pump.join(timeout=1.0)
+                self._pump = None
+
+        def close(self):
+            self.stop()
+
+        def write(self, data):
+            if self.sink:
+                return 0.00001          # swallowed instantly
+            time.sleep(len(data) / 2 / self.rate)   # consumed at the audio rate
+            return len(data)
+
+    def RawOutputStream(self, **kw):
+        self.opened.append(("output", kw.get("device")))
+        idx = kw.get("device")
+        return self._Stream(idx, "output", sink=idx in self.silent_outputs,
+                            rate=kw.get("samplerate", self.rate))
+
+    def InputStream(self, **kw):
+        self.opened.append(("input", kw.get("device")))
+        idx = kw.get("device")
+        return self._Stream(idx, "input", callback=kw.get("callback"),
+                            rate=kw.get("samplerate", self.rate))
+
+
+class AudioDeviceTests(unittest.TestCase):
+    """Bug B — the saved device could resolve to the wrong endpoint."""
+
+    def setUp(self) -> None:
+        from core import audio_devices
+
+        self.audio = audio_devices
+        self._saved = (audio_devices._probe_results.copy(),
+                       audio_devices._cache,
+                       dict(audio_devices._chosen_api))
+        audio_devices._probe_results.clear()
+        audio_devices._cache = None
+        audio_devices._chosen_api.update({"input": None, "output": None})
+
+    def tearDown(self) -> None:
+        from core import audio_devices
+
+        audio_devices._probe_results.clear()
+        audio_devices._probe_results.update(self._saved[0])
+        audio_devices._cache = self._saved[1]
+        audio_devices._chosen_api.update(self._saved[2])
+
+    def test_the_probe_cache_is_per_device_not_per_api(self) -> None:
+        """One bad endpoint must not condemn a whole host API.
+
+        The probe measures an endpoint. Caching that answer as a verdict on
+        the API meant that a single muted device threw away an API that had
+        good ones on it."""
+        from core import audio_devices
+
+        audio_devices._probe_results[(None, "output", 3)] = False
+        self.assertFalse(
+            audio_devices._probe_results.get((None, "output", 1)),
+            "a failed endpoint was cached as the answer for another endpoint",
+        )
+
+    def test_configure_invalidates_the_probe_results(self) -> None:
+        """A probe measured at the old rate says nothing about the new one."""
+        from core import audio_devices
+
+        audio_devices._probe_results[("mme", "output", 1)] = True
+        audio_devices.configure(16000, 24000)
+        self.assertEqual(audio_devices._probe_results, {},
+                         "a stale probe survived a rate change")
+
+    def test_refresh_invalidates_the_probe_results(self) -> None:
+        """Plugging a headset in changes what the machine can do."""
+        from core import audio_devices
+
+        audio_devices._probe_results[("mme", "output", 1)] = True
+        audio_devices._cache = {"input": [], "output": []}
+        with patch.object(audio_devices, "_query",
+                          return_value={"input": [], "output": []}):
+            audio_devices.list_devices("output", refresh=True)
+        self.assertEqual(audio_devices._probe_results, {})
+
+    def test_a_silent_sink_is_not_selectable(self) -> None:
+        """An endpoint that opens and moves nothing must not be offered.
+
+        The whole reason this file exists. It is measured per endpoint, so
+        the good device of the same API survives."""
+        from core import audio_devices
+
+        fake = _FakeSoundDevice(silent_outputs=(3,))
+        with patch.dict("sys.modules", {"sounddevice": fake}):
+            audio_devices._probe_results.clear()
+            found = audio_devices._query()
+
+        names = found.get("output", [])
+        self.assertNotIn("Silent Output Device", names)
+        self.assertTrue(names, "every output device was rejected")
+
+    def test_the_displayed_name_comes_from_the_same_host_api(self) -> None:
+        """The picker must not show one API's name for another's endpoint.
+
+        MME truncates names to 31 characters; the longer name belongs to
+        DirectSound. Showing the DirectSound name for an endpoint that opens
+        on MME is how the user ends up on a different device than the one
+        they picked."""
+        from core import audio_devices
+
+        devices = [
+            {"name": "Speakers (Realtek(R) Audio)"[:31], "hostapi": 1},
+            {"name": "Speakers (Realtek(R) Audio)", "hostapi": 0},
+        ]
+        apis = ["Windows DirectSound", "Windows MME"]
+
+        mme = audio_devices._display_name(devices[0]["name"], devices, apis, "mme")
+        self.assertEqual(mme, devices[0]["name"],
+                         "the name of another host API was shown")
+
+        direct = audio_devices._display_name(devices[1]["name"], devices, apis,
+                                              "directsound")
+        self.assertEqual(direct, devices[1]["name"])
+
+    def test_an_exact_match_beats_a_prefix_match(self) -> None:
+        """An exact name is never a guess, so it wins wherever it is.
+
+        The old code took the first API that produced ANY partial match, so
+        a truncated name could beat an exact one."""
+        from core import audio_devices
+
+        fake = _FakeSoundDevice()
+        with patch.dict("sys.modules", {"sounddevice": fake}):
+            audio_devices._probe_results.clear()
+            idx = audio_devices.resolve("Headset Microphone (Plugged)", "input")
+
+        self.assertIsNotNone(idx)
+        self.assertEqual(fake.query_devices()[idx]["name"],
+                         "Headset Microphone (Plugged)")
+
+    def test_a_saved_device_that_is_gone_falls_back_and_says_so(self) -> None:
+        """A missing headset degrades to the system default, and says so."""
+        from core import audio_devices
+
+        fake = _FakeSoundDevice()
+        printed: list[str] = []
+        with patch.dict("sys.modules", {"sounddevice": fake}), \
+                patch("builtins.print", side_effect=printed.append):
+            audio_devices._probe_results.clear()
+            idx = audio_devices.resolve("A headset that is not here", "input")
+
+        self.assertIsNone(idx)
+        self.assertTrue(any("falling back" in p for p in printed),
+                        f"the fallback was not reported: {printed}")
+
+
+class YouTubeRouteTests(unittest.TestCase):
+    """Bug C — "play a YouTube video" opened a browser instead of the HUD."""
+
+    def test_youtube_play_uses_the_hud_when_it_can(self) -> None:
+        """With yt-dlp there, the video goes to the display, not the browser.
+
+        The browser is the FALLBACK, and it is only reached when the video
+        could not be played here."""
+        from actions import youtube_video
+
+        opened: list[str] = []
+        with (
+            patch.object(youtube_video, "_ytdlp_installed", return_value=True),
+            patch.object(youtube_video, "_open_url",
+                         side_effect=lambda u: opened.append(u) or True),
+            patch("actions.video_player.video_player",
+                  return_value="status=opening source=synthetic") as play,
+        ):
+            result = youtube_video._handle_play({"query": "synthetic video"}, None)
+
+        self.assertIn("status=opening", result)
+        play.assert_called_once()
+        self.assertEqual(opened, [], "the browser was opened even though it could play")
+        self.assertNotIn("browser", result.lower())
+
+    def test_youtube_play_falls_back_to_the_browser_and_says_so(self) -> None:
+        """Without yt-dlp the browser is the fallback, and it is announced.
+
+        A fallback that is not announced is a fallback the user did not ask
+        for and cannot see coming."""
+        from actions import youtube_video
+
+        opened: list[str] = []
+        with (
+            patch.object(youtube_video, "_ytdlp_installed", return_value=False),
+            patch.object(youtube_video, "_open_url",
+                         side_effect=lambda u: opened.append(u) or True),
+        ):
+            result = youtube_video._handle_play({"query": "synthetic video"}, None)
+
+        self.assertIn("status=unverified", result)
+        self.assertIn("browser", result)
+        self.assertTrue(opened)
+
+    def test_the_two_youtube_tools_do_not_claim_the_same_job(self) -> None:
+        """The description is part of the contract.
+
+        The model picked the wrong tool because its description said
+        "playing videos" while the one that actually plays on the display
+        said less. The descriptions must now point at each other."""
+        from actions import youtube_video, video_player
+
+        reader = youtube_video.TOOL["description"].lower()
+        player = video_player.TOOL["description"].lower()
+
+        self.assertIn("video_player", reader)
+        self.assertIn("summar", reader)
+        self.assertNotIn("playing videos", reader)
+        self.assertIn("youtube_video", player)
+        self.assertIn("youtube", player)
+        # The player must claim all four sources it accepts.
+        for word in ("file", "url", "youtube"):
+            self.assertIn(word, player)
+
+
 class CapabilityTests(unittest.TestCase):
     """The replacement for "the other system does not allow it"."""
 

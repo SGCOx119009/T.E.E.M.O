@@ -72,14 +72,20 @@ _chosen_api: dict = {"input": None, "output": None}
 # which host API to use by reasoning about it instead of measuring it.
 #
 #   v1 ranked APIs by how clean their device names were and picked WASAPI.
-#      WASAPI in shared mode does not resample — the hardware runs at 48 kHz,
-#      this app streams 16 kHz in and 24 kHz out, and every open failed with
+#      The app streams 16 kHz in and 24 kHz out, and every open failed with
 #      "Invalid sample rate". The picker looked right and did nothing.
 #
 #   v2 added a rate check and picked DirectSound, which passes that check on
 #      both sides. PortAudio's DirectSound *output* is a silent sink: the
 #      stream opens, every write returns success in ~0 ms, and nothing is ever
 #      heard. Same failure, one layer deeper.
+#
+#   v3 believed WASAPI in shared mode does not resample, and ruled it out for
+#      ever on that basis. That is no longer true of the WASAPI PortAudio
+#      ships: in shared mode it DOES resample, and the endpoints that
+#      genuinely cannot do 16 kHz or 24 kHz fail on the rate check like any
+#      other device. So WASAPI is probed like everything else instead of being
+#      ruled out by a rule that stopped being true.
 #
 # So this list is a preference, not a promise. Which API actually gets used is
 # decided below by _usable() (open it for real) and _transport_works() (does
@@ -108,8 +114,19 @@ _PREFERRED_APIS = {
 # in the app. Probe the mode you ship, not the mode that is easier to write.
 _PROBE_SECONDS = {"output": 0.6, "input": 0.35}
 
-# Cache: {(api_name_or_None, kind): bool}
+# Cache: {(api_name_or_None, kind, device_index): bool}
+#
+# The device index is part of the key ON PURPOSE. The probe measures ONE
+# endpoint, so caching its result as a statement about the whole host API
+# meant that a single muted or broken endpoint could condemn an API that had
+# perfectly good devices on it — and then the next API, which is worse, got
+# the job. The answer to "does this API work" is now the answer to "does this
+# endpoint work", asked of each endpoint in turn.
 _probe_results: dict = {}
+
+# How many endpoints the machine had the last time it was looked at. The
+# watcher compares against it to notice that a device came or went.
+_endpoint_count: list[int] = [0]
 
 
 def _transport_works(idx: int, kind: str, api_key) -> bool:
@@ -169,16 +186,41 @@ def _transport_works(idx: int, kind: str, api_key) -> bool:
     return ok
 
 
-def _display_name(name: str, devices) -> str:
+def _common_prefix(a: str, b: str) -> int:
+    """How many characters two names share from the start.
+
+    Used to choose between two devices that both match a saved name: the one
+    that agrees with it for longer is the one the user meant."""
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def _display_name(name: str, devices, apis, api_filter) -> str:
     """MME truncates device names to 31 characters, so the API that actually
-    carries the audio may not be the one that can spell. If another host API
-    knows a longer name that starts with this one, show that instead — the user
-    reads 'Realtek HD Audio 2nd output (Realtek(R) Audio)' while the stream runs
-    on the endpoint called 'Realtek HD Audio 2nd output (Re'."""
+    carries the audio may not be the one that can spell. If another device of
+    THE SAME HOST API knows a longer name that starts with this one, show
+    that instead — the user reads 'Realtek HD Audio 2nd output (Realtek(R)
+    Audio)' while the stream runs on the endpoint called 'Realtek HD Audio
+    2nd output (Re'.
+
+    Only devices of the same API are considered, and that is the fix for a
+    bug that was here before: the whole list was searched, so the picker
+    could show the name a WASAPI endpoint uses for a device whose stream
+    actually opens on MME. The user then picks "that microphone" and gets a
+    different one — a mismatch that looks like the app ignoring them."""
     if len(name) < 30:
         return name
     best = name
     for dev in devices:
+        if api_filter is not None:
+            api = (apis[dev["hostapi"]].lower()
+                   if dev.get("hostapi", -1) < len(apis) else "")
+            if api_filter not in api:
+                continue
         other = (dev.get("name") or "").strip()
         if len(other) > len(best) and other.startswith(name):
             best = other
@@ -194,13 +236,18 @@ def configure(input_rate: int, output_rate: int) -> None:
     """Tell this module the sample rates the audio streams will use, so the
     picker can rule out devices that cannot be opened at them.
 
-    Drops any cached list: which devices are usable depends on the rate, so a
-    list built under the old rates would be stale."""
+    Drops any cached list AND any cached probe: which devices are usable
+    depends on the rate, so a list built under the old rates would be stale
+    — and a probe measured at the old rate says nothing about the new one.
+    The probe results used to survive here, and a device that had been
+    measured at 16 kHz was trusted for ever afterwards, including for the
+    24 kHz output side."""
     global _cache
     _RATES["input"]  = int(input_rate)
     _RATES["output"] = int(output_rate)
     with _cache_lock:
         _cache = None
+        _probe_results.clear()
 
 
 def _usable(idx: int, kind: str) -> bool:
@@ -257,10 +304,10 @@ def _query() -> dict[str, list[str]]:
     Only real, selectable devices — see the note above."""
     out: dict[str, list[str]] = {"input": [], "output": []}
     try:
-        import platform
         import sounddevice as sd
 
         devices = list(sd.query_devices())
+        _endpoint_count[0] = len(devices)
         try:
             apis = [a.get("name", "") for a in sd.query_hostapis()]
         except Exception:
@@ -298,11 +345,20 @@ def _query() -> dict[str, list[str]]:
                 found = _collect(api_filter, kind)
                 if not found:
                     continue
-                # One probe per API per direction, cached, on this thread.
-                if not _transport_works(found[0][0], kind, (api_filter, kind)):
+                # THE PROBE IS PER DEVICE. It used to measure the FIRST device
+                # of the API and cache the answer as a verdict on the whole
+                # API, so one muted endpoint condemned every device on it and
+                # the app fell through to a worse API. Each endpoint is asked
+                # in turn, and only the ones that really move audio are
+                # offered — an endpoint that opens and swallows everything is
+                # not selectable, which is the whole point of this file.
+                working = [(idx, name) for idx, name in found
+                           if _transport_works(idx, kind, (api_filter, kind, idx))]
+                if not working:
                     continue
                 _chosen_api[kind] = api_filter
-                out[kind] = [_display_name(n, devices) for _i, n in found]
+                out[kind] = [_display_name(n, devices, apis, api_filter)
+                             for _i, n in working]
                 break
             if out[kind]:
                 print(f"[Audio] {kind}: using "
@@ -328,10 +384,59 @@ def prefetch() -> None:
     threading.Thread(target=_work, daemon=True, name="audio-devices").start()
 
 
+# How often the device list is checked for a change. A headset plugged in
+# half an hour after the app started was simply not there: the list was
+# built once at startup and never again, so the user picked from a list
+# that had gone out of date and the new device was never offered.
+_RESCAN_SECONDS = 30.0
+
+
+def watch_for_changes() -> None:
+    """Re-enumerate in the background when the machine's devices change.
+
+    The check is a count of the endpoints, which is cheap and does not open
+    anything. Only when the count changes is the list rebuilt — and the
+    rebuild happens on this thread, off the interface, so a headset appearing
+    costs nobody a frozen window. The audio in progress is not touched: the
+    streams hold their own endpoint, and a new device does not move them.
+    """
+    def _work():
+        while True:
+            time.sleep(_RESCAN_SECONDS)
+            try:
+                import sounddevice as sd
+
+                current = len(sd.query_devices())
+            except Exception:
+                continue
+            if current == _endpoint_count[0]:
+                continue
+            print(f"[Audio] the device list changed ({current} endpoints) "
+                  f"— re-checking")
+            try:
+                _probe_results.clear()
+                fresh = _query()
+            except Exception as e:
+                print(f"[Audio] re-check failed: {e}")
+                continue
+            with _cache_lock:
+                _cache = fresh
+            print(f"[Audio] {len(fresh['input'])} input / "
+                  f"{len(fresh['output'])} output devices found")
+
+    threading.Thread(target=_work, daemon=True, name="audio-watch").start()
+
+
 def list_devices(kind: str, refresh: bool = False) -> list[str]:
     """Device names for 'input' or 'output'. Falls back to a synchronous query
-    if the prefetch has not landed yet — correctness over the cache."""
+    if the prefetch has not landed yet — correctness over the cache.
+
+    A `refresh` also drops the cached PROBES. Plugging a headset in changes
+    what the machine can do, and a probe measured before that is a statement
+    about a machine that no longer exists."""
     global _cache
+    if refresh:
+        _probe_results.clear()
     with _cache_lock:
         cached = None if refresh else _cache
     if cached is None:
@@ -358,7 +463,6 @@ def resolve(name: str, kind: str):
         return None
 
     try:
-        import platform
         import sounddevice as sd
 
         devices = list(sd.query_devices())
@@ -391,26 +495,48 @@ def resolve(name: str, kind: str):
             + [None]
 
         # A candidate only counts if it can be opened at the rate this side runs
-        # at. The prefix match matters because the API that carries the audio is
-        # not always the one that can spell: MME truncates names to 31 characters
-        # while DirectSound and WASAPI do not, so the name shown in the picker
-        # can be longer than the name of the endpoint it actually opens.
+        # at AND if it really moves audio. The prefix match matters because the
+        # API that carries the audio is not always the one that can spell: MME
+        # truncates names to 31 characters while DirectSound and WASAPI do not,
+        # so the name shown in the picker can be longer than the name of the
+        # endpoint it actually opens.
+        def _works(idx: int, api_filter) -> bool:
+            return (_usable(idx, kind)
+                    and _transport_works(idx, kind, (api_filter, kind, idx)))
+
+        # EXACT names first, across every API in order.
+        #
+        # The old code took the first API that produced ANY partial match and
+        # stopped there, so a truncated name on the preferred API could beat an
+        # exact match on another one. An exact match is never a guess, so it
+        # wins wherever it is.
         for api_filter in orders:
-            partial = None
+            for idx, dev_name in _candidates(api_filter):
+                if dev_name == wanted and _works(idx, api_filter):
+                    return idx
+
+        # Then partial matches, BEST first: the one that shares the most of the
+        # name wins. Two devices can share a 24-character prefix — "Realtek HD
+        # Audio 2nd output (Realtek(R) Audio)" against "…(Realtek(R) Audio
+        # Digital)" — and picking the wrong one is exactly what a person would
+        # call the app "choosing the wrong microphone".
+        partials = []
+        for api_filter in orders:
             for idx, dev_name in _candidates(api_filter):
                 if dev_name == wanted:
-                    if _usable(idx, kind):
-                        return idx
                     continue
-                if partial is None and (dev_name.startswith(wanted[:24])
-                                        or wanted.startswith(dev_name[:24])):
-                    if _usable(idx, kind):
-                        partial = idx
-            if partial is not None:
-                return partial
+                if (dev_name.startswith(wanted[:24])
+                        or wanted.startswith(dev_name[:24])):
+                    partials.append((_common_prefix(wanted, dev_name),
+                                     idx, api_filter))
+        partials.sort(key=lambda item: -item[0])
+        for _score, idx, api_filter in partials:
+            if _works(idx, api_filter):
+                return idx
 
         print(f"[Audio] Saved {kind} device '{wanted}' cannot be opened at "
-              f"{_RATES.get(kind)} Hz on any host API — using system default")
+              f"{_RATES.get(kind)} Hz on any host API — falling back to the "
+              f"system default")
         return None
     except Exception as e:
         print(f"[Audio] resolve({kind}) failed: {e} — using system default")

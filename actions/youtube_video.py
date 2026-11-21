@@ -59,11 +59,27 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
 
 
-def _open_url(url: str) -> None:
+def _open_url(url: str) -> bool:
+    """Open a URL in the default browser. True when it was launched."""
     try:
         subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+        return True
     except Exception as e:
         print(f"[YouTube] ⚠️ open_url failed: {e}")
+        return False
+
+
+def _ytdlp_installed() -> bool:
+    """Is the tool that resolves a YouTube link to a playable stream there?
+
+    Without it a video cannot be played on the display at all, and the honest
+    answer is the browser as a fallback — not a claim that it is playing."""
+    try:
+        from importlib.util import find_spec
+
+        return find_spec("yt_dlp") is not None
+    except Exception:
+        return False
 
 def _scrape_first_video_url(query: str) -> str | None:
 
@@ -269,30 +285,83 @@ def _scrape_trending(region: str = "TR", max_results: int = 8) -> list[dict]:
         return []
 
 def _handle_play(parameters: dict, player) -> str:
+    """Play a YouTube video — on the HUD, through `video_player`.
+
+    THIS USED TO OPEN THE BROWSER, and that was the bug the plan names:
+    there were two YouTube tools, and the one the model reached for opened
+    a browser window instead of putting the video on the display where the
+    avatar is. A request to WATCH something turned into a web page.
+
+    `video_player` is the canonical route: it resolves the link with yt-dlp,
+    plays it on the display, and starts it muted. So this action now hands
+    over to it and says so plainly.
+
+    What is left here is the part `video_player` cannot do: finding WHICH
+    video the user meant when they gave a description rather than a link,
+    because that needs the search page. When there is no `yt-dlp`, the
+    browser is offered as an explicit fallback and never as a success.
+    """
     query = parameters.get("query", "").strip()
     if not query:
         return "Please tell me what you'd like to watch, sir."
 
     if player:
-        player.write_log(f"[YouTube] Searching: {query}")
+        player.write_log(f"[YouTube] Playing on the display: {query}")
 
-    print(f"[YouTube] 🔍 Scraping first non-Shorts video for: {query}")
+    # The canonical route: `video_player` resolves the link with yt-dlp, plays
+    # it on the display where the avatar is, and starts it muted.
+    #
+    # It works in the background and reports its own failure by speaking to
+    # the user, so this cannot wait for its answer. What it CAN tell us right
+    # now is whether the tool that does the resolving is even installed — and
+    # that is the difference between "it is playing" and "it cannot play".
+    reason = ""
+    if _ytdlp_installed():
+        from actions.video_player import video_player as _play_on_display
 
-    video_url = _scrape_first_video_url(query)
+        result = _play_on_display(
+            {"action": "play", "source": query, "source_type": "web"},
+            player=player,
+        )
+        if result and "status=" in str(result):
+            return str(result)
+        reason = str(result)[:120] if result else ""
 
-    if video_url:
-        print(f"[YouTube] ▶️ Opening: {video_url}")
-        _open_url(video_url)
-        return f"Playing: {query}"
-
-    print(f"[YouTube] ⚠️ Scrape failed, opening filtered search page")
+    # yt-dlp is missing, or the route refused. The browser is OFFERED as a
+    # fallback and never announced as a success: the video did NOT play here.
+    print("[YouTube] Could not play on the display; falling back to the browser")
+    if player:
+        player.write_log(
+            "[YouTube] Could not play on the display — opening the browser instead"
+        )
     fallback_url = (
         f"https://www.youtube.com/results"
         f"?search_query={quote_plus(query)}"
         f"&sp={_YT_VIDEO_FILTER}"
     )
-    _open_url(fallback_url)
-    return f"Opened YouTube search for: {query} (manual selection required)"
+    if not _open_url(fallback_url):
+        from core import outcome
+
+        return outcome.failed(
+            "youtube_video",
+            f"the video could not be played on the display and the browser "
+            f"could not be opened either",
+            query=query,
+        )
+
+    from core import outcome
+
+    # UNVERIFIED, not done: the browser was opened, but whether anything is
+    # playing there is not something anybody here can see. Saying "Playing:"
+    # would be claiming an outcome that was never observed.
+    return outcome.unverified(
+        "youtube_video",
+        "the video was opened in the browser because it could not be played "
+        "on the display; playback could not be verified"
+        + (f" ({reason})" if reason else ""),
+        query=query,
+        where="browser",
+    )
 
 
 def _handle_summarize(parameters: dict, player, speak) -> str:
@@ -431,17 +500,28 @@ def youtube_video(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "youtube_video",
-    "description": "Controls YouTube. Use for: playing videos, summarizing a video's content, getting video info, or showing trending videos.",
+    "description": (
+        "Reads YouTube: summarises a video's transcript, gets a video's info, "
+        "and lists what is trending. "
+        "This tool does NOT play videos on the display and it does NOT open "
+        "the browser - for that use 'video_player', which puts the video on "
+        "the assistant's own screen. Use this one only for reading, "
+        "summarising and information about YouTube."
+    ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "play | summarize | get_info | trending (default: play)"
+                "description": (
+                    "summarize | get_info | trending. 'play' is accepted but "
+                    "redirected to 'video_player', which is the tool that "
+                    "plays on the display."
+                )
             },
             "query": {
                 "type": "STRING",
-                "description": "Search query for play action"
+                "description": "Search query, for the play action"
             },
             "save": {
                 "type": "BOOLEAN",

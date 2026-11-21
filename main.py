@@ -2751,6 +2751,12 @@ class JarvisLive:
         # for host-API enumeration on the Qt thread.
         audio_devices.prefetch()
 
+        # …and keep watching: a headset plugged in half an hour later was not
+        # in the list, because the list was built once at startup and never
+        # again. The check is a cheap endpoint count; only a change rebuilds
+        # the list, and that happens off the interface thread.
+        audio_devices.watch_for_changes()
+
         # Start dashboard (optional — needs: pip install fastapi "uvicorn[standard]" cryptography)
         try:
             from dashboard.server import DashboardServer
