@@ -70,6 +70,11 @@ ALLOWED_ACTIONS: frozenset[str] = frozenset({
     "back", "forward", "stop", "reload",
     # files
     "upload", "download",
+    # the machine's own state, read rather than changed: the battery, the
+    # charging state and the power plan (computer_settings action
+    # 'energy_status'). It is in this vocabulary because the operator layer
+    # validates the action the model named before anything runs.
+    "energy_status",
 })
 
 # Risk classes, from least to most severe. The order matters: a tool whose

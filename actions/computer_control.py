@@ -499,7 +499,22 @@ def computer_control(
       user_data     — pull real data from memory
     """
     params = parameters or {}
+    # A MODEL CAN SEND ANYTHING, AND A LIST IS NOT A DICTIONARY
+    #
+    # `parameters` arrives from the model as JSON. When it is a list or a
+    # string, `params.get(...)` raised `AttributeError: 'list' object has no
+    # attribute 'get'` - a traceback where the user expected an answer, and
+    # a crash inside the tool that was supposed to be refusing the input.
+    # The check is here, at the door, so every branch below can assume a
+    # mapping.
+    if not isinstance(params, dict):
+        return ("computer_control was called with "
+                f"{type(params).__name__} instead of an object with an "
+                f"'action' field. Nothing was done.")
     action = params.get("action", "").lower().strip()
+    if not isinstance(action, str):
+        return ("computer_control was called with an 'action' that is not "
+                "text. Nothing was done.")
 
     if not action:
         return "No action specified for computer_control."

@@ -40,7 +40,7 @@ import subprocess
 import threading
 import time
 
-from core import appidentity, outcome
+from core import appidentity, fileopen, outcome
 from core.lazyimport import LazyModule, installed
 
 _PYAUTOGUI = installed("pyautogui")
@@ -63,21 +63,108 @@ _SEARCH_SETTLE = 0.8
 # ─────────────────────────────────────────────────────────────────────────────
 #  Per-OS launching — no shell on any path
 # ─────────────────────────────────────────────────────────────────────────────
+def _search_edit() -> object | None:
+    """The one search box the Start menu is showing, or None.
+
+    THE RULE THIS ENFORCES, AND WHY IT IS NOT OPTIONAL
+        The old implementation typed the application's name into whatever
+        had the keyboard focus and pressed Enter. That is how "open
+        notepad" could end up typing into the user's chat window and
+        pressing Enter in it: the name went wherever the focus happened to
+        be, and a wrong keypress in somebody's document is not a mistake the
+        product is allowed to make.
+
+        So the search box is identified, not assumed:
+          * it must be an Edit control whose automation id is
+            "SearchTextBox" - the Start menu's own box;
+          * it must live in the window that HAS the keyboard focus;
+          * there must be exactly ONE such control. Two means the picture
+            is not what we think it is, and typing into one of them is a
+            coin toss.
+
+        None of these failing is an error: it just means this route is
+        closed, and the caller falls through to the next one.
+    """
+    try:
+        import pywinauto
+    except Exception as exc:
+        print(f"[open_app] UI Automation unavailable: {exc}")
+        return None
+
+    try:
+        desktop = pywinauto.Desktop(backend="uia")
+        windows = list(desktop.windows())
+    except Exception as exc:
+        print(f"[open_app] could not read the desktop: {exc}")
+        return None
+
+    found: list = []
+    for window in windows:
+        try:
+            focused = bool(
+                window.element_info.element.CurrentHasKeyboardFocus
+            )
+        except Exception:
+            focused = False
+        if not focused:
+            continue
+        try:
+            controls = list(window.descendants())
+        except Exception:
+            continue
+        for control in controls:
+            try:
+                info = control.element_info
+                if getattr(info, "control_type", "") != "Edit":
+                    continue
+                if getattr(info, "automation_id", "") != "SearchTextBox":
+                    continue
+                found.append(control)
+            except Exception:
+                continue
+
+    if len(found) != 1:
+        if len(found) > 1:
+            print(f"[open_app] {len(found)} search boxes on screen — "
+                  f"not typing into an ambiguous one.")
+        return None
+    return found[0]
+
+
 def _desktop_search(app_name: str) -> bool:
-    """Type the name into the desktop's own search and press Enter.
+    """Type the name into the Start menu's search box and press Enter.
 
     The last resort, and the only one that reaches Store apps, shortcuts and
-    anything else with no executable on PATH. It is also the one that cannot be
-    verified from its own return value — which is fine, because nothing here is
-    trusted on its own any more; the process table decides.
+    anything else with no executable on PATH. It cannot be verified from its
+    own return value — which is fine, because nothing here is trusted on its
+    own any more; the process table decides.
+
+    WHAT IS VERIFIED
+        The search box is located through UI Automation, the name is written
+        into THAT box, and the text is read back before Enter is pressed. If
+        the box cannot be identified, or if it holds something other than
+        what was written, nothing is submitted — a query that was never
+        typed must not be run.
     """
     if not _PYAUTOGUI:
         return False
     try:
-        pyautogui.press("win")
+        pyautogui.hotkey("win", "s")
         time.sleep(_SEARCH_SETTLE)
-        pyautogui.write(app_name, interval=0.05)
-        time.sleep(_SEARCH_SETTLE)
+
+        field = _search_edit()
+        if field is None:
+            return False
+
+        field.set_edit_text(app_name)
+        time.sleep(0.2)
+
+        written = field.get_value()
+        if written != app_name:
+            print(f"[open_app] the search box holds {written!r}, not "
+                  f"{app_name!r} — nothing was submitted.")
+            return False
+
         pyautogui.press("enter")
         return True
     except Exception as exc:
@@ -191,6 +278,99 @@ def _launch_and_verify(player, spoken: str, launcher_name: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Opening a DOCUMENT — the same tool, the other half of what "open" means
+# ─────────────────────────────────────────────────────────────────────────────
+def _verify_document(player, path: str, assoc, before: set[int]) -> None:
+    """Prove the document is open, or say plainly that it is not.
+
+    Two kinds of evidence, and the FIRST one is the usual one: a window whose
+    title carries the document's name. Opening a file in an application that
+    is already running starts no new process at all, so the process table —
+    which is the only evidence for the application route — says nothing here.
+    The title is what proves it.
+
+    The process check is the fallback for the other case: the application had
+    to start, and its window may not carry the document's name.
+    """
+    name = os.path.basename(path)
+    try:
+        title = fileopen.wait_for_document(path, timeout=_LAUNCH_TIMEOUT)
+        if title:
+            _log(player, f"T.E.E.M.O.: {name} is open — {title}")
+            return
+
+        if assoc and assoc.name:
+            appeared = appidentity.wait_for_launch(
+                assoc.name, before, timeout=2.0)
+            if appeared is not None:
+                _log(player, f"T.E.E.M.O.: {name} is open in {appeared.label}.")
+                return
+
+        trouble = (f"{name} was handed to Windows but no window showing it "
+                   f"appeared within {int(_LAUNCH_TIMEOUT)} seconds, so it is "
+                   f"NOT confirmed open")
+        _log(player, f"T.E.E.M.O.: {trouble}")
+        _say(player, "Tell the user, in one short sentence in their own "
+                     f"language: {trouble}")
+    except Exception as exc:
+        print(f"[open_app] {type(exc).__name__}: {exc}")
+        _say(player, "Tell the user, in one short sentence in their own "
+                     f"language: opening the file failed - {exc}")
+
+
+def _open_document(spoken: str, player) -> str:
+    """Open a file with the application Windows has associated with it.
+
+    The route exists because "open the file" and "open the program" are two
+    different requests that sound like one. The assistant could start Excel
+    for hours and never put a single document in front of the user, which is
+    what it answered when asked to open a spreadsheet.
+
+    The association is read from the registry, so the file opens in whatever
+    this machine actually uses for it — LibreOffice where that is what is
+    installed, the user's own choice where they have made one.
+    """
+    path = fileopen.resolve(spoken)
+    if not path:
+        return outcome.failed(
+            "open_app",
+            f"no file called '{spoken}' was found on this computer. It was "
+            f"looked for in Desktop, Downloads and Documents, and the whole "
+            f"path as given was tried too. Ask the user where the file is, "
+            f"or use its full path.",
+            file=spoken,
+        )
+
+    assoc = fileopen.association(path)
+    before = appidentity.snapshot()
+    _log(player, f"T.E.E.M.O.: Opening {os.path.basename(path)}…")
+    try:
+        fileopen.open_with_default_app(path)
+    except OSError as exc:
+        ext = os.path.splitext(path)[1] or "that type of file"
+        return outcome.failed(
+            "open_app",
+            f"{os.path.basename(path)} could not be opened: no application on "
+            f"this machine is registered to open {ext} files ({exc}).",
+            file=path,
+        )
+
+    threading.Thread(
+        target=_verify_document,
+        args=(player, path, assoc, before),
+        daemon=True, name=f"open-file-{os.path.basename(path)[:20]}",
+    ).start()
+
+    return outcome.started(
+        "open_app",
+        file=os.path.basename(path),
+        path=path,
+        application=assoc.name or None,
+        opened_with="the application Windows associates with this file type",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 def open_app(parameters=None, response=None, player=None,
@@ -204,6 +384,12 @@ def open_app(parameters=None, response=None, player=None,
             "open_app", f"this operating system ({_SYSTEM}) is not supported",
             app=spoken,
         )
+
+    # A DOCUMENT, not a program. "Open WA.xlsx" and "open Excel" are two
+    # different requests, and answering the first with the second is how the
+    # assistant ended up saying it could not open files at all.
+    if fileopen.looks_like_file(spoken):
+        return _open_document(spoken, player)
 
     # Already open? Then there is nothing to launch and nothing to wait for,
     # and saying so is more useful than a second copy. This is also the one
@@ -278,14 +464,26 @@ def open_app(parameters=None, response=None, player=None,
 TOOL = {
     "name": "open_app",
     "description": (
-        "Opens an application on this computer. Use whenever the user asks to "
-        "open, launch or start any app or program. Put the application's name "
-        "in 'app_name' exactly as the user said it. "
-        "This tool answers immediately and confirms the launch in the "
+        "Opens something on this computer: an APPLICATION, or a FILE with the "
+        "application Windows has associated with it. Use it whenever the user "
+        "asks to open, launch, start, run or see the contents of an app, a "
+        "document, a spreadsheet or a file. "
+        "For an application, put its name in 'app_name' exactly as the user "
+        "said it. "
+        "For a FILE, put the FILE's name in 'app_name' WITH its extension "
+        "('wa.xlsx', 'informe.pdf') or its full path - the file is then "
+        "opened in the program this machine uses for that type, which is "
+        "Excel for a .xlsx when Excel is installed and the user's own choice "
+        "when they have made one. Saying only 'WA' or only 'the spreadsheet' "
+        "is not enough: the extension is what tells a document from a "
+        "program. "
+        "This tool answers immediately and confirms the opening in the "
         "background: on status=started say only that it is opening, never that "
         "it is open. If it does not appear, you will be told separately - "
-        "relay that plainly rather than claiming success. Never say you opened "
-        "something without calling this tool. "
+        "relay that plainly rather than claiming success. Never say you "
+        "opened something without calling this tool, and never tell the user "
+        "you cannot open a file or an application: you can, and this tool is "
+        "how. "
         "To CLOSE an application use computer_control with action='close_app', "
         "not this tool. "
         "DO NOT use this tool to reach a WEB PAGE. 'open Chrome and go to "
@@ -294,7 +492,7 @@ TOOL = {
         "first and browser_control after it launches the browser TWICE, the "
         "second copy on a different profile, which is what puts a 'Who's using "
         "Chrome?' picker on the screen. Use this tool only when the user wants "
-        "the application and nothing in it."
+        "the application or the document and nothing in it."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -307,7 +505,11 @@ TOOL = {
                     "'wp' or 'whats' is 'WhatsApp', 'ig' is 'Instagram', 'vs "
                     "code' is 'Visual Studio Code'. A two-letter fragment "
                     "matches the wrong program - 'wp' finds WPS Office. Any "
-                    "application on the machine works; there is no fixed list."
+                    "application on the machine works; there is no fixed list. "
+                    "OR the name of a FILE to open, with its extension "
+                    "('wa.xlsx') or its full path - in that case it is opened "
+                    "in the program this machine associates with that file "
+                    "type."
                 ),
             }
         },

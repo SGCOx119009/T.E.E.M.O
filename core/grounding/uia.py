@@ -52,10 +52,17 @@ THE SELF-GUARD
     explorer.exe an ancestor, and with the looser rule every Explorer
     window on the machine becomes the assistant's own: four of them, all
     of them the user's, all of them refused.
+
+    And it means the window, not the drawing: a control hosted by ANOTHER
+    process inside one of our windows is still ours, because clicking it
+    clicks our own interface. That is why the element carries its window
+    handle and its owning process: the question "is this ours?" is a
+    question about where the thing LIVES, not about who drew it.
 """
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Any
 
@@ -80,6 +87,70 @@ MAX_WINDOWS = 6
 # explodes at level ten.
 MAX_DEPTH = 6
 
+# How long a request may wait for the background warm-up. The wait is a
+# WAIT: the work is done by the thread that started when the package was
+# imported, so the request never pays for it, it only waits for it.
+WARM_WAIT_S = 20.0
+
+# How long the live lookup may take. It happens at EXECUTION time, on the
+# way to a click, so it is bounded by the same kind of clock the walk is:
+# a control that cannot be found quickly is a control that is not there.
+LIVE_BUDGET_S = 0.12
+
+# The one-off. Importing pywinauto costs about half a second and importing
+# pyautogui about one and a quarter, and neither is the cost of a question.
+# They are the cost of the SESSION, and the session starts long before the
+# user asks the assistant to look at anything.
+_WARM_EVENT = threading.Event()
+_WARM_LOCK = threading.Lock()
+_WARM_STARTED = False
+
+
+def warm(*, wait_s: float = 0.0) -> bool:
+    """Load the accessibility machinery, in the background.
+
+    The first UI Automation query of a session pays for importing
+    pywinauto, for generating the COM type library and for importing
+    pyautogui. Measured on this machine that is about 1.9 seconds. It is
+    the cost of the SESSION, not of a question, and it is charged to the
+    request path when the request does it itself.
+
+    So the request does not do it: the package starts this when it is
+    imported, and a request waits for it if it is not finished yet. The
+    work is done ONCE, by the thread that started it, and no request ever
+    repeats it.
+
+    Returns True when the machinery is loaded.
+    """
+    global _WARM_STARTED
+    with _WARM_LOCK:
+        if not _WARM_STARTED:
+            _WARM_STARTED = True
+
+            def _run() -> None:
+                try:
+                    import mss                     # noqa: F401
+                    import pyautogui               # noqa: F401
+                except Exception:
+                    pass
+                try:
+                    from core import screenview
+                    screenview.warm_up()
+                except Exception:
+                    pass
+                finally:
+                    _WARM_EVENT.set()
+
+            try:
+                threading.Thread(target=_run, daemon=True,
+                                 name="GroundingWarmUp").start()
+            except Exception:
+                _WARM_EVENT.set()
+
+    if wait_s and wait_s > 0:
+        return _WARM_EVENT.wait(wait_s)
+    return _WARM_EVENT.is_set()
+
 
 def available() -> tuple[bool, str]:
     """Can this level run at all? ((True, "") when it can.)"""
@@ -101,12 +172,46 @@ def own_handles() -> set[int]:
         return set()
 
 
+def _root_window(hwnd: int) -> int:
+    """The TOP-LEVEL window that contains this handle.
+
+    Zero when the handle is unknown, invalid, or already top-level and
+    the operating system could not say.
+
+    This is the question that separates "our window" from "a window of
+    somebody else that happens to be on top of ours": a control drawn by
+    another process inside our window has a handle whose ROOT is our
+    window, and that is what makes it ours.
+    """
+    try:
+        hwnd = int(hwnd)
+    except Exception:
+        return 0
+    if not hwnd:
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        GA_ROOT = 2
+        root = user32.GetAncestor(wintypes.HWND(hwnd), GA_ROOT)
+        return int(root or 0)
+    except Exception:
+        return 0
+
+
 def _is_own(pid: int, hwnd: int = 0, handles: set[int] | None = None) -> bool:
-    """Is this window ours?
+    """Is this ours?
 
     Two questions, asked in the right order: is the process this very
     one, and is the handle one of our own windows. Neither of them is
     "is this executable somewhere in our ancestry".
+
+    A handle is ours when it is one of our windows, and also when the
+    TOP-LEVEL window that contains it is one of ours: that is the case
+    of a control hosted by another process inside our own window, which
+    is ours by where it lives even though another process drew it.
 
     `handles` is passed in rather than looked up, because enumerating the
     desktop's windows costs tens of milliseconds and doing it once per
@@ -118,14 +223,22 @@ def _is_own(pid: int, hwnd: int = 0, handles: set[int] | None = None) -> bool:
             return True
     except Exception:
         pass
-    if hwnd:
-        try:
-            known = own_handles() if handles is None else handles
-            if int(hwnd) in known:
-                return True
-        except Exception:
-            pass
-    return False
+    if not hwnd:
+        return False
+    try:
+        known = own_handles() if handles is None else handles
+    except Exception:
+        return False
+    if not known:
+        return False
+    try:
+        hwnd = int(hwnd)
+    except Exception:
+        return False
+    if hwnd in known:
+        return True
+    root = _root_window(hwnd)
+    return bool(root and root in known)
 
 
 def _node_attribute(node: Any, name: str, default: Any = "") -> Any:
@@ -145,6 +258,19 @@ def _node_attribute(node: Any, name: str, default: Any = "") -> Any:
 def _node_pid(node: Any) -> int:
     try:
         return int(_node_attribute(node, "process_id", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _node_handle(node: Any) -> int:
+    """The element's OWN native window handle, or 0 when it has none.
+
+    Most controls in the accessibility tree are not windows of their own,
+    and for those this is 0 — which is exactly why the ownership rule
+    cannot be the process alone.
+    """
+    try:
+        return int(_node_attribute(node, "handle", 0) or 0)
     except Exception:
         return 0
 
@@ -270,8 +396,13 @@ def _mark_for(element: Any, node: Any, index: int, *, title: str, pid: int,
     )
 
     # An element hosted by another process inside our window is still ours.
+    # The question is where the element LIVES, so it is answered with the
+    # handles: the window that was walked, and the element's own handle
+    # (whose top-level ancestor is the window it is really inside).
+    element_hwnd = _node_handle(node)
     if not own:
-        own = _is_own(pid, 0, handles)
+        own = (_is_own(pid, hwnd, handles)
+               or _is_own(pid, element_hwnd, handles))
 
     selector: dict[str, Any] = {}
     if title and control_type:
@@ -295,10 +426,167 @@ def _mark_for(element: Any, node: Any, index: int, *, title: str, pid: int,
         own=own,
         window=title,
         pid=pid,
+        hwnd=element_hwnd,
         automation_id=automation_id,
         control_type=control_type,
         selector=selector,
     )
+
+
+def _rect_of(node: Any) -> tuple[int, int, int, int] | None:
+    """The node's rectangle RIGHT NOW, in physical screen pixels.
+
+    Read from the live tree, which is the whole point: the rectangle the
+    model was shown was read up to a second and a half ago.
+    """
+    try:
+        rect = getattr(node, "rectangle", None)
+        if rect is None:
+            return None
+        left = int(getattr(rect, "left", 0))
+        top = int(getattr(rect, "top", 0))
+        right = int(getattr(rect, "right", 0))
+        bottom = int(getattr(rect, "bottom", 0))
+    except Exception:
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _rect_by_handle(hwnd: int) -> tuple[int, int, int, int] | None:
+    """The rectangle of a window handle, in physical screen pixels."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(wintypes.HWND(int(hwnd)),
+                                    ctypes.byref(rect)):
+            return None
+        left = int(rect.left)
+        top = int(rect.top)
+        right = int(rect.right)
+        bottom = int(rect.bottom)
+    except Exception:
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _live_window(title: str, deadline: float) -> Any | None:
+    """The top-level window with this title, as it is NOW.
+
+    The window in front is tried first: it costs two property reads
+    instead of a desktop-wide enumeration, and the element usually still
+    is in the window that was in front when it was observed.
+    """
+    front = _foreground_window()
+    if front is not None and str(front[1] or "") == str(title or ""):
+        return front[0]
+    if time.monotonic() > deadline:
+        return None
+    try:
+        from pywinauto import Desktop
+
+        windows = Desktop(backend="uia").windows(
+            title=title, visible_only=True, top_level_only=True
+        )
+    except Exception:
+        return None
+    if len(windows) != 1:
+        return None
+    try:
+        return windows[0].element_info
+    except Exception:
+        return None
+
+
+def _find_live(root: Any, control_type: str, name: str, automation_id: str,
+               deadline: float) -> tuple[Any | None, str]:
+    """The control with this identity, in the tree that is there NOW.
+
+    The same rule the executor uses: the control type, the name and the
+    automation id must identify exactly ONE control. Two controls with
+    the same name are not a control, they are a guess.
+    """
+    matches: list[Any] = []
+    frontier: list[tuple[Any, int]] = [(root, 0)]
+    while frontier:
+        if time.monotonic() > deadline:
+            return None, "the live lookup ran out of time"
+        node, depth = frontier.pop(0)
+        try:
+            kind = str(_node_attribute(node, "control_type", "") or "")
+            label = str(_node_attribute(node, "name", "") or "")
+        except Exception:
+            kind, label = "", ""
+        if kind == control_type and label == name:
+            if not automation_id or str(
+                    _node_attribute(node, "automation_id", "") or ""
+            ) == automation_id:
+                matches.append(node)
+                if len(matches) > 1:
+                    return None, ("the control's name no longer identifies "
+                                  "exactly one control")
+        if depth < MAX_DEPTH:
+            try:
+                children = node.children()
+            except Exception:
+                children = []
+            for child in children:
+                frontier.append((child, depth + 1))
+    if not matches:
+        return None, "the control is no longer in the tree"
+    return matches[0], "the control was found again in the live tree"
+
+
+def live_rect(mark: ElementMark, *,
+              budget_s: float = LIVE_BUDGET_S
+              ) -> tuple[tuple[int, int, int, int] | None, str]:
+    """Where the element is RIGHT NOW, in physical screen pixels.
+
+    Returns ((left, top, right, bottom), reason). The rectangle is None
+    when it could not be measured, and the reason says why — because a
+    caller that falls back to the old rectangle has to be able to SAY
+    that it fell back.
+
+    Two ways to measure it, and the honest one is tried first:
+
+      * by the selector — the control is looked up again in the live
+        tree and its rectangle is read from it. This is the same
+        measurement the observation was built from, taken again.
+      * by the element's own window handle — one call to the operating
+        system, for the controls that are windows of their own.
+    """
+    reason = "this element has no selector to look it up with"
+    selector = selector_for(mark)
+    if selector:
+        deadline = time.monotonic() + max(0.02, float(budget_s))
+        root = _live_window(str(selector.get("window_name") or ""), deadline)
+        if root is None:
+            reason = "the window is no longer on the screen"
+        else:
+            node, reason = _find_live(
+                root,
+                str(selector.get("control_type") or ""),
+                str(selector.get("name") or ""),
+                str(selector.get("automation_id") or ""),
+                deadline,
+            )
+            if node is not None:
+                rect = _rect_of(node)
+                if rect is not None:
+                    return rect, reason
+                reason = "the control has no rectangle right now"
+    if mark.hwnd:
+        rect = _rect_by_handle(mark.hwnd)
+        if rect is not None:
+            return rect, "the element's own window handle, read just now"
+        reason = "the element's window handle is no longer valid"
+    return None, reason
 
 
 def observe(*, budget_s: float = DEFAULT_BUDGET_S,
@@ -329,15 +617,17 @@ def observe(*, budget_s: float = DEFAULT_BUDGET_S,
 
     from core import screenview
 
-    # The accessibility machinery is loaded BEFORE the clock starts. The
-    # first query of a session pays for importing pywinauto and for
-    # generating the COM type library — about 190 milliseconds — and that
-    # is the cost of the session, not of the walk. Charged to the walk, it
-    # ended it before the fourth element.
-    try:
-        screenview.warm_up()
-    except Exception:
-        pass
+    # The accessibility machinery is loaded in the BACKGROUND, by the
+    # thread that started when this package was imported. The first
+    # query of a session pays for importing pywinauto and for generating
+    # the COM type library — about 1.9 seconds on this machine — and that
+    # is the cost of the session, not of the walk. Charged to the walk,
+    # it ended it before the fourth element.
+
+    # So the request does not do that work: it waits for the warm-up
+    # that is already running, and walks the tree with a stack that is
+    # already loaded.
+    warm(wait_s=WARM_WAIT_S)
 
     scale = (geometry.scale if geometry is not None
              else screenview.physical_to_logical())
@@ -488,3 +778,9 @@ def focus(mark: ElementMark) -> dict:
     except Exception as exc:
         return {"status": "failed", "verified": False,
                 "reason": f"UI Automation failed: {type(exc).__name__}"}
+
+
+# The session's warm-up starts HERE, when this module is imported: the
+# accessibility stack and the capture libraries are loaded while nothing
+# is waiting for them. A request finds them already loaded.
+warm()

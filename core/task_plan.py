@@ -1,7 +1,31 @@
-"""Validated plans with approval, verification, and human handoff boundaries."""
+"""core/task_plan.py — the verified plan: what a task may do, and how it is proved.
+
+WHAT THIS FILE IS
+    A plan is a promise the user approved: this tool, with these arguments,
+    and a read-only check that says it worked. This file owns that promise —
+    which steps a task has, whether each one is allowed to run, what proves
+    it worked, and when a person has to be let in (a sign-in, an MFA prompt,
+    an ambiguous result that must not be repeated).
+
+WHERE THE STEPS ARE RUN
+    Not here. The steps are run by the engine's runner
+    (`core.tasks.plan_runner`), which is the one place in the codebase where
+    a planned tool call is made: it calls the trusted executor, times it,
+    charges the budget and writes the checkpoint. This file decides what a
+    result means and whether the plan may go on; the runner does the doing.
+    The two used to be separate engines, each with its own copy of "run a
+    step", which is how the same step could be run from two places and
+    charged to two budgets.
+
+WHAT THE PERSON SEES
+    The plan's history — where it is, how many steps are done, how many
+    recoveries it needed — is written by the runner's checkpoint, through
+    `core.task_history`, and never carries the task's text, its arguments or
+    its results.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 import threading
@@ -10,6 +34,7 @@ import uuid
 from typing import Any
 
 from core import action_policy, outcome, task_history, tool_audit
+from core.tasks.plan_runner import PlanBudget, PlanRunner
 
 MAX_STEPS = 12
 MAX_TEXT = 500
@@ -66,10 +91,21 @@ class TaskRecord:
     completed: int = 0
     reason: str = ""
     pause_requested: bool = False
-    deadline_at: float = 0.0
     recovery_attempts: int = 0
     recovery_kind: str = ""
     history_error: str = ""
+    budget: PlanBudget = field(default_factory=PlanBudget)
+
+    @property
+    def deadline_at(self) -> float:
+        """The plan's deadline. It is the budget's, not a second copy of it:
+        the engine charges the budget and the plan reads the deadline from
+        the same place, so there is one limit and one clock."""
+        return self.budget.deadline_at
+
+    @deadline_at.setter
+    def deadline_at(self, value: float) -> None:
+        self.budget.deadline_at = float(value)
 
 
 _tasks: dict[str, TaskRecord] = {}
@@ -437,6 +473,7 @@ def _record_for(
         if record.state != "pending":
             return None, f"task is already {record.state}"
         record.state = "running"
+        record.budget.seconds = MAX_TASK_RUNTIME_SECONDS
         record.deadline_at = time.monotonic() + MAX_TASK_RUNTIME_SECONDS
         return record, None
 
@@ -543,8 +580,7 @@ def _wait_for_user(record: TaskRecord, prompt: str) -> bool:
             return False
         if not record.pause_requested and not prompt:
             return True
-        remaining = max(0.0, record.deadline_at - time.monotonic())
-        record.deadline_at = 0.0
+        remaining = record.budget.pause()
         record.state = "waiting_for_user" if prompt else "paused"
         record.pause_requested = False
         record.reason = prompt or "Paused by the user. Complete the needed action, then resume."
@@ -552,7 +588,7 @@ def _wait_for_user(record: TaskRecord, prompt: str) -> bool:
         while record.state in {"paused", "waiting_for_user"}:
             _tasks_changed.wait()
         if record.state != "cancelled":
-            record.deadline_at = time.monotonic() + remaining
+            record.budget.resume(remaining)
         return record.state != "cancelled"
 
 
@@ -565,8 +601,7 @@ def _wait_for_recovery(
             return False
         if record.recovery_attempts >= MAX_RECOVERY_ATTEMPTS:
             return False
-        remaining = max(0.0, record.deadline_at - time.monotonic())
-        record.deadline_at = 0.0
+        remaining = record.budget.pause()
         record.recovery_attempts += 1
         record.recovery_kind = recovery_kind
         record.state = "recovery_required"
@@ -578,12 +613,13 @@ def _wait_for_recovery(
         while record.state == "recovery_required":
             _tasks_changed.wait()
         if record.state != "cancelled":
-            record.deadline_at = time.monotonic() + remaining
+            record.budget.resume(remaining)
         return record.state != "cancelled"
 
 
 def _task_expired(record: TaskRecord) -> bool:
-    return bool(record.deadline_at and time.monotonic() >= record.deadline_at)
+    """Whether the plan has run out of its budget."""
+    return record.budget.expired()
 
 
 def _fail_task(record: TaskRecord, reason: str) -> None:
@@ -668,13 +704,87 @@ def clear_history() -> str:
     )
 
 
+def _engine():
+    """The background engine, when the desktop has started one."""
+    try:
+        from core.tasks import desktop
+
+        return desktop.engine()
+    except Exception:
+        return None
+
+
+def _plan_state(record: TaskRecord) -> dict:
+    """The plan's state, as the runner writes it down."""
+    return {
+        "task_id": record.task_id,
+        "state": record.state,
+        "current_step": record.current_step,
+        "total_steps": len(record.steps),
+        "completed": record.completed,
+        "recovery_attempts": record.recovery_attempts,
+        "recovery_kind": record.recovery_kind,
+    }
+
+
+def _plan_writer(record: TaskRecord):
+    """The checkpoint writer for one plan.
+
+    It writes the plan's state to the local task history and tells the
+    interface where the plan is. The runner calls it after every step, so
+    the history of a plan is written by the engine's runner and not by the
+    plan's own bookkeeping.
+    """
+
+    def write(state: dict) -> None:
+        record.state = str(state.get("state") or record.state)
+        record.current_step = int(state.get("current_step", record.current_step))
+        record.completed = int(state.get("completed", record.completed))
+        record.recovery_attempts = int(
+            state.get("recovery_attempts", record.recovery_attempts)
+        )
+        record.recovery_kind = str(
+            state.get("recovery_kind", record.recovery_kind)
+        )
+        _notify(record)
+
+    return write
+
+
+def _runner_for(record: TaskRecord, executor) -> PlanRunner:
+    """The runner that will carry out this plan's steps.
+
+    The background engine is where the resumable machinery lives, so the
+    plan asks it for a runner and gets one whose checkpoints land in the
+    engine's store. When no engine is running — a plugin, a test, a plan
+    that starts before the desktop does — the runner is built here with the
+    same budget and the same checkpoint writer. Either way the steps are
+    run the one way.
+    """
+    writer = _plan_writer(record)
+    engine = _engine()
+    if engine is not None:
+        return engine.plan_runner(
+            record.task_id, executor, budget=record.budget,
+            checkpoint=writer, title=record.task,
+        )
+    return PlanRunner(executor, budget=record.budget, checkpoint=writer)
+
+
 def execute(
     task: Any,
     raw_steps: Any,
     executor: Any,
     task_id: Any = None,
 ) -> str:
-    """Execute an approved plan one step at a time, never retrying effects."""
+    """Execute an approved plan one step at a time, never retrying effects.
+
+    THE RUNNER
+        The steps are run by the engine's runner, which is the one place a
+        planned tool call is made. This function decides what a result means
+        and whether the plan may go on; the runner makes the call, times it,
+        charges the budget and writes the checkpoint.
+    """
     try:
         task_name = _text(task, "task")
         validate_steps(raw_steps)
@@ -700,6 +810,7 @@ def execute(
     if error or record is None:
         return outcome.failed("task_planner", error or "task is unavailable", action="execute")
 
+    runner = _runner_for(record, executor)
     authorized = [
         (item.tool, item.arguments)
         for step in record.steps
@@ -716,7 +827,7 @@ def execute(
                         task=task_name, task_id=record.task_id,
                         completed=len(completed), state="cancelled",
                     )
-                _notify(record)
+                runner.checkpoint(_plan_state(record))
             if _task_expired(record):
                 _fail_task(record, "task runtime limit reached before the next action")
                 if completed:
@@ -746,15 +857,12 @@ def execute(
                     state="cancelled",
                 )
 
-            action_error = None
-            try:
-                action_result = executor(step.tool, dict(step.arguments))
-            except Exception as exc:
-                action_error = type(exc).__name__
-                action_result = None
+            action_outcome = runner.call(step.tool, step.arguments, kind="action")
+            action_result = action_outcome.result
+            action_error = action_outcome.error or None
             with _tasks_lock:
                 if record.state == "cancelled":
-                    _notify(record)
+                    runner.checkpoint(_plan_state(record))
                     return outcome.unverified(
                         "task_planner",
                         "the task was cancelled while a step was running; the "
@@ -863,17 +971,19 @@ def execute(
                         )
                     recovery_prompted = True
                 try:
-                    verification_result = executor(
+                    verification_outcome = runner.call(
                         step.verification.tool,
-                        dict(step.verification.arguments),
+                        step.verification.arguments,
+                        kind="verification",
                     )
-                    verification_error = None
+                    verification_result = verification_outcome.result
+                    verification_error = verification_outcome.error or None
                 except Exception as exc:
                     verification_result = None
                     verification_error = type(exc).__name__
                 with _tasks_lock:
                     if record.state == "cancelled":
-                        _notify(record)
+                        runner.checkpoint(_plan_state(record))
                         return outcome.unverified(
                             "task_planner",
                             "the task was cancelled while verification was "
@@ -931,7 +1041,7 @@ def execute(
             completed.append(index)
             with _tasks_lock:
                 record.completed = len(completed)
-                _notify(record)
+                runner.checkpoint(_plan_state(record))
             if not _wait_for_user(record, ""):
                 return outcome.unverified(
                     "task_planner",
@@ -943,19 +1053,18 @@ def execute(
                 )
     with _tasks_changed:
         while record.state != "cancelled" and record.pause_requested:
-            remaining = max(0.0, record.deadline_at - time.monotonic())
-            record.deadline_at = 0.0
+            remaining = record.budget.pause()
             record.state = "paused"
             record.pause_requested = False
             record.reason = (
                 "Pause requested. The active action and its read-only "
                 "verification have finished."
             )
-            _notify(record)
+            runner.checkpoint(_plan_state(record))
             while record.state == "paused":
                 _tasks_changed.wait()
             if record.state != "cancelled":
-                record.deadline_at = time.monotonic() + remaining
+                record.budget.resume(remaining)
         if record.state == "cancelled":
             return outcome.unverified(
                 "task_planner",
@@ -968,7 +1077,7 @@ def execute(
         record.state = "completed"
         record.current_step = len(record.steps)
         record.reason = ""
-        _notify(record)
+        runner.checkpoint(_plan_state(record))
     return outcome.done(
         "task_planner",
         task=task_name,

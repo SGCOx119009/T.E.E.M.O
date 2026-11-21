@@ -542,8 +542,17 @@ def desktop_control(
         task   : natural language description for AI-powered actions
     """
     params = parameters or {}
-    action = params.get("action", "").lower().strip()
-    task   = params.get("task", "").strip()
+    # A MODEL CAN SEND ANYTHING. A list is not a dictionary, and
+    # `params.get(...)` on one raised AttributeError inside the tool that was
+    # supposed to be refusing the input. Checked at the door.
+    if not isinstance(params, dict):
+        return ("desktop was called with "
+                f"{type(params).__name__} instead of an object with an "
+                f"'action' field. Nothing was done.")
+    action = params.get("action", "")
+    action = action.lower().strip() if isinstance(action, str) else ""
+    task   = params.get("task", "")
+    task   = task.strip() if isinstance(task, str) else ""
 
     if player:
         print(f"[Desktop] {action}")             # terminal, not the HUD

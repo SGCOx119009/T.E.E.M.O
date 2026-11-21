@@ -506,6 +506,18 @@ def _windows_by_pid() -> dict[int, list[str]]:
         return {}
 
 
+def window_titles() -> dict[int, list[str]]:
+    """pid -> visible top-level window titles, best effort, never raising.
+
+    The public face of `_windows_by_pid()`. It exists because another
+    question needs the same evidence: whether a DOCUMENT opened, which shows
+    up as the document's name in a window title, not as a new process —
+    opening a file in an application that is already running starts no
+    process at all.
+    """
+    return _windows_by_pid()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Finding what is running
 # ─────────────────────────────────────────────────────────────────────────────

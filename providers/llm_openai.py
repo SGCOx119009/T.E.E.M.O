@@ -193,6 +193,21 @@ def _normalise(url: str) -> str:
     # prefix (a reverse proxy, OpenRouter's /api/v1) must be left alone.
     if not path:
         url += "/v1"
+        return url
+    # A DUPLICATED TERMINAL /v1 IS A 404 THAT READS LIKE "THE SERVER IS DOWN"
+    #
+    # "https://api.example.test/v1/v1" happened when the base URL already
+    # ended in /v1 and the path was appended to it again. The docstring above
+    # promised this case would be handled and it was not: the promise was
+    # about a MISSING /v1, and the duplicated one survived.
+    #
+    # Only the TERMINAL segment is collapsed. A path that merely CONTAINS a
+    # /v1 somewhere in the middle (OpenRouter's /api/v1) is left alone,
+    # because there the /v1 is part of the route and not a version suffix.
+    trimmed = path.rstrip("/").lower()
+    if trimmed == "v1/v1" or trimmed.endswith("/v1/v1"):
+        path = path.rstrip("/")[:-3]
+    url = f"{scheme}://{host}{slash}{path}".rstrip("/")
     return url
 
 

@@ -1,0 +1,7 @@
+# ── Optional group: piper ────────────────────────────────────────────────────
+# A neural voice on this machine, in about 50 languages. The voices are ~60 MB
+# each and are fetched on demand; the assistant uses the one matching whatever
+# language it just heard you speak.
+#
+# Imported by providers/tts_piper.py (piper.PiperVoice, piper.download_voices).
+piper-tts

@@ -25,6 +25,7 @@ from __future__ import annotations
 import inspect
 import re
 import sys
+import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -242,8 +243,11 @@ class PluginRegistry:
                     "the plugin could not be loaded",
                     tool=name,
                 )
+            _began = time.monotonic()
             result = _call_run(run_fn, parameters, player, session_memory)
-            return outcome.normalize_dispatch_result(name, result)
+            normalized = outcome.normalize_dispatch_result(name, result)
+            _record_audit(name, parameters, normalized, _began)
+            return normalized
         except Exception as e:
             # Only the exception TYPE is shown: its message can carry a path,
             # a token or a query string that must not reach the model.
@@ -304,6 +308,26 @@ class PluginRegistry:
                 "enabled": _plugin_enabled(rec.name) if rec.valid else False,
             })
         return out
+
+
+def _record_audit(name: str, parameters: dict, result: str,
+                  began: float) -> None:
+    """Put this call in the audit stream, with its latency.
+
+    The same reason as in core/action_loader.py: a plugin is a tool, and the
+    Event Stream is supposed to show what the assistant did and how long it
+    took. Metadata only - never the arguments and never the result, which
+    for a plugin can be a message to somebody.
+    """
+    try:
+        from core import tool_audit
+        tool_audit.record(
+            name, result,
+            (time.monotonic() - began) * 1000.0,
+            parameters,
+        )
+    except Exception as exc:
+        print(f"[PluginLoader] audit record failed: {type(exc).__name__}")
 
 
 def _call_run(run_fn, parameters, player, session_memory):

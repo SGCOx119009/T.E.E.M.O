@@ -96,8 +96,10 @@ from core.operators           import CONTEXT_ALL, OperatorRegistry
 from core.echo                 import EchoGuard
 from core.viseme               import VisemeStream
 from core.wake_word            import (
-    WakeWordDetector, is_ready as wake_is_ready, install_and_download as wake_install,
-    wake_phrase as wake_phrase_text,
+    VoiceActivityDetector, WakeWordDetector,
+    is_ready as wake_is_ready, install_and_download as wake_install,
+    wake_phrase as wake_phrase_text, effective_wake_phrase, wake_mode,
+    WAKE_MODE_VOICE,
 )
 
 # How long the assistant stays awake with no user speech before it auto-sleeps
@@ -212,6 +214,26 @@ _TAIL_MARGIN = 0.25
 # for a slow tool call (those send their own traffic, which clears the deadline)
 # while turning an unbounded hang into a blip.
 _STALL_LIMIT = 30.0
+
+# How many tool calls one user turn may make before the assistant is told to
+# answer with what it already has.
+#
+# WHY THIS NUMBER
+#    The browser carries its own fuse (FASE 5: six effects per thirty
+#    seconds) and the background engine carries a time-and-rounds budget.
+#    The live conversation carried neither: a model that kept asking for
+#    tools kept getting them, and the only thing that could end it was the
+#    user interrupting.
+#
+#    Twelve is far more than a real request needs - reading a file, opening
+#    an app, taking a screenshot and answering takes two or three - and it
+#    is low enough that a loop ends in an ANSWER rather than in a silence.
+#
+#    The refusal is a refusal of the CALL, not of the task: the model keeps
+#    the conversation, keeps its memory, and is told in plain words that the
+#    budget is spent, so it can report what it did and what it did not
+#    check.
+MAX_TOOL_ROUNDS_PER_TURN = 12
 
 _VIS_WIN = 1024        # ~43 ms analysis window at 24 kHz: enough for formants
 _VIS_HOP = 480         # 20 ms between frames, i.e. 50 shapes a second
@@ -645,6 +667,10 @@ class TeemoLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        # Tool calls made by the CURRENT user turn. Reset whenever a new
+        # instruction is sent to the session; capped by
+        # MAX_TOOL_ROUNDS_PER_TURN so a loop ends with an answer.
+        self._tool_rounds          = 0
         # Which engine is holding the conversation, and what it can do.
         # None means Gemini Live — the default and, unless somebody has gone to
         # the providers settings and chosen otherwise, always the case. Every
@@ -913,16 +939,50 @@ class TeemoLive:
         return {"enabled": self._wake_enabled, "awake": self._awake, "ready": ready}
 
     def _ensure_wake_detector(self) -> bool:
-        """Load the detector once (model loads on first start). Idempotent."""
-        if self._wake_detector is None:
-            self._wake_detector = WakeWordDetector(
+        """Load the detector once (model loads on first start). Idempotent.
+
+        There are two of them and they answer different questions. The
+        phrase detector listens for ONE phrase — and the one that ships
+        inside openwakeword was trained for a phrase this product no
+        longer uses, which is why the interface must announce the phrase
+        the model actually hears (`effective_wake_phrase()`) instead of the
+        one it would like to hear. The voice detector listens for speech
+        in general and needs no training at all.
+        """
+        mode = wake_mode()
+        wanted = "voice" if mode == WAKE_MODE_VOICE else "phrase"
+        current = getattr(self, "_wake_detector_kind", "")
+        if self._wake_detector is None or current != wanted:
+            if self._wake_detector is not None:
+                try:
+                    self._wake_detector.stop()
+                except Exception:
+                    pass
+            factory = (VoiceActivityDetector if wanted == "voice"
+                       else WakeWordDetector)
+            self._wake_detector = factory(
                 on_detect=self._on_wake_detected,
                 logger=lambda m: print(f"[Wake] {m}"),
                 notify=lambda m: self.ui.write_log(f"SYS: {m}"),
             )
+            self._wake_detector_kind = wanted
         if not self._wake_detector.ready:
             return self._wake_detector.start()
         return True
+
+    def _wake_instruction(self) -> str:
+        """What the user has to do to wake it — the truth, not a wish.
+
+        Showing a phrase the detector cannot hear is the bug that cost the
+        user an evening of saying "Hey T.E.E.M.O" to a machine that was
+        listening for something else.
+        """
+        if wake_mode() == WAKE_MODE_VOICE:
+            return "say something, or tap WAKE NOW"
+        phrase = effective_wake_phrase()
+        if phrase:
+            return f"say '{phrase}', or tap WAKE NOW"
+        return "tap WAKE NOW"
 
     def _on_wake_detected(self) -> None:
         """Called from the detector thread when the wake phrase is heard."""
@@ -946,7 +1006,7 @@ class TeemoLive:
             detector.reset()        # nothing heard before sleeping may wake it again
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
-        self.ui.write_log(f"SYS: Sleeping — {reason}. Say '{wake_phrase_text()}' to wake me.")
+        self.ui.write_log(f"SYS: Sleeping — {reason}. To wake me, {self._wake_instruction()}.")
 
     async def _run_sleep_watch(self) -> None:
         """Auto-sleep after the configured silence window (wake-word mode only)."""
@@ -1358,7 +1418,7 @@ class TeemoLive:
         # asleep either (the sleep gate is not just for the mic). Wake first with
         # the wake phrase or the WAKE NOW button.
         if self._wake_enabled and not self._awake:
-            self.ui.write_log(f"SYS: I'm asleep — say '{wake_phrase_text()}' or tap WAKE NOW first.")
+            self.ui.write_log(f"SYS: I'm asleep — {self._wake_instruction()} first.")
             return
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
@@ -2214,8 +2274,48 @@ class TeemoLive:
 
                     if response.tool_call:
                         fn_responses = []
+                        # THE GENERAL FUSE
+                        #
+                        # The browser has its own budget (FASE 5: six effects
+                        # per thirty seconds), and the background engine has
+                        # its own time-and-rounds budget. The LIVE
+                        # conversation had none: a model that kept asking for
+                        # tools kept getting them, for as long as it kept
+                        # asking, and the user's microphone was the only thing
+                        # that could stop it.
+                        #
+                        # A tool that answers "unverified" is exactly what
+                        # provokes another call, and a second one provokes a
+                        # third. The cap is not there to stop legitimate work
+                        # - twelve rounds is far more than any real request
+                        # needs - it is there so that a loop ends with an
+                        # ANSWER instead of with a hung conversation.
+                        self._tool_rounds += 1
+                        over_budget = self._tool_rounds > MAX_TOOL_ROUNDS_PER_TURN
+                        if over_budget:
+                            print(f"[T.E.E.M.O] ⛔ tool budget spent "
+                                  f"({MAX_TOOL_ROUNDS_PER_TURN} rounds) — "
+                                  f"asking the model to wrap up")
+                            self.ui.write_log(
+                                "SYS: Tool budget spent — asking for the answer now.")
                         for fc in response.tool_call.function_calls:
                             print(f"[T.E.E.M.O] 📞 {fc.name}")
+                            if over_budget:
+                                # The tool is NOT run. The model is told why,
+                                # in the same shape as any other tool result,
+                                # so it can answer with what it already has.
+                                fn_responses.append(types.FunctionResponse(
+                                    id=fc.id, name=fc.name,
+                                    response={"result": (
+                                        "REFUSED: this turn has already used its "
+                                        f"budget of {MAX_TOOL_ROUNDS_PER_TURN} "
+                                        "tool calls. Do not call another tool. "
+                                        "Answer the user now, in one short "
+                                        "sentence, with what you already know — "
+                                        "and say plainly what you could not "
+                                        "check.")},
+                                ))
+                                continue
                             fr = await self._execute_tool(fc)
                             fn_responses.append(fr)
                         await self.session.send_tool_response(
@@ -2929,6 +3029,13 @@ class TeemoLive:
                     async def _send_and_arm(*a, **kw):
                         result = await _orig_send(*a, **kw)
                         self._arm_stall()
+                        # A new instruction from the user (or from the app)
+                        # starts a new turn, and a new turn gets a new budget.
+                        # Every user turn goes through THIS function — the tool
+                        # responses go through send_tool_response, which is a
+                        # different door — so this is the one place where the
+                        # turn boundary is real.
+                        self._tool_rounds = 0
                         return result
 
                     session.send_client_content = _send_and_arm
@@ -2946,6 +3053,7 @@ class TeemoLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    self._tool_rounds          = 0
 
                     print("[T.E.E.M.O] Connected.")
                     if _resumed_with:
@@ -2980,7 +3088,7 @@ class TeemoLive:
                     if self._wake_enabled and wake_ok and (first_connect or not self._awake):
                         self._awake = False
                         self.ui.set_state("SLEEPING")
-                        self.ui.write_log(f"SYS: T.E.E.M.O. online — sleeping. Say '{wake_phrase_text()}' to wake me.")
+                        self.ui.write_log(f"SYS: T.E.E.M.O. online — sleeping. To wake me, {self._wake_instruction()}.")
                     else:
                         self._awake = True
                         self.ui.set_state("LISTENING")

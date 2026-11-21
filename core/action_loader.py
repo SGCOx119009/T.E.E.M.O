@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -227,8 +228,11 @@ class ActionRegistry:
                     "the action could not be loaded",
                     tool=name,
                 )
+            _began = time.monotonic()
             result = _call_handler(handler, parameters, ctx or {})
-            return outcome.normalize_dispatch_result(name, result)
+            normalized = outcome.normalize_dispatch_result(name, result)
+            _record_audit(name, parameters, normalized, _began)
+            return normalized
         except Exception as e:
             # The exception's own message may carry a secret (a path, a token,
             # a query string). Only its TYPE is logged and returned.
@@ -240,6 +244,34 @@ class ActionRegistry:
                 tool=name,
                 error=error_type,
             )
+
+
+def _record_audit(name: str, parameters: dict, result: str,
+                  began: float) -> None:
+    """Put this call in the audit stream, with its latency.
+
+    WHY THIS CALL IS HERE AND NOT ONLY IN THE TESTS
+        `core/tool_audit.record()` existed and worked, and the acceptance
+        test proved it worked. Nothing ever CALLED it: the real dispatch went
+        straight from the model to the handler, so the Event Stream was
+        always empty and the "latency per action" that FASE 5 asks for was
+        a number nobody could ever see.
+
+        The record carries metadata only - the tool, the action, the status,
+        the risk class and the duration. The arguments and the result are
+        not retained: the stream is a local diagnostic, and a tool result
+        can contain the user's own text.
+    """
+    try:
+        from core import tool_audit
+        tool_audit.record(
+            name, result,
+            (time.monotonic() - began) * 1000.0,
+            parameters,
+        )
+    except Exception as exc:
+        # The audit is a diagnostic. It must never break a tool call.
+        print(f"[ActionLoader] audit record failed: {type(exc).__name__}: {exc}")
 
 
 def _call_handler(fn: Callable, parameters: dict, ctx: dict) -> str:

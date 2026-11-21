@@ -2,9 +2,9 @@
 core/operators/system.py — the operator for the machine and for what leaves it.
 
 TWO KINDS OF THING, ONE DOMAIN
-    The volume, the brightness, the WiFi and the power are the machine's
-    SETTINGS. The messages, the mail and the reminders are the machine's
-    EFFECTS on the world outside it.
+    The volume, the brightness, the WiFi, the power and the battery are the
+    machine's SETTINGS. The messages, the mail and the reminders are the
+    machine's EFFECTS on the world outside it.
 
     They are one operator because they share the two things that make them
     different from the rest: they change the state of the machine or of
@@ -29,7 +29,8 @@ class SystemOperator(Operator):
     name = "system"
     description = (
         "The machine's settings and its effects outside it: sound, display, "
-        "network and power; reminders and routines; and the channels that "
+        "network, and its power and energy (the battery, the charging state "
+        "and the power plan); reminders and routines; and the channels that "
         "reach another person."
     )
     context = "system"

@@ -87,7 +87,7 @@ from gui.providers_panel import (
 
 from PyQt6.QtWidgets import QGridLayout
 
-from gui.style import DISPLAY_CSS, btn_css, hud_font, px_font, scroll_css
+from gui.style import DISPLAY_CSS, MONO_CSS, btn_css, hud_font, px_font, scroll_css
 from gui.widgets import (ArcLogo, CommandFrame, DataRow, HeaderBar, HoloPanel, IconButton,
                          PanelText, RingGauge, RoutineRow, Sparkline, StateChip, StatusStrip,
                          TaskRow)
@@ -185,7 +185,7 @@ class MainWindow(QMainWindow):
 
         # Live camera container — replaces HUD when camera stream is active
         _cam_cont = QWidget()
-        _cam_cont.setStyleSheet("background: #000308;")
+        _cam_cont.setStyleSheet(f"background: {C.CAM_BG};")
         _cam_v = QVBoxLayout(_cam_cont)
         _cam_v.setContentsMargins(0, 0, 0, 0)
         _cam_v.setSpacing(0)
@@ -289,7 +289,7 @@ class MainWindow(QMainWindow):
         self._image_item.setVisible(False)
         self._video_scene.addItem(self._image_item)
         self._video_widget = QGraphicsView(self._video_scene)
-        self._video_widget.setStyleSheet("background: #000; border: none;")
+        self._video_widget.setStyleSheet(f"background: {C.VIDEO_BG}; border: none;")
         self._video_widget.setFrameShape(QGraphicsView.Shape.NoFrame)
         self._video_widget.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -1604,9 +1604,58 @@ class MainWindow(QMainWindow):
             QLineEdit:focus {{ border-color: {C.PRI_DIM}; }}
         """)
         self._wake_phrase_edit.setToolTip(
-            "The words that wake the assistant up. Say them out loud while it sleeps.")
+            "The words you want the assistant to answer to. They only take "
+            "effect if a wake model trained for them is installed — see the "
+            "line under this box.")
         self._wake_phrase_edit.editingFinished.connect(self._save_wake_phrase)
         lay.addWidget(self._wake_phrase_edit)
+
+        # HOW IT LISTENS: one phrase, or any voice.
+        #
+        # The bundled wake model was trained for ONE phrase, and it is not the
+        # phrase this product is named after — it cannot be, because openwakeword
+        # resolves a model by the exact file name it was published under. So the
+        # product offered two ways out: train a model for your own phrase, or
+        # stop looking for a phrase at all and wake on any speech, which is
+        # what the voice-activity detector does and needs no training.
+        #
+        # The user was never offered that choice, and the interface simply
+        # showed a phrase the microphone could not hear. That is the bug this
+        # row exists to close.
+        self._wake_mode_combo = QComboBox()
+        self._wake_mode_combo.setFixedHeight(30)
+        self._wake_mode_combo.setFont(px_font(11))
+        self._wake_mode_combo.addItem("Wake on a phrase", "phrase")
+        self._wake_mode_combo.addItem("Wake on any voice", "voice")
+        self._wake_mode_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                selection-background-color: {C.PRI_DIM};
+            }}
+        """)
+        self._wake_mode_combo.setToolTip(
+            "Any voice wakes it up — no phrase to memorise and no model to "
+            "train. A phrase needs a wake model trained for it.")
+        self._wake_mode_combo.currentIndexChanged.connect(self._save_wake_mode)
+        lay.addWidget(self._wake_mode_combo)
+
+        # WHAT THE MICROPHONE IS ACTUALLY LISTENING FOR.
+        #
+        # The field above holds what the user WANTS to say. This line holds
+        # what the machine can actually HEAR, and the two are not the same
+        # unless a matching model is installed. Saying so is the difference
+        # between a setting and a promise the product cannot keep.
+        self._wake_effective_lbl = QLabel("")
+        self._wake_effective_lbl.setFont(px_font(9))
+        self._wake_effective_lbl.setWordWrap(True)
+        self._wake_effective_lbl.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(self._wake_effective_lbl)
+        self._refresh_wake_phrase_field()
 
         # Which operator's tools the model is offered. Forty-five tools is a
         # lot of prompt for a conversation about one of them, and this is the
@@ -1856,7 +1905,11 @@ class MainWindow(QMainWindow):
             fin = C.GREEN if status == "done" else (C.RED if status == "failed" else C.ACC2)
             strip.append(f'<span style="color:{fin};"><b>● {e(status.upper())}</b></span>')
 
-        parts = [f'<div style="color:{C.TEXT}; font-family:Courier New;">',
+        # The monospace face comes from gui/style.py, like every other one.
+        # It used to be a literal "Courier New" here, which meant this panel
+        # was the only place in the product rendering in a different typeface
+        # from the rest of it.
+        parts = [f'<div style="color:{C.TEXT}; font-family:{MONO_CSS};">',
                  f'<div style="color:{C.TEXT_DIM};">{"  ".join(strip)}'
                  f'&nbsp;&nbsp;·&nbsp;&nbsp;{took:.0f}s</div>',
                  f'<div style="margin-top:6px;"><span style="color:{C.TEXT_DIM};">'
@@ -2386,7 +2439,14 @@ class MainWindow(QMainWindow):
 
     def _refresh_wake_phrase_field(self):
         """Show the stored wake phrase in the field — but never over what the
-        user is typing. A refresh that lands mid-edit would eat a keystroke."""
+        user is typing. A refresh that lands mid-edit would eat a keystroke.
+
+        It also shows WHAT THE MICROPHONE IS LISTENING FOR, which is not
+        necessarily what the field holds: the bundled wake model hears one
+        particular phrase, and if that is not the phrase in the field, the
+        user has to be told, because otherwise the field is a promise the
+        machine cannot keep.
+        """
         field = getattr(self, "_wake_phrase_edit", None)
         if field is None:
             return
@@ -2395,11 +2455,91 @@ class MainWindow(QMainWindow):
             current = wake_phrase()
         except Exception:
             current = ""
-        if field.hasFocus():
-            return
-        if field.text() != current:
+        if not field.hasFocus() and field.text() != current:
             field.setText(current)
         field.setPlaceholderText(current or "Hey T.E.E.M.O")
+        self._refresh_wake_mode_combo()
+        self._refresh_wake_effective_label()
+
+    def _refresh_wake_mode_combo(self):
+        """Show the listening mode that is actually stored."""
+        combo = getattr(self, "_wake_mode_combo", None)
+        if combo is None:
+            return
+        try:
+            from core.wake_word import wake_mode
+            mode = wake_mode()
+        except Exception:
+            mode = "phrase"
+        index = combo.findData(mode)
+        if index >= 0 and combo.currentIndex() != index:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+
+    def _save_wake_mode(self):
+        """Persist the listening mode, and say what changed."""
+        combo = getattr(self, "_wake_mode_combo", None)
+        if combo is None:
+            return
+        mode = combo.currentData() or "phrase"
+        try:
+            from core.wake_word import wake_mode
+            from memory.config_manager import save_wake_mode
+            before = wake_mode()
+            save_wake_mode(mode)
+            after = wake_mode()
+        except Exception as e:
+            print(f"[Wake] mode not saved: {e}")
+            return
+        if after != before:
+            self._log_sig.emit(
+                f"SYS: Wake mode is now '{after}' - "
+                f"{'any voice wakes it up' if after == 'voice' else 'it listens for a phrase'}.")
+        self._refresh_wake_effective_label()
+
+    def _refresh_wake_effective_label(self):
+        """The truth about what the microphone hears.
+
+        Three cases, and each one gets its own sentence:
+
+          * a model of the user's own is installed -> it hears the phrase
+            they configured, and there is nothing to warn about;
+          * the listening mode is "any voice" -> there is no phrase at all,
+            and the honest thing to say is that any speech wakes it up;
+          * the bundled model -> it hears the phrase it was trained for, NOT
+            the one in the field, and that is said out loud rather than left
+            for the user to discover by failing to wake it up.
+        """
+        label = getattr(self, "_wake_effective_lbl", None)
+        if label is None:
+            return
+        try:
+            from core.wake_word import (
+                effective_wake_phrase, wake_mode, wake_phrase,
+            )
+            mode = wake_mode()
+            effective = effective_wake_phrase()
+            wanted = wake_phrase()
+        except Exception:
+            label.setText("")
+            return
+
+        if mode == "voice":
+            text = ("Microphone: wakes on ANY VOICE - say anything, no phrase "
+                    "needed.")
+        elif effective and effective.casefold() == wanted.casefold():
+            text = f"Microphone: listening for '{effective}'."
+        elif effective:
+            text = (f"Microphone: the installed wake model listens for "
+                    f"'{effective}', NOT '{wanted}'. Either say '{effective}', "
+                    f"or switch to 'Wake on any voice' above.")
+        else:
+            text = (f"Microphone: no wake model is installed, so '{wanted}' "
+                    f"will not wake it up. Use 'Wake on any voice' or install "
+                    f"a model trained for your phrase.")
+        label.setText(text)
+        label.setToolTip(text)
 
     def _save_wake_phrase(self):
         """Persist the wake phrase typed into the CONTROLS drawer.

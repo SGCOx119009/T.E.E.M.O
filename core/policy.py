@@ -43,6 +43,15 @@ THE CHECK HAPPENS TWICE
     the private and loopback ones; `check_address` calls it rather than
     reimplementing it.
 
+TWO CHECKS, NOT ONE
+    A name is not an address. `http://example.test/` is a name that says
+    nothing about where it leads, and `http://127.0.0.1:8080/` is an
+    address that no name policy would ever recognise. So a request must
+    pass BOTH: `check_destination` (what is this page?) and
+    `check_address` (where does it actually point?). `check_request` is
+    the two of them together, and it is what every request goes through —
+    the one the user asked for and every redirect after it.
+
 READING AND ACTING ARE DIFFERENT
     `check_destination(url)` asks "may this page be opened?". 
     `check_destination(url, acting=True)` asks the stricter question: "may
@@ -51,6 +60,7 @@ READING AND ACTING ARE DIFFERENT
 """
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -60,6 +70,7 @@ __all__ = [
     "allowed_domains",
     "check_address",
     "check_destination",
+    "check_request",
     "classify_host",
     "host_of",
     "require_destination",
@@ -220,6 +231,53 @@ def _labels(host: str) -> list[str]:
     return [label for label in host.split(".") if label]
 
 
+#: The schemes that name a network address. Anything else is not an address
+#: the policy can resolve, so the address half of the policy does not apply
+#: to it (the destination half still does).
+_NETWORK_SCHEMES = ("http", "https")
+
+
+def _scheme_of(url: str) -> str:
+    """The scheme of an address, lowercased."""
+    text = str(url or "").strip()
+    if "://" not in text:
+        text = "https://" + text
+    try:
+        return (urlparse(text).scheme or "").lower()
+    except ValueError:
+        return ""
+
+
+def _literal_address(host: str):
+    """The IP address of a host that IS one, or None when it is a name.
+
+    A literal address needs no resolver: the number IS the address, so it
+    can be judged without asking anybody's DNS server and without waiting
+    for one.
+    """
+    try:
+        return ipaddress.ip_address(str(host or "").strip())
+    except ValueError:
+        return None
+
+
+def _is_local_address(address) -> bool:
+    """Whether an IP address is one this policy must never reach.
+
+    The same set `core/tasks/web.py` refuses: loopback, private (LAN),
+    link-local (including the cloud metadata address), reserved,
+    multicast and unspecified.
+    """
+    return bool(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
 def _host_matches(host: str, suffix: str) -> bool:
     """True when `host` is `suffix` or a subdomain of it.
 
@@ -376,15 +434,39 @@ def require_destination(url: str, *, acting: bool = False) -> Decision:
     return decision
 
 
-def check_address(url: str) -> Decision:
+def check_address(url: str, *, require_reachable: bool = True) -> Decision:
     """May this address be reached at all?
 
     This is the private-network half of the policy, and it is NOT done here:
     `core/tasks/web.py` already resolves the name and refuses loopback,
     private and link-local addresses, and reimplementing that would be two
     copies of a rule that must not drift. This calls it.
+
+    A LITERAL address is judged here, without a resolver: the number IS
+    the address, so `http://127.0.0.1:8080/`, `http://192.168.1.1/` and
+    `http://169.254.169.254/` are refused without asking anybody's DNS
+    server about anything. A NAME is resolved by `core/tasks/web.py`,
+    which refuses every address it resolves to.
+
+    `require_reachable=False` says what a name that does not resolve
+    means: that the address cannot be reached AT ALL, which is not the
+    same as reaching something forbidden. The request fails on its own,
+    and a guard that refused it would be refusing addresses it has no
+    business refusing.
     """
     host = host_of(url)
+    if _scheme_of(url) not in _NETWORK_SCHEMES:
+        return Decision(False, "only http and https addresses can be reached",
+                        "deny:scheme", "scheme", host)
+
+    literal = _literal_address(host)
+    if literal is not None:
+        if _is_local_address(literal):
+            return Decision(False,
+                            f"'{host}' points at a local or private network address",
+                            "deny:private_address", "private_address", host)
+        return Decision(True, "", "", "", host)
+
     try:
         from core.tasks import web as _web
     except Exception as exc:
@@ -393,10 +475,50 @@ def check_address(url: str) -> Decision:
     try:
         _web.check_url(str(url or "").strip())
     except _web.Refused as exc:
-        return Decision(False, str(exc), "deny:private_address",
+        reason = str(exc)
+        # The wording comes from core/tasks/web.py, which is the only place
+        # the resolver is implemented; a name that does not resolve is a
+        # different thing from a name that resolves inward.
+        if "does not resolve" in reason:
+            if not require_reachable:
+                return Decision(True, "", "", "", host)
+            return Decision(False, reason, "deny:unresolvable", "unresolvable", host)
+        # It resolves, and it resolves inward: that is always a refusal.
+        return Decision(False, reason, "deny:private_address",
                         "private_address", host)
     except Exception as exc:
-        # The resolution itself failed — that is a refusal, not a pass.
+        # The resolution itself failed — a timeout, a resolver that is down.
+        # Nothing was shown to be safe, and nothing was shown to be
+        # forbidden either: an address nobody can look up is an address
+        # nobody can reach. A strict caller refuses it; a request guard
+        # lets it through, because a browser that refuses every name
+        # whenever the resolver blinks is a browser that does not work.
+        if not require_reachable:
+            return Decision(True, "", "", "", host)
         return Decision(False, f"the address could not be verified ({type(exc).__name__})",
                         "deny:private_address", "private_address", host)
     return Decision(True, "", "", "", host)
+
+
+def check_request(url: str, *, acting: bool = False) -> Decision:
+    """The whole verdict on ONE request: the destination AND the address.
+
+    `check_destination` asks about the NAME — is this a bank, a mail
+    account, a page of the user's own network? `check_address` asks about
+    the ADDRESS — does that name point at a loopback, a LAN or a
+    link-local address? A request that fails EITHER of them does not
+    happen, so this is the check every request goes through, whether the
+    user asked for the address or a site redirected the browser to it.
+
+    The deny list wins and the allow list only ever HARDENS: the allow
+    list is applied by `check_destination` AFTER the deny list, so an
+    authorised domain cannot re-open a denied one, and a private address
+    is refused even when the user's own list names it.
+    """
+    destination = check_destination(url, acting=acting)
+    if not destination.allowed:
+        return destination
+    address = check_address(url, require_reachable=False)
+    if not address.allowed:
+        return address
+    return destination

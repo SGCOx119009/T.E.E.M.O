@@ -12,6 +12,8 @@ and ends in a report.
     tools.py    what a background agent may use, enforced here rather than asked for
     web.py      reading a web page or PDF in full, public addresses only
     engine.py   the scheduler, the worker loop, budgets, cancel, steer, resume
+    plan_runner.py  the one place a verified plan's step is run
     desktop.py  the desktop's glue: where files live, how results are announced
 """
 from core.tasks.engine import ACTIVE, TaskEngine  # noqa: F401
+from core.tasks.plan_runner import PlanBudget, PlanRunner  # noqa: F401

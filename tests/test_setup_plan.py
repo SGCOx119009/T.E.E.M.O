@@ -18,7 +18,11 @@ class SetupPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("MARK setup plan", result.stdout)
+        # The heading carries this product's name, not the one the test was
+        # written against. The contract being checked is "the plan is
+        # printed, read-only, with these sections" - not which brand spells
+        # it.
+        self.assertIn("T.E.E.M.O. setup plan", result.stdout)
         self.assertIn("Network:", result.stdout)
         self.assertIn("Credentials/OAuth:", result.stdout)
         self.assertIn("not selected", result.stdout)

@@ -91,9 +91,15 @@ class ElementMark:
     automation id. It is opaque to the model and never rendered into the
     observation, because it is plumbing, not content.
 
-    `own` marks an element that belongs to a T.E.E.M.O. process. Those are
+    `own` marks an element that belongs to T.E.E.M.O. itself. Those are
     never actionable: the assistant's own buttons are not something it should
     be able to press, and a model that asks to press them gets a refusal.
+
+    `pid` and `hwnd` are the element's OWNING process and its native window
+    handle. They are carried because the question "is this ours?" cannot be
+    answered without them: a control hosted by another process INSIDE one of
+    our windows is still ours, and the only way to know that is to look at
+    the window the control lives in, not at the process that drew it.
     """
 
     index: int
@@ -107,6 +113,7 @@ class ElementMark:
     own: bool = False
     window: str = ""
     pid: int = 0
+    hwnd: int = 0                                       # the element's own handle
     automation_id: str = ""
     control_type: str = ""                              # the RAW UIA type, e.g. "Button"
     selector: dict = field(default_factory=dict)

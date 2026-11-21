@@ -1,8 +1,20 @@
 """
-MARK XL — Dependency auto-installer.
+core/installer.py — Dependency auto-installer.
 
 Called automatically on first launch and after engine reconfiguration.
 Installs only the packages that are actually missing, then exits cleanly.
+
+IT ASKS BEFORE IT INSTALLS, AND THAT IS THE WHOLE POINT
+    This module used to install whatever was missing, including a 150 MB
+    browser, the first time the application started, with nobody asked. A
+    program that reaches the network and writes to the disk on its own
+    initiative is a program nobody can reason about: the user cannot tell
+    whether the download was theirs, and the application cannot tell either.
+
+    So the confirmation is a KEYWORD-ONLY argument. It cannot be passed by
+    accident, it cannot be filled in by a positional argument that meant
+    something else, and a caller that forgets it installs NOTHING and is
+    told so in the log.
 """
 from __future__ import annotations
 
@@ -83,12 +95,26 @@ def _pip(package: str, log: Callable | None = None) -> bool:
 
 # ── Public API ────────────────────────────────────────────────────────────
 
-def install_for_config(config: dict, log: Callable | None = None) -> None:
+def install_for_config(config: dict, log: Callable | None = None,
+                       *, confirmed: bool = False) -> None:
     """
     Install all missing packages required by *config*.
 
     Blocking — always call from a background thread.
     Progress is reported via the optional *log* callback (receives a str).
+
+    NOTHING IS INSTALLED WITHOUT `confirmed=True`.
+
+        Without it, the missing packages are listed and the run stops: the
+        log says the installation was "not started". That is the honest
+        outcome for a program that would otherwise download a browser on
+        its own initiative.
+
+        With it, the packages are installed one by one, and the log says
+        the installation is "incomplete" if any of them failed. The old
+        code logged "All dependencies ready" after a failed install, which
+        is the kind of sentence a user believes until the feature turns out
+        to be missing.
     """
     stt = config.get("stt_engine", "whisper").lower()
     tts = config.get("tts_engine", "edgetts").lower()
@@ -114,23 +140,39 @@ def install_for_config(config: dict, log: Callable | None = None) -> None:
         return
 
     pkg_names = ", ".join(p for _, p in missing)
+    if not confirmed:
+        if log:
+            log(f"SYS: {len(missing)} package(s) are missing ({pkg_names}) — "
+                f"installation not started.")
+        return
+
     if log:
         log(f"SYS: Installing {len(missing)} package(s): {pkg_names}")
 
+    failed: list[str] = []
     for _mod, pkg in missing:
-        _pip(pkg, log)
+        if not _pip(pkg, log):
+            failed.append(pkg)
 
     # Playwright: install the package + download Chromium browser
     if not _available("playwright"):
-        _pip("playwright", log)
+        if not _pip("playwright", log):
+            failed.append("playwright")
+        else:
+            if log:
+                log("SYS: Downloading Playwright browser (Chromium, ~150 MB — one-time)…")
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True,
+            )
+            if log:
+                log("SYS: Playwright browser ready.")
+
+    if failed:
         if log:
-            log("SYS: Downloading Playwright browser (Chromium, ~150 MB — one-time)…")
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            capture_output=True,
-        )
-        if log:
-            log("SYS: Playwright browser ready.")
+            log(f"SYS: Dependency installation is incomplete — "
+                f"{len(failed)} package(s) failed: {', '.join(failed)}")
+        return
 
     if log:
         log("SYS: All dependencies ready ✓")

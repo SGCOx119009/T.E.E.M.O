@@ -25,8 +25,6 @@ THE TWO RULES
 """
 from __future__ import annotations
 
-import threading
-
 from core.grounding.base import (
     LEVEL_SOM,
     LEVEL_UIA,
@@ -42,6 +40,7 @@ from core.grounding.base import (
     observation_is_model_safe,
 )
 from core.grounding.resolver import GroundingResolver, session_resolver
+from core.grounding import uia as _uia
 
 
 def _warm_in_background() -> None:
@@ -55,22 +54,13 @@ def _warm_in_background() -> None:
     instead of in front of the first question.
 
     Nothing is asked of the desktop here: only modules are imported.
-    """
-    def _warm():
-        try:
-            import mss                     # noqa: F401
-            import pyautogui               # noqa: F401
-        except Exception:
-            pass
-        try:
-            from core import screenview
-            screenview.warm_up()
-        except Exception:
-            pass
 
+    The warm-up itself lives in `core.grounding.uia`, which is where the
+    request path waits for it — so there is ONE thread doing this work,
+    not two, and no request repeats it.
+    """
     try:
-        threading.Thread(target=_warm, daemon=True,
-                         name="GroundingWarmUp").start()
+        _uia.warm()
     except Exception:
         pass
 

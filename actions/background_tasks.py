@@ -5,6 +5,10 @@ respect a budget, wait out a quota or stay away from the user's computer lives
 in core/tasks. This file turns what the model asked for into a call on the
 engine and turns the answer back into facts (core/outcome.py) for the model to
 say in the user's language.
+
+The steps of a verified plan are not run here either. They go through the same
+engine's runner (core/tasks/plan_runner.py), so a planned step is made in one
+place whichever way the task was asked for.
 """
 from __future__ import annotations
 

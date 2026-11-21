@@ -122,6 +122,28 @@ class C:
     DARK      = "#000d14"
     BAR_BG    = "#011520"
 
+    # ── Lifted out of the overlays, the widgets and the window ──────────────
+    # Every colour in the product is named here; nothing else writes a hex.
+    INPUT_BG       = "#000d12"   # the field behind every input, combo box, meter and slider
+    GREEN_BG       = "#001a08"   # the plate of a switch that is ON
+    GREEN_BG_HOVER = "#002010"   # that same plate while the pointer is on it
+    GREEN_BADGE    = "#001a0d"   # the plate behind the "phone connected" tick
+    ACT_BG         = "#00091a"   # the plate behind the accent-coloured action button
+    ERR            = "#ff6b6b"   # a test that came back failed
+    WARN           = "#f4b942"   # a warning the person has to read (firewall, bind error)
+    WHITE_PURE     = "#ffffff"   # pure white — a handle, a plain chip
+    GREY           = "#888888"   # the dim text of a quiet chip and of an unknown file
+    GREY_LT        = "#aaaaaa"   # the dim text of a plain text file
+    CAM_BG         = "#000308"   # the container behind the live camera
+    VIDEO_BG       = "#000000"   # the container behind the HUD video
+    FILE_AUDIO     = "#cc44ff"   # the audio file-type icon
+    FILE_PDF       = "#ff4444"   # the pdf file-type icon
+    FILE_WORD      = "#4488ff"   # the word file-type icon
+    FILE_EXCEL     = "#44bb44"   # the excel file-type icon
+    FILE_ARCHIVE   = "#ff8844"   # the archive file-type icon
+    FILE_PPTX      = "#ff6622"   # the powerpoint file-type icon
+    FILE_DATA      = "#88ddff"   # the data file-type icon
+
 
 # Keys tied to the accent colour — status colours (ACC, GREEN, RED…) stay fixed
 _HUE_LINKED = (

@@ -317,6 +317,31 @@ def _process_text_doc(path: Path, file_type: str, action: str,
         return f"AI processing failed: {e}"
 
 
+def _read_csv(path: Path):
+    """Read a CSV, replacing what cannot be decoded.
+
+    THE ARGUMENT MOVED, AND EVERY CSV BROKE WITH IT
+        `pd.read_csv(..., errors="replace")` was right up to pandas 1.2. From
+        1.3 on, `errors` is not a parameter of `read_csv` at all - the one
+        that replaces undecodable bytes is `encoding_errors` - so the call
+        raised `TypeError: read_csv() got an unexpected keyword argument
+        'errors'` on every single CSV, and the user was told "Could not read
+        file", which is a sentence about the FILE and not about the code.
+        Measured here with pandas 2.3.3 installed.
+
+        The argument is now passed under the name the installed pandas
+        understands, and the old name is kept for the pandas that predates
+        it, so one call works on both.
+    """
+    import pandas as pd
+
+    try:
+        return pd.read_csv(path, encoding="utf-8", encoding_errors="replace")
+    except TypeError:
+        # pandas < 1.3: `encoding_errors` does not exist.
+        return pd.read_csv(path, encoding="utf-8", errors="replace")
+
+
 def _process_data(path: Path, file_type: str, action: str,
                   params: dict, speak=None) -> str:
     try:
@@ -328,7 +353,7 @@ def _process_data(path: Path, file_type: str, action: str,
 
     try:
         if file_type == "csv":
-            df = pd.read_csv(path, encoding="utf-8", errors="replace")
+            df = _read_csv(path)
         else:
             df = pd.read_excel(path)
     except Exception as e:

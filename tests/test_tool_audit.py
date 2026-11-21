@@ -34,6 +34,11 @@ class ToolAuditTests(unittest.TestCase):
             "open_settings", "file_explorer", "open_run", "dark_mode",
             "toggle_wifi", "restart", "shutdown", "reload_n", "refresh_n",
             "reload_page_n", "type", "write", "write_on_screen",
+            # The media transport, under the two names the action map uses.
+            # The contract grew: the chassis carries these actions and the
+            # audit has to classify them, or the policy rejects them.
+            "media_play_pause", "media_next", "media_previous", "media_stop",
+            "next_track", "previous_track",
         },
         "file_controller": {
             "list", "create_file", "create_folder", "delete", "move", "copy",

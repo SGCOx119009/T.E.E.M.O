@@ -626,6 +626,16 @@ class _PageContextChanged(RuntimeError):
     """
 
 
+class _GuardUnavailable(RuntimeError):
+    """The browser could not be guarded by the domain policy.
+
+    An engine that cannot intercept its own requests cannot be checked on
+    every redirect, and a browser that is not checked is a browser that has
+    no policy at all. So the engine is REFUSED rather than used unguarded:
+    an unavailable browser is a smaller problem than an unchecked one.
+    """
+
+
 #: How many effects the browser may produce in one window, and how wide that
 #: window is. This is the fuse: an agent that is stuck — open, look, click,
 #: not there, open another — stops on its own instead of hammering a site
@@ -691,6 +701,12 @@ class _BrowserSession:
         # was stopped by the policy has to say WHICH rule stopped it, and
         # the rule is usually not the one the caller asked about.
         self._blocked_by_policy = None
+        # Whether the route guard is installed on this session, and whether
+        # an attempt to install it FAILED. A browser that could not be
+        # guarded is refused rather than used: an unchecked browser is a
+        # browser with no policy at all.
+        self._guard_installed = False
+        self._guard_failed = False
         # The browser this session attached to over CDP, if it did.
         self._cdp_browser = None
 
@@ -807,7 +823,7 @@ class _BrowserSession:
                 pass
         self._context = self._page = None
 
-    async def _install_route_guard(self) -> None:
+    async def _install_route_guard(self) -> bool:
         """Check the policy on EVERY request, and therefore on every redirect.
 
         A redirect is a request, and Playwright hands every request to this
@@ -816,8 +832,21 @@ class _BrowserSession:
         browser to. A public page that redirects into a bank is still a
         bank, and this is where that is caught.
 
+        EVERY request goes through BOTH halves of the policy: the
+        destination (what is this page?) and the address (where does it
+        actually point?). A name says nothing about where it leads, so
+        `check_request` asks core/policy.py for the whole verdict. A
+        redirect to a literal loopback, LAN or link-local address is
+        refused here exactly as it is refused on the address the user
+        asked for.
+
         The blocked request is aborted rather than followed, and the reason
         is kept so the caller can report which rule fired.
+
+        Returns True when the guard is installed. False means this browser
+        CANNOT be guarded, and the caller must refuse to use it: a browser
+        whose redirects are not checked has no policy, and no policy is
+        worse than no browser.
         """
         async def _guard(route, request=None):
             url = ""
@@ -830,7 +859,7 @@ class _BrowserSession:
                     url = route.request.url
                 except Exception:
                     url = ""
-            decision = domain_policy.check_destination(url) if url else None
+            decision = domain_policy.check_request(url) if url else None
             if decision is not None and not decision.allowed:
                 self._blocked_by_policy = decision
                 print(f"[Browser] blocked by policy {decision.policy}: {url}")
@@ -851,11 +880,17 @@ class _BrowserSession:
             # used: the whole point of the policy is that it holds.
             print(f"[Browser] the policy guard could not be installed "
                   f"({type(exc).__name__}) — navigation is disabled")
+            self._guard_installed = False
+            self._guard_failed = True
             self._blocked_by_policy = domain_policy.Decision(
                 False,
                 "the browser could not be guarded by the domain policy",
                 "deny:guard_unavailable", "guard_unavailable", "",
             )
+            return False
+        self._guard_installed = True
+        self._guard_failed = False
+        return True
 
     async def _attach_over_cdp(self) -> bool:
         """Attach to the browser the user already has open.
@@ -901,7 +936,12 @@ class _BrowserSession:
             # obtained: a browser that was attached is guarded exactly like a
             # browser that was launched. Without this, attaching would be a
             # way round the policy.
-            await self._install_route_guard()
+            if not await self._install_route_guard():
+                # An attached browser that cannot be guarded is not used:
+                # attaching would otherwise be a way round the policy.
+                print("[Browser] the attached browser cannot be guarded, "
+                      "so it will not be used")
+                return False
             print(f"[Browser] attached to the running browser over the local "
                   f"debugging port")
             return True
@@ -960,6 +1000,15 @@ class _BrowserSession:
                 self._context = await engine_obj.launch_persistent_context(teemo, **kwargs)
 
             self._page = await self._adopt_page()
+            # Firefox is guarded exactly like Chromium: the policy belongs
+            # to the CONTEXT, not to the engine, and a redirect on Firefox
+            # is a redirect like any other.
+            if not await self._install_route_guard():
+                raise _GuardUnavailable(
+                    "Firefox could not be guarded by the domain policy, so "
+                    "it will not be used: a browser whose redirects are not "
+                    "checked has no policy"
+                )
             print(f"[Browser] ✅ Firefox launched")
             return
 
@@ -975,6 +1024,15 @@ class _BrowserSession:
             }
             self._context = await engine_obj.launch_persistent_context(safari_profile, **kwargs)
             self._page = await self._adopt_page()
+            # Safari/WebKit is guarded exactly like Chromium: the policy
+            # belongs to the CONTEXT, not to the engine, and a redirect on
+            # WebKit is a redirect like any other.
+            if not await self._install_route_guard():
+                raise _GuardUnavailable(
+                    "Safari could not be guarded by the domain policy, so "
+                    "it will not be used: a browser whose redirects are not "
+                    "checked has no policy"
+                )
             print(f"[Browser] ✅ Safari launched")
             return
 
@@ -1035,9 +1093,18 @@ class _BrowserSession:
                 self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
                 self._page = await self._adopt_page()
                 self.profile_kind = "real"
-                await self._install_route_guard()
+                if not await self._install_route_guard():
+                    raise _GuardUnavailable(
+                        "the browser could not be guarded by the domain policy"
+                    )
                 print(f"[Browser] ✅ Launched [{label}] profile={profile}")
                 return
+            except _GuardUnavailable:
+                # A browser that cannot be guarded is not a browser with a
+                # weaker policy; it is a browser with NO policy, and the
+                # fallback below would have launched exactly the same
+                # unguarded browser under another profile.
+                raise
             except Exception as e:
                 print(f"[Browser] ⚠️  Real profile failed for {label}: {e}")
 
@@ -1052,9 +1119,14 @@ class _BrowserSession:
             self._context = await engine_obj.launch_persistent_context(teemo_profile, **kwargs)
             self._page = await self._adopt_page()
             self.profile_kind = "separate"
-            await self._install_route_guard()
+            if not await self._install_route_guard():
+                raise _GuardUnavailable(
+                    "the browser could not be guarded by the domain policy"
+                )
             print(f"[Browser] ✅ Launched [{label}] with the assistant profile "
                   f"(sign-ins persist across sessions)")
+        except _GuardUnavailable:
+            raise
         except Exception as e2:
             raise RuntimeError(f"Could not launch {self.browser_name}: {e2}") from e2
 
@@ -1160,7 +1232,7 @@ class _BrowserSession:
             return outcome.failed("browser_control", "url must be a non-empty string")
         url = _normalize_url(url)
 
-        decision = domain_policy.check_destination(url)
+        decision = domain_policy.check_request(url)
         if not decision.allowed:
             return outcome.failed(
                 "browser_control",
@@ -1174,8 +1246,31 @@ class _BrowserSession:
         # stale reason would be reported against the wrong address.
         self._blocked_by_policy = None
 
-        page     = await self._get_page(allow_new=True)
+        try:
+            page = await self._get_page(allow_new=True)
+        except _GuardUnavailable as exc:
+            # An engine that cannot be guarded is refused, not used
+            # unguarded.
+            return outcome.failed(
+                "browser_control",
+                str(exc),
+                url=url,
+                policy="deny:guard_unavailable",
+                category="guard_unavailable",
+            )
         prev_url = page.url
+        # A browser whose guard could not be installed is not used either:
+        # the policy has to hold on every redirect, and a browser that
+        # cannot check its redirects has no policy at all.
+        if getattr(self, "_guard_failed", False):
+            return outcome.failed(
+                "browser_control",
+                "the browser could not be guarded by the domain policy, so "
+                "it was not used",
+                url=url,
+                policy="deny:guard_unavailable",
+                category="guard_unavailable",
+            )
         if not self._reserve_interaction():
             return self._interaction_limit_result()
 

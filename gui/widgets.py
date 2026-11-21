@@ -34,7 +34,6 @@ from PyQt6.QtWidgets import (
 
 from gui.theme import (
     C,
-    _OS,
     qcol,
 )
 
@@ -232,13 +231,13 @@ class LogWidget(QTextEdit):
             QTimer.singleShot(20, self._next)
 
 _FILE_ICONS = {
-    "image":   ("🖼", "#00d4ff"), "video":   ("🎬", "#ff6b00"),
-    "audio":   ("🎵", "#cc44ff"), "pdf":     ("📄", "#ff4444"),
-    "word":    ("📝", "#4488ff"), "excel":   ("📊", "#44bb44"),
-    "code":    ("💻", "#ffcc00"), "archive": ("📦", "#ff8844"),
-    "pptx":    ("📊", "#ff6622"), "text":    ("📃", "#aaaaaa"),
-    "data":    ("🔧", "#88ddff"), "unknown": ("📎", "#888888"),
-    "folder":  ("📁", "#ffcc00"),
+    "image":   ("🖼", C.PRI),          "video":   ("🎬", C.ACC),
+    "audio":   ("🎵", C.FILE_AUDIO),   "pdf":     ("📄", C.FILE_PDF),
+    "word":    ("📝", C.FILE_WORD),    "excel":   ("📊", C.FILE_EXCEL),
+    "code":    ("💻", C.ACC2),         "archive": ("📦", C.FILE_ARCHIVE),
+    "pptx":    ("📊", C.FILE_PPTX),    "text":    ("📃", C.GREY_LT),
+    "data":    ("🔧", C.FILE_DATA),    "unknown": ("📎", C.GREY),
+    "folder":  ("📁", C.ACC2),
 }
 _EXT_TO_CAT = {
     **dict.fromkeys(["jpg","jpeg","png","gif","webp","bmp","tiff","svg","ico"], "image"),
@@ -461,7 +460,10 @@ class _DropCanvas(QWidget):
             n = self._z._folder_files
             ext_str, size_str = "FOLDER", f"{n}{'+' if n >= 5000 else ''} files"
 
-        p.setFont(QFont("Segoe UI Emoji", 13) if _OS == "Windows" else QFont("Arial", 13))
+        # The emoji face. This product runs on Windows, and Windows is what
+        # has the emoji font; the other branch it used to carry could never
+        # be taken.
+        p.setFont(QFont("Segoe UI Emoji", 13))
         p.setPen(QPen(qcol(icon_col)))
         p.drawText(QRectF(8, 0, 26, H), Qt.AlignmentFlag.AlignCenter, icon)
 
@@ -1110,7 +1112,7 @@ class StatusStrip(QWidget):
 
 
 def _pal(colour):
-    """A palette name ("GREEN") or a hex value ("#00ff88") -> a hex value.
+    """A palette name ("GREEN") or a hex value -> a hex value.
     Names are resolved at paint time, so they follow a live re-theme."""
     if isinstance(colour, str) and colour and not colour.startswith("#"):
         return getattr(C, colour, None)

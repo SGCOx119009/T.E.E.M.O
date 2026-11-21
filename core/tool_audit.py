@@ -147,6 +147,43 @@ _ACTION_RISK = {
         "stop": "state_change",
         "mute": "state_change",
         "unmute": "state_change",
+        # The transport. These were missing, and a missing pair is not a
+        # neutral thing: `core/action_policy.py` refuses every action it
+        # cannot classify, so "pause the video" was REJECTED by the policy
+        # before it ever reached the player. Twenty plan steps were dying
+        # that way.
+        "forward": "state_change",
+        "back": "state_change",
+        "pause": "state_change",
+        "resume": "state_change",
+        "seek_to": "state_change",
+    },
+    # Background tasks and routines were missing here for the same reason,
+    # and their steps were rejected the same way.
+    "background_tasks": {
+        # Starting one puts a machine to work on the user's behalf, so it is
+        # not a read and not a local state change: it is the same class as
+        # any other action that reaches outside this conversation.
+        "start": "high",
+        "stop": "state_change",
+        "list": "read_or_navigate",
+        "status": "read_or_navigate",
+        "result": "read_or_navigate",
+        "agents": "read_or_navigate",
+        "steer": "state_change",
+        "cancel": "state_change",
+        "finish": "state_change",
+    },
+    "routines": {
+        # A routine is something that will act on its own later, without
+        # anyone in the conversation. Creating, changing or removing one is
+        # therefore a high-risk action: it schedules future behaviour.
+        "add": "high",
+        "update": "high",
+        "remove": "high",
+        "list": "read_or_navigate",
+        "run_now": "state_change",
+        "quiet_hours": "state_change",
     },
     "computer_control": {
         "close_app": "high",
@@ -204,11 +241,21 @@ _ACTION_RISK = {
         "fullscreen": "state_change",
         "screen_off": "state_change",
         "play_pause": "state_change",
+        # The media transport, under both names the action map carries it.
+        # Unclassified meant rejected by the policy before the action ran.
+        "media_play_pause": "state_change",
+        "media_next": "state_change",
+        "media_previous": "state_change",
+        "media_stop": "state_change",
+        "next_track": "state_change",
+        "previous_track": "state_change",
         "show_desktop": "state_change",
         "lock_screen": "state_change",
         "dark_mode": "state_change",
         "task_manager": "read_or_navigate",
         "screenshot": "read_or_navigate",
+        # Reading the battery and the power plan changes nothing.
+        "energy_status": "read_or_navigate",
         "find_on_page": "read_or_navigate",
         "refresh_page": "state_change",
         "reload": "state_change",

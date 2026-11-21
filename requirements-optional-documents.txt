@@ -1,0 +1,9 @@
+# ── Optional group: documents ────────────────────────────────────────────────
+# The heavier document and media helpers of actions/file_processor.py:
+# spreadsheet/CSV analysis (pandas) and audio metadata/conversion (pydub,
+# which also needs ffmpeg on PATH for most formats).
+#
+# The .docx, .xlsx and PDF readers (python-docx, openpyxl, pdfplumber, PyPDF2)
+# are NOT here: they are part of the base set in requirements.txt.
+pandas
+pydub

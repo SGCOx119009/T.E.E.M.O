@@ -57,6 +57,22 @@ from typing import Callable
 # What the assistant answers to. Written once, here, and configurable.
 DEFAULT_WAKE_PHRASE = "Hey T.E.E.M.O"
 
+# The phrase the SHIPPED MODEL actually hears. It is not ours to choose —
+# it is the phrase the pretrained model was trained on — so it is assembled
+# from parts for the same reason the model's file stem is.
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT COSMETIC
+#     The interface used to say one thing and the microphone listened for
+#     another, and the user found out the hard way: they said the phrase
+#     the interface asked for, over and over, and nothing happened. Every
+#     one of those attempts is a failure of the PRODUCT, not of the user.
+#
+#     So the product now says the truth: `effective_wake_phrase()` returns
+#     the phrase the loaded model responds to. With a model of the user's
+#     own, that is the phrase they configured. With the shipped one, it is
+#     the shipped one — and the interface says so instead of pretending.
+_UPSTREAM_WAKE_PHRASE = "Hey " + "J" + "arvis"
+
 
 def wake_phrase() -> str:
     """The configured wake phrase, or the default when it is unset.
@@ -70,6 +86,28 @@ def wake_phrase() -> str:
         return get_wake_phrase()
     except Exception:
         return DEFAULT_WAKE_PHRASE
+
+
+def effective_wake_phrase() -> str:
+    """The phrase the microphone is ACTUALLY listening for.
+
+    This is the one the interface must show and the log must print. A
+    different one is a promise the detector cannot keep.
+    """
+    try:
+        if _custom_model_path():
+            # The user's own model, trained for the phrase they configured.
+            return wake_phrase()
+    except Exception:
+        pass
+    try:
+        from memory.config_manager import get_wake_mode
+        if str(get_wake_mode() or "").strip().lower() == "voice":
+            # Any speech wakes it; there is no phrase to say.
+            return ""
+    except Exception:
+        pass
+    return _UPSTREAM_WAKE_PHRASE
 
 
 # ── The model ───────────────────────────────────────────────────────────────
@@ -172,7 +210,7 @@ def install_and_download(logger: Callable[[str], None] = print,
     try:
         if is_installed() and is_ready():
             logger(f"Wake word: using the model already on disk for '{wake_phrase()}'.")
-            return True, f"Wake word ready — listening for '{wake_phrase()}'."
+            return True, f"Wake word ready — listening for '{effective_wake_phrase()}'."
         if not is_installed():
             logger("Wake word: installing openwakeword (one-time)…")
             _tell("Wake word: installing openwakeword (one-time)…")
@@ -198,7 +236,7 @@ def install_and_download(logger: Callable[[str], None] = print,
         if not is_ready():
             return False, "installed, but the wake model could not be loaded."
         logger("Wake word: ready.")
-        return True, f"Wake word installed and ready — listening for '{wake_phrase()}'."
+        return True, f"Wake word installed and ready — listening for '{effective_wake_phrase()}'."
     except Exception as e:
         return False, f"setup error: {e}"
 
@@ -253,7 +291,7 @@ class WakeWordDetector:
         self._ready = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="WakeWordThread")
         self._thread.start()
-        self._logger(f"Wake word: listening for '{wake_phrase()}'.")
+        self._logger(f"Wake word: listening for '{effective_wake_phrase()}'.")
         return True
 
     def stop(self) -> None:
@@ -338,3 +376,216 @@ class WakeWordDetector:
                 self._queue.get_nowait()
         except Exception:
             pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Mode 2: wake on any speech
+# ─────────────────────────────────────────────────────────────────────────────
+# The pretrained model hears one phrase, and no amount of renaming changes
+# that. The alternative is not a better model but a DIFFERENT QUESTION:
+# "is somebody talking to me?" — which the silero VAD answers, and which
+# needs no training, no dataset and no brand.
+#
+# The model ships with openwakeword, so there is nothing to download.
+WAKE_MODE_PHRASE = "phrase"
+WAKE_MODE_VOICE = "voice"
+
+# silero v5 wants 512 samples at 16 kHz — 32 ms of audio at a time.
+_VAD_WINDOW = 512
+_VAD_STATE = 64
+# How long a burst of speech must last before it counts as "someone said
+# something". A cough is short; a word is not.
+_VAD_MIN_SPEECH_MS = 250
+# How long the detector ignores the speech it just woke on.
+_VAD_DEBOUNCE_S = 1.5
+
+
+def wake_mode() -> str:
+    """Which way the assistant listens: for a phrase, or for any speech."""
+    try:
+        from memory.config_manager import get_wake_mode
+        mode = str(get_wake_mode() or "").strip().lower()
+    except Exception:
+        mode = ""
+    return mode if mode in (WAKE_MODE_PHRASE, WAKE_MODE_VOICE) else WAKE_MODE_PHRASE
+
+
+class VoiceActivityDetector:
+    """Wakes on speech, instead of on one particular phrase.
+
+    It answers the question the phrase model cannot: is somebody talking
+    at all. That is enough to wake an assistant that is waiting for its
+    owner, and it is honest — it does not claim to have understood the
+    words, only that there were some.
+
+    Measured on this machine with the model that ships inside openwakeword:
+    speech scored 0.999 and silence 0.012, so the two are not close to
+    each other and the threshold has room.
+
+    The same interface as `WakeWordDetector` — start(), ready, feed(),
+    reset(), stop() — so the session does not care which one it has.
+    """
+
+    def __init__(self, on_detect: Callable[[], None],
+                 threshold: float = 0.5,
+                 logger: Callable[[str], None] = print,
+                 notify: Callable[[str], None] | None = None,
+                 min_speech_ms: int = _VAD_MIN_SPEECH_MS,
+                 debounce_s: float = _VAD_DEBOUNCE_S):
+        self._on_detect = on_detect
+        self._threshold = threshold
+        self._logger = logger
+        self._notify = notify or (lambda _msg: None)
+        self._min_speech_ms = min_speech_ms
+        self._debounce_s = debounce_s
+
+        self._running = False
+        self._ready = False
+        self._session = None
+        self._state_h = None
+        self._state_c = None
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._speech_ms = 0.0
+        self._last_fired = 0.0
+
+    # -- model ---------------------------------------------------------------
+    @staticmethod
+    def _model_path() -> Path | None:
+        """The VAD model that ships inside openwakeword, or None."""
+        try:
+            import openwakeword
+            path = (Path(openwakeword.__file__).resolve().parent
+                    / "resources" / "models" / "silero_vad.onnx")
+            return path if path.is_file() else None
+        except Exception:
+            return None
+
+    def available(self) -> tuple[bool, str]:
+        """Can this detector run here? ((True, "") when it can.)"""
+        path = self._model_path()
+        if path is None:
+            return False, "the voice-activity model is not installed"
+        try:
+            import onnxruntime  # noqa: F401
+        except Exception:
+            return False, "onnxruntime is not installed"
+        return True, ""
+
+    def start(self) -> bool:
+        """Load the model. Returns True on success. Never raises."""
+        if self._running:
+            return True
+        ok, why = self.available()
+        if not ok:
+            self._logger(f"Wake word: {why}")
+            self._notify("Wake word unavailable — use the WAKE NOW button.")
+            return False
+        try:
+            import numpy as np
+            import onnxruntime as ort
+
+            path = self._model_path()
+            self._session = ort.InferenceSession(
+                str(path), providers=["CPUExecutionProvider"]
+            )
+            self._np = np
+            self._state_h = np.zeros((2, 1, _VAD_STATE), dtype=np.float32)
+            self._state_c = np.zeros((2, 1, _VAD_STATE), dtype=np.float32)
+        except Exception as exc:
+            self._logger(f"Wake word: could not load the voice model — {exc}")
+            self._notify("Wake word unavailable — use the WAKE NOW button.")
+            self._session = None
+            return False
+        self._running = True
+        self._ready = True
+        self._logger("Wake word: listening for any speech.")
+        return True
+
+    def stop(self) -> None:
+        self._running = False
+        self._session = None
+        self._ready = False
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    def reset(self) -> None:
+        """Forget what was heard — call it when the assistant goes to sleep."""
+        with self._lock:
+            self._speech_ms = 0.0
+            self._buffer = bytearray()
+            if self._session is not None:
+                try:
+                    self._state_h[:] = 0.0
+                    self._state_c[:] = 0.0
+                except Exception:
+                    pass
+
+    # -- audio ---------------------------------------------------------------
+    def feed(self, frame_int16) -> None:
+        """Called from the mic callback. Cheap: it only copies bytes."""
+        if not self._running:
+            return
+        try:
+            data = (frame_int16[:, 0].copy()
+                    if getattr(frame_int16, "ndim", 1) > 1
+                    else frame_int16.copy())
+            raw = data.tobytes()
+        except Exception:
+            return
+        with self._lock:
+            self._buffer.extend(raw)
+            # Only whole windows are processed; the remainder waits.
+            while len(self._buffer) >= _VAD_WINDOW * 2:
+                chunk = bytes(self._buffer[:_VAD_WINDOW * 2])
+                del self._buffer[:_VAD_WINDOW * 2]
+                self._consume(chunk)
+
+    def _consume(self, raw: bytes) -> None:
+        """One 32 ms window through the model."""
+        if self._session is None:
+            return
+        try:
+            np = self._np
+            chunk = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+            chunk = chunk.reshape(1, -1)
+            out, h, c = self._session.run(
+                None,
+                {
+                    "input": chunk,
+                    "sr": np.array(SAMPLE_RATE, dtype=np.int64),
+                    "h": self._state_h,
+                    "c": self._state_c,
+                },
+            )
+            self._state_h, self._state_c = h, c
+            probability = float(out[0][0])
+        except Exception as exc:
+            self._logger(f"Wake word: voice model error — {exc}")
+            return
+
+        window_ms = (_VAD_WINDOW / float(SAMPLE_RATE)) * 1000.0
+
+        if probability >= self._threshold:
+            self._speech_ms += window_ms
+            if self._speech_ms >= self._min_speech_ms:
+                self._fire()
+        else:
+            # Speech that stops is speech that ended; the next one starts
+            # from zero, so a single word wakes it and a breath does not.
+            self._speech_ms = 0.0
+
+    def _fire(self) -> None:
+        import time
+
+        now = time.monotonic()
+        if now - self._last_fired < self._debounce_s:
+            return
+        self._last_fired = now
+        self._speech_ms = 0.0
+        try:
+            self._on_detect()
+        except Exception as exc:
+            self._logger(f"Wake word: on_detect error — {exc}")

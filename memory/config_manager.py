@@ -552,6 +552,25 @@ def save_wake_model(path: str) -> None:
     _write_config(data)
 
 
+def get_wake_mode() -> str:
+    """How the assistant listens for the person: a phrase, or any speech.
+
+    "phrase" is the default and listens for the configured wake phrase.
+    "voice" listens for ANY speech, which is what a person who says a
+    phrase the shipped model was never trained on needs.
+    """
+    value = str(load_api_keys().get("wake_mode") or "").strip().lower()
+    return value if value in ("phrase", "voice") else "phrase"
+
+
+@_locked
+def save_wake_mode(mode: str) -> None:
+    """Persist how the assistant listens. An unknown value restores the default."""
+    ensure_config_dir()
+    value = str(mode or "").strip().lower()
+    _save_flag("wake_mode", value if value in ("phrase", "voice") else "phrase")
+
+
 def get_push_to_talk_enabled() -> bool:
     """Hold-a-key-to-speak. When on, the mic is closed unless the chord is held."""
     return load_api_keys().get("push_to_talk_enabled", False)

@@ -1,0 +1,7 @@
+# ── Optional group: whisper ──────────────────────────────────────────────────
+# Local hearing: Whisper running on YOUR CPU. No GPU and no ffmpeg — the
+# microphone's samples go straight in. ~50 languages, detected per sentence
+# rather than configured.
+#
+# Imported by providers/stt_whisper.py.
+faster-whisper

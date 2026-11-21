@@ -1,0 +1,9 @@
+# ── T.E.E.M.O. — base dependency group ───────────────────────────────────────
+# This is the group every install gets: the Windows dependency set the
+# assistant needs to start (UI, audio, Gemini Live, browser automation and the
+# Windows-only helpers).
+#
+# The list itself lives in requirements.txt — this file is the "base group"
+# marker that setup.py and the setup plan refer to, so there is exactly one
+# copy of the list to maintain.
+-r requirements.txt

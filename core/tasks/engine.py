@@ -41,6 +41,7 @@ from pathlib import Path
 
 from core.tasks import agents as agent_profiles
 from core.tasks.brain import NoModel
+from core.tasks.plan_runner import PlanBudget, PlanRunner
 from core.tasks.store import TaskStore, new_id
 
 ACTIVE = ("queued", "scheduled", "running", "waiting_quota")
@@ -49,6 +50,11 @@ QUOTA_WAIT = 300                 # seconds a task sleeps when no model answered
 _RESULT_CAP = 40_000
 _CONTEXT_CHARS = 160_000         # past this, old tool results are shortened
 _KEEP_RECENT_TOOL_TURNS = 8
+_PLAN_STATUS = {                 # a plan's own states, in the engine's words
+    "completed": "done",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
 
 _WORKER_RULES = """
 [HOW YOU WORK]
@@ -178,6 +184,8 @@ class TaskEngine:
 
     def _recover(self) -> None:
         for t in self.store.all():
+            if t.get("kind") == "plan":
+                continue           # a plan's steps are not an agent's rounds
             if t.get("status") != "running":
                 continue
             attempts = int(t.get("attempts") or 0) + 1
@@ -229,7 +237,10 @@ class TaskEngine:
         return self.store.get(tid)
 
     def list(self, limit: int = 20) -> list[dict]:
-        return list(reversed(self.store.all()))[:limit]
+        """The agent tasks. A verified plan is not one of them: it has its
+        own place in the interface, with its own approval and its own
+        history, and it never had an agent behind it."""
+        return [t for t in reversed(self.store.all()) if t.get("kind") != "plan"][:limit]
 
     def cancel(self, tid: str, finish: bool = False) -> bool:
         t = self.store.get(tid)
@@ -258,6 +269,71 @@ class TaskEngine:
         self._event(tid, "note", note)
         return True
 
+    # ── verified plans ──────────────────────────────────────────────────────
+    def plan_runner(self, task_id: str, executor, budget: PlanBudget | None = None,
+                    checkpoint=None, title: str = "") -> PlanRunner:
+        """A runner for a verified plan: the engine's budget, the engine's
+        store, and the one place a planned tool call is made.
+
+        WHY THE ENGINE OWNS THE RUNNER
+            A plan and a background agent are the same kind of job seen from
+            two sides: a bounded piece of work with a budget, whose progress
+            is written down as it goes. The plan decides what its steps are
+            and whether each one worked; the engine decides how a step is
+            run and where its progress is kept. Keeping the runner here is
+            what stops a second engine growing beside the first.
+
+        WHAT THE STORE HOLDS FOR A PLAN
+            Only the plan's operational metadata — where it is, how many
+            steps are done, how many recoveries it needed. The steps
+            themselves, their arguments and their results stay out of it,
+            exactly as they stay out of the local task history.
+        """
+        budget = budget if budget is not None else PlanBudget()
+        if self.store.get(task_id) is None:
+            now = self._clock()
+            self.store.create({
+                "id": task_id, "kind": "plan", "agent": "plan",
+                "title": _title(title or task_id), "task": "",
+                "origin": "plan", "deliver": "silent",
+                "status": "running", "created": now, "started": now, "finished": 0.0,
+                "not_before": 0.0,
+                "budget": {"minutes": max(1, int(budget.seconds // 60)),
+                           "rounds": budget.rounds},
+                "used": {"rounds": 0, "seconds": 0.0},
+                "attempts": 0, "quota_until": 0.0, "wrap_up": False,
+                "notes_in": [], "events": [], "files": [],
+                "result": "", "report": "", "error": "",
+                "plan": {},
+            })
+        return PlanRunner(executor, budget=budget,
+                          checkpoint=self._plan_checkpoint(task_id, budget, checkpoint))
+
+    def _plan_checkpoint(self, task_id: str, budget: PlanBudget, extra=None):
+        """The checkpoint writer for one plan.
+
+        It writes the plan's state into the engine's store, the same way an
+        agent task's progress is written, and lets the plan's own writer —
+        the local task history — keep the metadata the person can inspect.
+        """
+        def write(state: dict) -> None:
+            now = self._clock()
+            status = _PLAN_STATUS.get(str(state.get("state") or ""), "running")
+            if extra is not None:
+                # The plan's own history first: a store that cannot be
+                # written must not cost the person their record of the plan.
+                extra(state)
+            self.store.mutate(task_id, lambda x: x.update(
+                plan=dict(state),
+                status=status,
+                used={"rounds": budget.used_rounds, "seconds": round(budget.spent, 1)},
+                finished=now if status != "running" else x.get("finished") or 0.0,
+            ))
+            self._event(task_id, "plan",
+                        f"step {state.get('current_step')}/{state.get('total_steps')}"
+                        f" {state.get('state')}")
+        return write
+
     # ── scheduling ───────────────────────────────────────────────────────────
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -275,6 +351,8 @@ class TaskEngine:
             for t in self.store.all():
                 if len(self._workers) >= self.max_parallel:
                     return
+                if t.get("kind") == "plan":
+                    continue           # a plan runs in the thread that started it
                 if t["status"] not in ("queued", "scheduled", "waiting_quota") or t["id"] in self._workers:
                     continue
                 if now < float(t.get("not_before") or 0) or now < float(t.get("quota_until") or 0):

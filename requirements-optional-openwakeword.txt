@@ -1,0 +1,7 @@
+# ── Optional group: openwakeword ─────────────────────────────────────────────
+# The local wake word ("Hey T.E.E.M.O."). Fully local, a few MB, and the
+# model is downloaded on demand. The app can also enable it with one click
+# from ⚙ → WAKE WORD without installing anything by hand.
+#
+# Imported by core/wake_word.py, only while the feature is switched on.
+openwakeword

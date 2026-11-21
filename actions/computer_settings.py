@@ -523,32 +523,188 @@ def open_system_settings():
 def open_file_explorer():
     pyautogui.hotkey("win", "e")
 
-def sleep_display():
+def _send_monitor_power_off() -> None:
+    """Ask Windows to switch the display off. Raises when the call fails."""
+    import ctypes
+    ctypes.windll.user32.SendMessageW(0xFFFF, 0x0112, 0xF170, 2)
+
+
+def _display_power_state() -> bool | None:
+    """Whether a display reports itself as powered down.
+
+    True when a monitor says it is off, False when one says it is on, and
+    None when this machine will not say — which is the honest answer, and the
+    one most drivers give.
+
+    The read-back is `GetDevicePowerState` on the monitors Windows
+    enumerates. Every failure along the way (no monitor, an old driver, a
+    handle that will not open) ends in None rather than in a guess.
+    """
     try:
         import ctypes
-        ctypes.windll.user32.SendMessageW(0xFFFF, 0x0112, 0xF170, 2)
+        from ctypes import wintypes
+
+        class _DisplayDevice(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("DeviceName", wintypes.WCHAR * 32),
+                ("DeviceString", wintypes.WCHAR * 128),
+                ("StateFlags", wintypes.DWORD),
+                ("DeviceID", wintypes.WCHAR * 128),
+                ("DeviceKey", wintypes.WCHAR * 128),
+            ]
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.EnumDisplayDevicesW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.POINTER(_DisplayDevice), wintypes.DWORD,
+        ]
+        user32.EnumDisplayDevicesW.restype = wintypes.BOOL
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.GetDevicePowerState.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.GetDevicePowerState.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        def _enumerate(parent, index):
+            device = _DisplayDevice()
+            device.cb = ctypes.sizeof(device)
+            if not user32.EnumDisplayDevicesW(parent, index,
+                                              ctypes.byref(device), 0):
+                return None
+            return device
+
+        adapter_index = 0
+        while True:
+            adapter = _enumerate(None, adapter_index)
+            if adapter is None:
+                break
+            adapter_index += 1
+            monitor_index = 0
+            while True:
+                monitor = _enumerate(adapter.DeviceName, monitor_index)
+                if monitor is None:
+                    break
+                monitor_index += 1
+                state = wintypes.DWORD()
+                handle = kernel32.CreateFileW(
+                    "\\\\.\\" + str(monitor.DeviceID), 0, 0, None, 3, 0, None)
+                if not handle or handle == 0xFFFFFFFF:
+                    continue
+                try:
+                    readable = kernel32.GetDevicePowerState(
+                        handle, ctypes.byref(state))
+                finally:
+                    kernel32.CloseHandle(handle)
+                if not readable:
+                    continue
+                if state.value & 0x02 or state.value & 0x04:
+                    return True          # powered off, or hardware off
+                if state.value & 0x01:
+                    return False         # powered on
+    except Exception as e:
+        print(f"[Settings] display power state unreadable: {e}")
+    return None
+
+
+def sleep_display():
+    """Put the display to sleep, and say honestly whether it went.
+
+    WINDOWS DOES NOT ALWAYS SAY.  The message that switches a monitor off is
+    broadcast to every window, and most drivers never report back whether the
+    panel actually went dark. So the answer is "done" only when a display says
+    it is off, and "unverified" when the machine will not say — which is the
+    honest answer, and the one that keeps the assistant from announcing a
+    dark screen over a lit one.
+
+    The old code caught the exception, printed it and said nothing: the
+    caller then reported "done" for a display that never went to sleep.
+    """
+    try:
+        _send_monitor_power_off()
     except Exception as e:
         print(f"[Settings] sleep_display failed: {e}")
+        return outcome.failed(
+            "computer_settings",
+            f"the display could not be put to sleep: {e}",
+            wanted="sleep_display")
+    state = _display_power_state()
+    if state is True:
+        return outcome.done("computer_settings", wanted="sleep_display",
+                            display="off", verified=True)
+    return outcome.unverified(
+        "computer_settings",
+        "the request to switch the display off was sent to Windows, but this "
+        "system does not report the display power state, so it could not be "
+        "confirmed",
+        wanted="sleep_display")
+
 
 def open_run():
     pyautogui.hotkey("win", "r")
 
-def dark_mode():
-    """Flip between the light and the dark theme.
 
-    The registry value is the switch Windows itself reads, so this is the same
-    toggle as Settings > Personalisation > Colours, and it is reversible by
-    calling it again."""
+def _theme_is_dark() -> bool | None:
+    """Whether Windows is set to the dark theme. None when it will not say."""
     try:
         import winreg
         key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS)
-        current, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
-        winreg.SetValueEx(key, "AppsUseLightTheme", 0, winreg.REG_DWORD, 1 - current)
-        winreg.SetValueEx(key, "SystemUsesLightTheme", 0, winreg.REG_DWORD, 1 - current)
-        winreg.CloseKey(key)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                            winreg.KEY_READ) as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return not bool(value)
+    except Exception:
+        return None
+
+
+def dark_mode():
+    """Flip between the light and the dark theme, and say whether it did.
+
+    The registry value is the switch Windows itself reads, so this is the same
+    toggle as Settings > Personalisation > Colours, and it is reversible by
+    calling it again.
+
+    The old code caught every exception, printed it and carried on, and the
+    caller said "done" anyway: the theme had not changed and the user was
+    told it had. Now the failure is reported as a failure, and the new value
+    is read back before the change is claimed.
+    """
+    try:
+        import winreg
+        key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0,
+                             winreg.KEY_ALL_ACCESS)
+        try:
+            current, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            winreg.SetValueEx(key, "AppsUseLightTheme", 0, winreg.REG_DWORD,
+                              1 - current)
+            winreg.SetValueEx(key, "SystemUsesLightTheme", 0, winreg.REG_DWORD,
+                              1 - current)
+        finally:
+            winreg.CloseKey(key)
     except Exception as e:
         print(f"[Settings] dark_mode registry failed: {e}")
+        return outcome.failed(
+            "computer_settings",
+            f"the theme could not be changed: {e}",
+            wanted="dark_mode")
+    now = _theme_is_dark()
+    if now is None:
+        return outcome.unverified(
+            "computer_settings",
+            "the theme was written to the registry, but this system does not "
+            "report which theme it is using, so the change could not be read "
+            "back",
+            wanted="dark_mode")
+    return outcome.done("computer_settings", wanted="dark_mode",
+                        theme="dark" if now else "light", verified=True)
 
 
 # ── WiFi ─────────────────────────────────────────────────────────────────────
@@ -637,26 +793,239 @@ def wifi_set(enabled: bool) -> bool:
 
 
 def toggle_wifi():
-    """Flip the wireless radio.
+    """Flip the wireless radio, and say whether it really flipped.
 
     Switching it OFF is the reason this action is behind a human confirmation
     and not behind a model vote: it cuts the assistant's own connection to the
     Live API, and a machine that cannot talk cannot be told to turn it back
-    on."""
+    on.
+
+    The old code threw away what `wifi_set` said. A radio that did not move
+    — no adapter, no administrator rights, a `netsh` that refused — was
+    announced as moved, and the assistant was left without a connection while
+    claiming it still had one. Now a refusal is a failure, and the state is
+    read back before the change is claimed.
+    """
     current = wifi_state()
     if current is None:
         # Cannot read the state: turn it ON rather than risk switching a
         # working connection off by guessing.
-        wifi_set(True)
-        return
-    wifi_set(current == "off")
+        wanted = True
+    else:
+        wanted = current == "off"
+    if not wifi_set(wanted):
+        return outcome.failed(
+            "computer_settings",
+            "Windows did not accept the change to the wireless radio - the "
+            "interface may need administrator rights, or this computer may "
+            "have no wireless adapter",
+            wanted="toggle_wifi")
+    now = wifi_state()
+    if now is None:
+        return outcome.unverified(
+            "computer_settings",
+            "the wireless radio was switched, but this system does not report "
+            "its state, so the change could not be read back",
+            wanted="toggle_wifi")
+    if now != ("on" if wanted else "off"):
+        return outcome.unverified(
+            "computer_settings",
+            f"the wireless radio still reads {now}",
+            wanted="toggle_wifi", wifi=now)
+    return outcome.done("computer_settings", wanted="toggle_wifi", wifi=now,
+                        verified=True)
+
+
+def _schedule_shutdown(flag: str, action: str):
+    """Ask Windows to restart or power off the machine, in ten seconds.
+
+    `shutdown` exits with 0 when Windows accepted the request, and with
+    something else when it did not: a pending update, a policy, a machine
+    that is already going down. The old code threw the code away, so a
+    refused request was announced as a restart that was about to happen.
+    """
+    try:
+        r = subprocess.run(["shutdown", flag, "/t", "10"], capture_output=True,
+                           timeout=30, **_WIN_HIDE)
+    except Exception as e:
+        print(f"[Settings] {action} could not be scheduled: {e}")
+        return outcome.failed(
+            "computer_settings",
+            f"the {action} could not be scheduled: {e}",
+            wanted=action)
+    if r.returncode != 0:
+        return outcome.failed(
+            "computer_settings",
+            f"Windows refused the {action} (the shutdown command exited with "
+            f"code {r.returncode})",
+            wanted=action, returncode=r.returncode)
+    return outcome.done("computer_settings", wanted=action,
+                        scheduled_in_seconds=10, verified=True)
 
 
 def restart_computer():
-    subprocess.run(["shutdown", "/r", "/t", "10"], capture_output=True, **_WIN_HIDE)
+    """Restart this computer in ten seconds, if Windows accepts the request."""
+    return _schedule_shutdown("/r", "restart")
+
 
 def shutdown_computer():
-    subprocess.run(["shutdown", "/s", "/t", "10"], capture_output=True, **_WIN_HIDE)
+    """Power this computer down in ten seconds, if Windows accepts it."""
+    return _schedule_shutdown("/s", "shutdown")
+
+
+# ── Energy ─────────────────────────────────────────────────────────────────
+# The battery is a NUMBER the machine will read back, and a desktop without
+# one has to say so plainly. "85%" on a computer with no battery is a lie a
+# person acts on: they decide not to plug in, and they were never going to.
+
+# The Energy Saver plan, by GUID. Its NAME is localised — "Economía de energía"
+# in Spanish — but the GUID is the same on every Windows, so this is the one
+# way to ask whether energy saver is on without reading a translated string.
+_ENERGY_SAVER_GUID = "961cc777-2547-4f9d-8174-7d86181b8a8a"
+
+
+def _battery_reading() -> dict | None:
+    """What Windows says about the battery, or None when it will not say.
+
+    The keys are `present` (there is a battery), `percent` (0-100, or None
+    when Windows reports 255 = unknown), `charging` (True, False or None) and
+    `on_ac` (True when the cable is plugged in, False when it is not, None
+    when Windows does not know).
+
+    `GetSystemPowerStatus` is the Windows-native way to ask. It never
+    invents a number: a percentage of 255 means "unknown", and on a desktop
+    the battery flag says there is no battery at all.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _SystemPowerStatus(ctypes.Structure):
+            _fields_ = [
+                ("ACLineStatus", wintypes.BYTE),
+                ("BatteryFlag", wintypes.BYTE),
+                ("BatteryLifePercent", wintypes.BYTE),
+                ("Reserved1", wintypes.BYTE),
+                ("BatteryLifeTime", wintypes.DWORD),
+                ("BatteryFullLifeTime", wintypes.DWORD),
+            ]
+
+        status = _SystemPowerStatus()
+        if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
+            return None
+        flag = int(status.BatteryFlag)
+        raw = int(status.BatteryLifePercent)
+        percent = None if raw >= 100 else raw
+        if flag & 0x10:                      # 16 = no system battery
+            present = False
+        elif percent is not None or flag & 0x80:
+            # A level Windows is willing to give means there IS a battery;
+            # 0x80 says the same on the machines that report no level.
+            present = True
+        else:
+            present = None
+        if flag & 0x08:                      # 8 = charging
+            charging = True
+        elif present is True:
+            charging = False
+        else:
+            charging = None
+        line = int(status.ACLineStatus)
+        on_ac = None if line == 255 else bool(line)
+        return {"present": present, "percent": percent,
+                "charging": charging, "on_ac": on_ac}
+    except Exception as e:
+        print(f"[Settings] battery reading failed: {e}")
+        return None
+
+
+def _power_scheme() -> tuple[str, str] | None:
+    """The active power plan as (GUID, name), or None when it cannot be read."""
+    try:
+        r = subprocess.run(["powercfg", "/getactivescheme"], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=8, **_WIN_HIDE)
+        if r.returncode != 0:
+            return None
+        m = re.search(
+            r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{12})\s*\(([^)]*)\)", r.stdout)
+        if not m:
+            return None
+        return m.group(1).lower(), m.group(2).strip()
+    except Exception as e:
+        print(f"[Settings] power scheme lookup failed: {e}")
+        return None
+
+
+def _yes_no(value) -> str:
+    """True/False/None as something a model can read: yes, no or unknown."""
+    if value is None:
+        return "unknown"
+    return "yes" if value else "no"
+
+
+def energy_status():
+    """The battery, the charging state and the power plan, as Windows says them.
+
+    A laptop answers with a percentage and whether it is charging. A desktop
+    without a battery answers with that fact, plainly, and never with an
+    invented percentage. A machine that will not say is reported as not said.
+
+    Nothing here is a guess: every number in the answer was read back from
+    the system that is being asked about.
+    """
+    battery = _battery_reading()
+    scheme = _power_scheme()
+    if battery is None and scheme is None:
+        return outcome.failed(
+            "computer_settings",
+            "Windows reported neither a battery nor a power plan, so there is "
+            "nothing to say about the energy of this computer",
+            wanted="energy_status")
+
+    facts: dict = {}
+    if scheme is not None:
+        guid, name = scheme
+        facts["power_scheme"] = name
+        facts["energy_saver"] = (
+            "on" if guid == _ENERGY_SAVER_GUID
+            or "energy saver" in name.lower() else "off")
+
+    if battery is None:
+        return outcome.unverified(
+            "computer_settings",
+            "the battery of this computer could not be read, so no level is "
+            "reported" + (
+                f" (the power plan is {facts['power_scheme']})"
+                if "power_scheme" in facts else ""),
+            wanted="energy_status", **facts)
+
+    if battery["present"] is not True:
+        if battery["present"] is False:
+            # A desktop with no battery: say so, and say no percentage.
+            return outcome.done(
+                "computer_settings", wanted="energy_status",
+                battery="this computer has no battery", **facts, verified=True)
+        return outcome.unverified(
+            "computer_settings",
+            "this computer does not say whether it has a battery, so no level "
+            "is reported",
+            wanted="energy_status", **facts)
+
+    percent = battery["percent"]
+    if percent is None:
+        return outcome.unverified(
+            "computer_settings",
+            "Windows does not report the battery level of this computer, so "
+            "no percentage is reported",
+            wanted="energy_status", charging=_yes_no(battery["charging"]),
+            **facts)
+
+    return outcome.done(
+        "computer_settings", wanted="energy_status",
+        battery_percent=percent, charging=_yes_no(battery["charging"]),
+        on_ac=_yes_no(battery["on_ac"]), **facts, verified=True)
 
 ACTION_MAP: dict[str, callable] = {
     "volume_up":           volume_up,
@@ -790,6 +1159,9 @@ _ALIASES = {
     "new_tab":         ("open a tab", "open new tab"),
     "shutdown":        ("power off", "turn off the computer", "switch off the pc"),
     "restart":         ("reboot", "restart the pc"),
+    "energy_status":   ("energy_status", "battery_status", "battery",
+                        "battery level", "how much battery", "charge level",
+                        "energy saver", "power plan", "power status"),
     "unmute":          ("sound on", "unmute"),
     "media_next":      ("next song", "next track", "skip song"),
     "media_previous":  ("previous song", "previous track"),
@@ -868,6 +1240,48 @@ def _suggest(description: str) -> str:
         f"are: {hint}. Which was meant?",
         said=description)
 
+
+def _run_confirmed(func, action: str) -> str:
+    """Do a confirmed action and report what it actually did.
+
+    The old callback was `(f(), f"{a} done.")[1]`: it ran the action, threw
+    away whatever the action had to say, and wrote "<action> done." in its
+    place. So a wireless radio that stayed exactly as it was was logged as
+    switched, and the restart Windows had refused was logged as a restart.
+
+    Now the action speaks for itself, and only an action that says nothing
+    at all is reported as done.
+    """
+    try:
+        result = func()
+    except Exception as e:
+        print(f"[Settings] Confirmed action failed ({action}): {e}")
+        return outcome.failed("computer_settings", f"it failed: {e}",
+                              wanted=action)
+    if isinstance(result, str) and result.startswith("status="):
+        return result
+    return outcome.unverified(
+        "computer_settings",
+        "the action was performed, but it reported nothing about what it did, "
+        "so the effect could not be confirmed",
+        wanted=action)
+
+
+def _reported(result) -> str | None:
+    """The outcome an action reported for itself, or None if it reported none."""
+    if isinstance(result, str) and result.startswith("status="):
+        return result
+    return None
+
+
+def _succeeded(result) -> bool:
+    """Whether an action that reported its own outcome reported success."""
+    reported = _reported(result)
+    if reported is None:
+        return True      # an action that reports nothing raised no exception
+    return reported.startswith(f"status={outcome.DONE} ")
+
+
 def computer_settings(
     parameters: dict = None,
     response=None,
@@ -920,7 +1334,7 @@ def computer_settings(
                 wanted=action)
         return confirm.request(
             key=action, title=title, detail=detail,
-            run=lambda f=func, a=action: (f(), f"{a} done.")[1],
+            run=lambda f=func, a=action: _run_confirmed(f, a),
         )
 
     if action in ("volume_set", "set_volume"):
@@ -956,9 +1370,23 @@ def computer_settings(
             return outcome.failed("computer_settings",
                                   "no text was given to type", wanted=action)
         enter_after = str(params.get("press_enter", "false")).lower() in ("true", "1", "yes")
-        type_text(text, press_enter_after=enter_after)
-        return outcome.done("computer_settings", wanted=action,
-                            typed=text[:60], verified=True)
+        try:
+            type_text(text, press_enter_after=enter_after)
+        except Exception as e:
+            return outcome.failed("computer_settings",
+                                  f"the text could not be typed: {e}",
+                                  wanted=action)
+        # The characters are COUNTED, never quoted back: what gets typed is
+        # often a password, and the result of a tool call is a thing people
+        # paste into bug reports.
+        #
+        # And it is not a "done": the keys went to whatever had focus, and
+        # nothing here reads that window back.
+        return outcome.unverified(
+            "computer_settings",
+            "the text was typed into whatever had focus, but nothing here "
+            "reads the screen back, so it could not be confirmed",
+            wanted=action, typed_characters=len(text))
 
     if action == "press_key":
         key = str(value or params.get("key", "")).strip()
@@ -968,17 +1396,24 @@ def computer_settings(
         times = max(1, min(20, _number(params.get("times")) or 1))
         for _ in range(times):
             press_key(key)
-        return outcome.done("computer_settings", wanted=action, key=key,
-                            times=times if times > 1 else None, verified=True)
+        return outcome.unverified(
+            "computer_settings",
+            "the key was sent to the window in front, but nothing here reads "
+            "that window back, so the effect could not be confirmed",
+            wanted=action, key=key,
+            times=times if times > 1 else None)
 
     if action in ("reload_n", "refresh_n", "reload_page_n"):
         try:
             reload_page_n(int(value or 1))
-            return outcome.done("computer_settings", wanted=action,
-                                times=value or 1, verified=True)
         except Exception as e:
             return outcome.failed("computer_settings",
                                   f"the reload failed: {e}", wanted=action)
+        return outcome.unverified(
+            "computer_settings",
+            "the reload was sent to the window in front, but nothing here "
+            "reads that window back, so the reload could not be confirmed",
+            wanted=action, times=value or 1)
 
     if action in ("scroll_up", "scroll_down"):
         notches = _number(value)
@@ -988,8 +1423,11 @@ def computer_settings(
             notches = max(1, round(notches / 120))
         notches = max(1, min(60, notches))
         (scroll_up if action == "scroll_up" else scroll_down)(notches)
-        return outcome.done("computer_settings", wanted=action, notches=notches,
-                            verified=True)
+        return outcome.unverified(
+            "computer_settings",
+            "the scroll was sent to the window in front, but nothing here "
+            "reads that window back, so it could not be confirmed",
+            wanted=action, notches=notches)
 
     if action in ("brightness_set", "set_brightness"):
         target = _number(value)
@@ -1014,6 +1452,12 @@ def computer_settings(
                 "not be read back - an external monitor usually cannot be set from the "
                 "computer at all", wanted=action, asked=target)
         return outcome.done("computer_settings", wanted=action, brightness=now, verified=True)
+
+    if action in ("energy_status", "battery_status", "power_status",
+                  "battery", "energy"):
+        # A reading, not a change: the battery level, the charging state and
+        # the power plan, as Windows reports them. It takes no value.
+        return energy_status()
 
     if action in ("seek_forward", "seek_backward", "fast_forward", "rewind"):
         seconds = _number(value)
@@ -1059,12 +1503,13 @@ def computer_settings(
             times = _number(value)
         times = max(1, min(20, times or 1))
 
+    result = None
     try:
         if action in _STEP_ACTIONS:
-            func(step)
+            result = func(step)
         else:
             for i in range(times):
-                func()
+                result = func()
                 if i + 1 < times:
                     time.sleep(0.08)
     except Exception as e:
@@ -1084,33 +1529,41 @@ def computer_settings(
             elif kind == "brightness":
                 push_undo(f"brightness ({action})",
                           lambda b=old: (brightness_set(b), f"Brightness back to {b}%.")[1])
-    elif action == "dark_mode":
-        # A pure toggle: calling it again is the undo.
+    elif action == "dark_mode" and _succeeded(result):
+        # A pure toggle: calling it again is the undo. Only when the toggle
+        # worked — an undo for a change that did not happen is a second lie.
         push_undo("dark mode toggled",
                   lambda: (dark_mode(), "Theme switched back.")[1])
 
     # ── Say what is known, and only that ─────────────────────────────────────
     #
     # This used to be `return f"Done: {action}."`, sent whether or not anything
-    # had changed, because `func()` returns nothing and nobody looked.
+    # had changed, because `func()` returns nothing and nobody looked. Then it
+    # became `outcome.done(..., verified=True)` for EVERY action in this file,
+    # including the ones that had swallowed an exception on the way — a
+    # swallowed exception and a "done, verified" are the same claim.
     #
-    # WHERE THE LINE IS, AND WHY IT IS NOT "VERIFY EVERYTHING"
+    # WHERE THE LINE IS NOW
+    #     An action that checked its own effect says what it found, and that
+    #     answer is the answer: sleep_display, dark_mode, toggle_wifi,
+    #     restart, shutdown and energy_status all read the system back before
+    #     they claim anything, and they are the ones that may say "done".
+    #
     #     Volume and brightness are a state the machine will read back, and the
     #     "before" value has ALREADY been read two blocks above for undo — so
     #     checking costs one more call and turns a claim into a fact.
     #
-    #     Most of the other fifty-odd actions are a keystroke sent to whatever
-    #     has focus, and there is nothing to read. But they are also things the
-    #     user is looking straight at: scrolling, switching tabs, snapping a
-    #     window. Hedging on those would have the assistant say "I sent a scroll
-    #     and cannot confirm it" about something the person just watched happen,
-    #     which is noise dressed as honesty.
-    #
-    #     So the rule is not "verify everything", it is: claim an OUTCOME only
-    #     where the outcome was observed, and otherwise claim only what was
-    #     actually done. `open_app` lied because it reported an application
-    #     opening from a shell starting — two different events. Reporting a
-    #     keystroke as a keystroke is not that.
+    #     The other fifty-odd actions are a keystroke sent to whatever has
+    #     focus, and there is NOTHING to read back. They used to be reported
+    #     as "done, verified" because the user is looking straight at them —
+    #     but "verified" is a word about the SYSTEM's state, not about what a
+    #     person is watching, and a claim nobody checked is the thing this
+    #     file exists to stop. So they are reported as what they are: sent,
+    #     and not confirmed.
+    reported = _reported(result)
+    if reported is not None:
+        return reported
+
     if _before and _before[0] == "mute":
         old_state = _before[1]
         now_muted = mute_get()
@@ -1146,18 +1599,22 @@ def computer_settings(
         return outcome.done("computer_settings", wanted=action,
                             **{kind: now}, changed_by=step, verified=True)
 
-    return outcome.done("computer_settings", wanted=action,
-                        times=times if times > 1 else None, verified=True)
+    return outcome.unverified(
+        "computer_settings",
+        "the keystroke was sent to whatever had focus, but nothing here reads "
+        "that window back, so the effect could not be confirmed",
+        wanted=action, times=times if times > 1 else None)
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "computer_settings",
-    "description": "Controls the computer: volume, mute, brightness, media playback (play/pause, next, previous, seek), window management, keyboard shortcuts, typing text on screen, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. Use for ANY single computer control command. NUMBERS MATTER: a level the user names is volume_set / brightness_set with value = that level ('volume to 100', 'max' = 100, 'half' = 50); an amount to change by is volume_up / volume_down / brightness_up / brightness_down with value = the amount ('30 louder' = 30; no amount = 10). Never approximate a level with repeated up/down calls. For a key worth repeating (zoom_in, next_tab, go_back, page_down, undo...) pass `times`. Media keys reach music and video apps without focusing them; seek_forward / seek_backward take value = seconds and act on the app in front (for a video on the assistant's own display use video_player instead). restart, shutdown and toggle_wifi put a confirmation on the user's screen and do NOT happen until they press it — never claim they are done. Volume, mute, brightness and dark mode can be reversed with the `undo` tool.",
+    "description": "Controls the computer: volume, mute, brightness, media playback (play/pause, next, previous, seek), window management, keyboard shortcuts, typing text on screen, fullscreen, dark mode, WiFi, restart, shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page, and the battery and power plan (energy_status). Use for ANY single computer control command. NUMBERS MATTER: a level the user names is volume_set / brightness_set with value = that level ('volume to 100', 'max' = 100, 'half' = 50); an amount to change by is volume_up / volume_down / brightness_up / brightness_down with value = the amount ('30 louder' = 30; no amount = 10). Never approximate a level with repeated up/down calls. For a key worth repeating (zoom_in, next_tab, go_back, page_down, undo...) pass `times`. Media keys reach music and video apps without focusing them; seek_forward / seek_backward take value = seconds and act on the app in front (for a video on the assistant's own display use video_player instead). energy_status READS the battery, whether it is charging and the power plan; it changes nothing, and on a computer with no battery it says so instead of giving a percentage. restart, shutdown and toggle_wifi put a confirmation on the user's screen and do NOT happen until they press it — never claim they are done. Volume, mute, brightness and dark mode can be reversed with the `undo` tool.",
     # Used in place of `description` only when a small model is on a tool
     # budget - Gemini still gets the full text. See providers/schema.py.
     "brief": (
-        "Changes a computer setting: volume, brightness, WiFi, window layout, power. Name the action in 'action'."
+        "Changes a computer setting: volume, brightness, WiFi, window layout, power. "
+        "Name the action in 'action'."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -1190,7 +1647,7 @@ TOOL = {
                     "undo | redo | select_all | save | enter | escape | press_key | "
                     "type_text | screenshot | lock_screen | open_settings | "
                     "file_explorer | open_run | dark_mode | toggle_wifi | "
-                    "restart | shutdown"
+                    "restart | shutdown | energy_status"
                 )
             },
             "description": {
@@ -1206,7 +1663,8 @@ TOOL = {
                     "volume_set / brightness_set: the level, 0-100. volume_up/down, "
                     "brightness_up/down: how much to change by (default 10). "
                     "seek_forward/backward: seconds. scroll_up/down: wheel notches. "
-                    "type_text: the text. press_key: the key name."
+                    "type_text: the text. press_key: the key name. "
+                    "energy_status takes no value."
                 )
             },
             "times": {

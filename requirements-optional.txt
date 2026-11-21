@@ -1,0 +1,13 @@
+# ── T.E.E.M.O. — optional dependency groups ──────────────────────────────────
+# None of this is installed by a plain `python setup.py` run. Each group is
+# installed on purpose, with an explicit confirmation:
+#
+#   python setup.py --install-optional whisper --confirm
+#
+# Prefer selecting one named group over installing all of them: together they
+# are several hundred megabytes, which is a lot to download for a clone that
+# may never open that feature.
+-r requirements-optional-whisper.txt
+-r requirements-optional-piper.txt
+-r requirements-optional-openwakeword.txt
+-r requirements-optional-documents.txt

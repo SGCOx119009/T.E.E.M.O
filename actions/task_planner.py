@@ -1,4 +1,10 @@
-"""Preview and execute bounded multi-step tasks behind explicit approval."""
+"""Preview and execute bounded multi-step tasks behind explicit approval.
+
+This file is a router and nothing else. The plan is built, checked and run
+by `core.task_plan`; the steps themselves are run by the engine's runner
+(`core.tasks.plan_runner`), which is the one place in the codebase where a
+planned tool call is made. There is no second copy of "run a step" here.
+"""
 from __future__ import annotations
 
 from core import outcome, task_plan

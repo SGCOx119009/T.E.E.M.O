@@ -33,8 +33,7 @@ from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt
 from PyQt6.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter, QPen, QPixmap,
                          QRadialGradient)
 
-_DISPLAY = ["Bahnschrift", "Segoe UI", "SF Pro Display", "Helvetica Neue",
-            "Noto Sans", "DejaVu Sans"]
+from gui.style import px_font
 
 _PITCH = math.radians(17.0)     # the camera looks down at the platform
 _CAM_D = 4.2                    # perspective distance, in core radii
@@ -321,12 +320,9 @@ class Reactor3D:
         # the name, standing on the front edge of the platform
         if name:
             nx, ny, _, _ = self._project(np.array([[0.0], [_FLOOR_Y], [1.2]]), cx, cy, r)
-            f = QFont()
-            f.setFamilies(_DISPLAY)
             px = max(10, int(r * 0.11))
-            f.setPixelSize(px)
-            f.setWeight(QFont.Weight.Light)
-            f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, max(2.0, round(r * 0.035)))
+            f = px_font(px, weight=QFont.Weight.Light,
+                        spacing=max(2.0, round(r * 0.035)))
             p.setFont(f)
             p.setPen(QPen(_with_alpha(white, 0.78 + 0.2 * min(1.0, amp * 2))))
             p.drawText(QRectF(cx - r * 1.6, float(ny[0]) + r * 0.10, r * 3.2, px * 1.8),

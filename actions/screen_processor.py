@@ -66,7 +66,19 @@ def _save_config_key(key: str, value) -> None:
 
 
 def _get_os() -> str:
-    return _load_config().get("os_system", "windows").lower()
+    """Windows. Always.
+
+    THE PURGE THIS FINISHES
+        This used to read an "os_system" key from the configuration and
+        choose the camera backend from it: DirectShow for Windows,
+        AVFoundation for macOS, anything else for whatever. AVFoundation
+        does not exist on Windows, so a configuration file that still
+        carried "mac" from another machine made the camera fail with an
+        error that named a framework nobody on this computer has.
+
+        The product is Windows-only. The camera backend is DirectShow.
+    """
+    return "windows"
 
 
 _IMG_MAX_W = 1280
@@ -134,12 +146,7 @@ def _cv2_backend() -> int:
     """Return the best OpenCV camera backend for the current OS."""
     if not _CV2:
         return 0
-    os_name = _get_os()
-    if os_name == "windows":
-        return cv2.CAP_DSHOW
-    if os_name == "mac":
-        return cv2.CAP_AVFOUNDATION
-    return cv2.CAP_ANY
+    return cv2.CAP_DSHOW
 
 
 def _probe_camera(index: int, backend: int, warmup: int = 5) -> bool:
