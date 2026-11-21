@@ -3,10 +3,10 @@
 Split out of ui.py in Mark LVII; behaviour unchanged."""
 from __future__ import annotations
 
+import inspect
 import json
 import math
 import os
-import platform
 import random
 import subprocess
 import sys
@@ -42,6 +42,26 @@ from gui.overlays import (
 )
 
 from gui.style import hud_font
+
+
+def _call_probe(probe, progress=None, cancelled=None) -> tuple[bool, str]:
+    """Ask a provider whether it is usable, whichever probe it offers.
+
+    Not every provider takes the same arguments: the API models check a
+    vision flag, and the downloadable ones accept progress and a cancellation
+    callback. This calls what it can, so a provider that grew a new argument
+    does not have to be taught about here.
+    """
+    try:
+        params = inspect.signature(probe).parameters
+    except (TypeError, ValueError):
+        params = {}
+    kwargs = {}
+    if progress is not None and "progress" in params:
+        kwargs["progress"] = progress
+    if cancelled is not None and "cancel" in params:
+        kwargs["cancel"] = cancelled
+    return probe(**kwargs)
 
 
 class ProvidersOverlay(_HudOverlay):
@@ -90,6 +110,22 @@ class ProvidersOverlay(_HudOverlay):
     # (provider id, [(value, label), ...]) from a worker that went and asked an
     # endpoint what it offers.
     _models_ready = pyqtSignal(str, list)
+    # A running test, from the worker that is running it.
+    #   _test_progress (provider id, text)      — a download is moving
+    #   _test_done     (provider id, ok, msg, seen)
+    #   _list_done     (provider id, key, items)
+    #   _install_done  (provider id, ok, msg)
+    #
+    # These are SIGNALS and not QTimer.singleShot because a timer created in a
+    # thread with no event loop never fires: the callback is silently dropped
+    # and the interface is never told what happened. A signal is queued to the
+    # thread that owns the object, which is the one rule that holds.
+    _test_progress = pyqtSignal(str, str)
+    _test_done = pyqtSignal(str, bool, str, object)
+    _list_done = pyqtSignal(str, str, list, str)
+    _install_done = pyqtSignal(str, bool, str)
+    # (provider id, text, colour) — a provider getting itself ready.
+    _prepare_report = pyqtSignal(str, str, str)
     _OW = 760                       # the window's own minimum is 820
 
     # Which provider fills each slot, and what the slot is FOR — in the words
@@ -122,6 +158,11 @@ class ProvidersOverlay(_HudOverlay):
         # nothing in this folder may run before somebody opens it.
         self._live_ready.connect(self._on_live_ready)
         self._models_ready.connect(self._on_models_ready)
+        self._test_progress.connect(self._on_test_progress)
+        self._test_done.connect(self._on_test_done)
+        self._list_done.connect(self._on_list_done)
+        self._install_done.connect(self._on_install_done)
+        self._prepare_report.connect(self._on_prepare_report)
         self._model_cache: dict[str, list] = {}
         self._fetching: set = set()
         for _kind in ("tts", "stt", "llm"):
@@ -137,6 +178,12 @@ class ProvidersOverlay(_HudOverlay):
         self._edits: dict[str, dict] = {}       # provider id -> {key: (widget, Field)}
         self._status: dict[str, QLabel] = {}    # provider id -> status line
         self._more: dict[str, bool] = {}        # provider id -> advanced shown
+        # The TEST button of each provider, so a running test can turn it into
+        # a CANCEL button — and back again when the test ends.
+        self._test_buttons: dict[str, QPushButton] = {}
+        # The cancellation flag of a running test, per provider id. A test
+        # that downloads sixty megabytes has to be abandonable.
+        self._testing: dict[str, object] = {}
         # Fields deliberately not drawn — the catalog already answered them, or
         # they are behind MORE. Tracked rather than asked of Qt: see _fields_into.
         self._hidden: dict[str, set] = {}
@@ -355,7 +402,10 @@ class ProvidersOverlay(_HudOverlay):
         def report(ok, msg):
             colour = C.TEXT_DIM if ok is None else (C.GREEN if ok else C.RED)
             mark = "" if ok is None else ("✓  " if ok else "✕  ")
-            QTimer.singleShot(0, lambda: self._say(pid, mark + msg, colour))
+            # A signal, not a timer: a QTimer created in the worker thread has
+            # no event loop to fire it, so the progress of a voice download was
+            # never shown at all.
+            self._prepare_report.emit(pid, mark + msg, colour)
 
         threading.Thread(target=lambda: fn(values, report), daemon=True).start()
 
@@ -753,7 +803,9 @@ class ProvidersOverlay(_HudOverlay):
         self._status[pid] = status
 
         brow = QHBoxLayout(); brow.setSpacing(6)
-        brow.addWidget(self._btn("TEST", lambda _=0, p=pid: self._test(p), C.PRI))
+        test_btn = self._btn("TEST", lambda _=0, p=pid: self._test(p), C.PRI)
+        self._test_buttons[pid] = test_btn
+        brow.addWidget(test_btn)
         # Not "LIST" any more: the list arrives on its own when a service is
         # chosen. This is the button for when it did not — the server was
         # starting up, or a model has just been pulled.
@@ -1039,23 +1091,64 @@ class ProvidersOverlay(_HudOverlay):
         # about to read — and a deleted QWidget raises rather than returning
         # something wrong, so it takes the click down with it.
         values = self._values(pid)
+        if self._testing.get(pid) is not None:
+            # A test is already running, so the button means "stop it".
+            self._cancel_test(pid)
+            return
         self._say(pid, "checking…", C.TEXT_DIM)
         QApplication.processEvents()
-        try:
-            inst = self._registry.build(pid, values)
-            probe = getattr(inst, "probe", None)
-            if probe is None:
-                self._say(pid, "Nothing to check for this one.", C.TEXT_DIM)
+
+        import threading
+
+        cancel = threading.Event()
+        self._testing[pid] = cancel
+        self._set_test_button(pid, "CANCEL", C.ACC)
+
+        def progress(done: int, total: int) -> None:
+            if not total:
                 return
-            ok, msg = probe()
-        except Exception as e:
-            self._say(pid, f"✕  {type(e).__name__}: {str(e)[:150]}", C.RED)
+            pct = min(100, int(done * 100 / total))
+            # The label is a widget: it may only be touched from the Qt thread,
+            # and this runs on the worker. The signal is queued to that thread.
+            self._test_progress.emit(pid, f"downloading — {pct}%")
+
+        def work():
+            ok = False
+            msg = ""
+            seen = None
+            try:
+                # Building the provider can load a model, and probing a local
+                # voice downloads sixty megabytes. Both belong to the worker.
+                inst = self._registry.build(pid, values)
+                probe = getattr(inst, "probe", None)
+                if probe is None:
+                    self._test_done.emit(pid, False, "Nothing to check for this one.",
+                                         None)
+                    return
+                ok, msg = _call_probe(probe, progress, cancel.is_set)
+                seen = (getattr(inst, "caps", {}) or {}).get("vision")
+            except Exception as e:
+                msg = f"{type(e).__name__}: {str(e)[:150]}"
+                ok = False
+            self._test_done.emit(pid, ok, msg, seen)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- the slots the workers call, always on the Qt thread ------------------
+    def _on_test_progress(self, pid: str, text: str) -> None:
+        self._say(pid, text, C.TEXT_DIM)
+
+    def _on_test_done(self, pid: str, ok: bool, msg: str, seen) -> None:
+        """Report a finished test — on the Qt thread, like every other widget."""
+        self._testing.pop(pid, None)
+        self._set_test_button(pid, "TEST", C.PRI)
+        if msg == "Nothing to check for this one.":
+            self._say(pid, msg, C.TEXT_DIM)
             return
         self._say(pid, ("✓  " if ok else "✕  ") + msg, C.GREEN if ok else C.ACC)
         # TEST is also where "can this model see?" gets answered — by asking the
         # endpoint, not the user. Write the answer back into the stored settings
         # so the assistant is told the truth about its own eyes.
-        seen = (getattr(inst, "caps", {}) or {}).get("vision")
         if ok and seen is not None:
             from memory.config_manager import save_provider_config
             save_provider_config(pid, {"vision": "1" if seen else ""})
@@ -1063,23 +1156,65 @@ class ProvidersOverlay(_HudOverlay):
             if entry is not None and isinstance(entry[0], QComboBox):
                 entry[0].setCurrentIndex(1 if seen else 0)
 
+    def _cancel_test(self, pid: str) -> None:
+        """Ask a running test to stop. The worker notices between chunks."""
+        event = self._testing.get(pid)
+        if event is not None:
+            event.set()
+            self._say(pid, "stopping…", C.TEXT_DIM)
+
+    def _set_test_button(self, pid: str, text: str, colour: str) -> None:
+        button = self._test_buttons.get(pid)
+        if button is None:
+            return
+        button.setText(text)
+        button.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {colour};
+                border: 1px solid {C.BORDER}; border-radius: 3px; padding: 0 12px; }}
+            QPushButton:hover {{ border-color: {C.BORDER_B}; color: {C.TEXT}; }}
+        """)
+
     def _list(self, pid: str) -> None:
         values = self._values(pid)          # before processEvents — see _test
         self._say(pid, "reading…", C.TEXT_DIM)
         QApplication.processEvents()
-        try:
-            inst = self._registry.build(pid, values)
-            if hasattr(inst, "models"):
-                items, key = [(m, m) for m in inst.models()], "model"
-            elif hasattr(inst, "voices"):
-                items, key = list(inst.voices()), "voice_id"
-            else:
-                self._say(pid, "Nothing to list for this one.", C.TEXT_DIM)
-                return
-        except Exception as e:
-            self._say(pid, f"✕  {type(e).__name__}: {str(e)[:150]}", C.RED)
-            return
 
+        import threading
+
+        def work():
+            items = []
+            key = ""
+            try:
+                # Building a provider can load a model, and listing a cloud
+                # provider's catalogue is a network call. Neither may run here.
+                inst = self._registry.build(pid, values)
+                if hasattr(inst, "models"):
+                    items, key = [(m, m) for m in inst.models()], "model"
+                elif hasattr(inst, "voices"):
+                    items, key = list(inst.voices()), "voice_id"
+                else:
+                    self._list_done.emit(pid, "", [], "Nothing to list for this one.")
+                    return
+            except Exception as e:
+                msg = f"{type(e).__name__}: {str(e)[:150]}"
+                self._list_done.emit(pid, "", [], msg)
+                return
+            self._list_done.emit(pid, key, items, "")
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_list_done(self, pid: str, key: str, items: list, error: str) -> None:
+        """A finished listing — on the Qt thread, like every other widget."""
+        if error:
+            if error == "Nothing to list for this one.":
+                self._say(pid, error, C.TEXT_DIM)
+            else:
+                self._say(pid, f"✕  {error}", C.RED)
+            return
+        self._fill_list(pid, key, items)
+
+    def _fill_list(self, pid: str, key: str, items: list) -> None:
+        """Fill the dropdown — on the Qt thread, like every other widget."""
         entry = self._edits.get(pid, {}).get(key)
         if entry is None or not items:
             self._say(pid, f"✓  {len(items)} found." if items else "None found.",
@@ -1125,10 +1260,17 @@ class ProvidersOverlay(_HudOverlay):
                        if good else (tail[-1][:150] if tail else "pip failed"))
             except Exception as e:
                 good, msg = False, f"{type(e).__name__}: {str(e)[:120]}"
-            QTimer.singleShot(0, lambda: self._say(pid, msg,
-                                                   C.GREEN if good else C.RED))
+            # A signal, not a timer: a QTimer created in this thread has no
+            # event loop to fire it, so the result was never shown at all.
+            self._install_done.emit(pid, good, msg)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _on_install_done(self, pid: str, good: bool, msg: str) -> None:
+        self._say(pid, msg, C.GREEN if good else C.RED)
+
+    def _on_prepare_report(self, pid: str, text: str, colour: str) -> None:
+        self._say(pid, text, colour)
 
     def _apply(self) -> None:
         from memory.config_manager import save_providers

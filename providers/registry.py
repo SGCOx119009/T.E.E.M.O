@@ -25,6 +25,7 @@ WHERE THE SETTINGS LIVE
 from __future__ import annotations
 
 import importlib
+import threading
 from typing import Any, Optional
 
 from .base import Field, caps_of, validate
@@ -42,6 +43,13 @@ _MODULES: dict[str, tuple[str, ...]] = {
 _declarations: dict[str, dict] = {}     # id -> PROVIDER, for modules imported so far
 _instances: dict[str, Any] = {}         # id -> built provider, keyed by config
 _failed: dict[str, str] = {}            # module name -> why it would not import
+
+# Building a provider can take seconds — it loads a model — and the settings
+# panel now builds them from a worker thread while the session builds them from
+# its own. Two threads asking for the same configuration must get the SAME
+# instance, or the panel would hold a second copy of a three-hundred-megabyte
+# speech model for as long as the panel stayed open.
+_build_lock = threading.RLock()
 
 
 def _load(module_name: str) -> Optional[dict]:
@@ -140,21 +148,22 @@ def build(provider_id: str, cfg: dict):
     instance rather than silently reusing the old one.
     """
     key = _fingerprint(provider_id, cfg)
-    if key in _instances:
-        return _instances[key]
+    with _build_lock:
+        if key in _instances:
+            return _instances[key]
 
-    decl = get_declaration(provider_id)
-    if decl is None:
-        raise LookupError(f"no provider called {provider_id!r}")
-    if not decl.get("_available", True):
-        missing = ", ".join(decl.get("requires", ()))
-        raise RuntimeError(f"{decl['label']} needs {missing}, which is not installed")
+        decl = get_declaration(provider_id)
+        if decl is None:
+            raise LookupError(f"no provider called {provider_id!r}")
+        if not decl.get("_available", True):
+            missing = ", ".join(decl.get("requires", ()))
+            raise RuntimeError(f"{decl['label']} needs {missing}, which is not installed")
 
-    inst = decl["factory"](cfg)
-    if not hasattr(inst, "caps"):
-        inst.caps = caps_of(decl)
-    _instances[key] = inst
-    return inst
+        inst = decl["factory"](cfg)
+        if not hasattr(inst, "caps"):
+            inst.caps = caps_of(decl)
+        _instances[key] = inst
+        return inst
 
 
 def reset() -> None:

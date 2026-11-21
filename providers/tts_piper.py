@@ -95,6 +95,10 @@ _VOICE_DIR = _voice_dir()
 _CATALOG_URL = ("https://huggingface.co/rhasspy/piper-voices/resolve/main/"
                 "voices.json?download=true")
 
+# Where one voice's files live. The catalogue carries the exact path of every
+# file of every voice, so the downloader never has to guess it.
+_VOICE_FILES_URL = ("https://huggingface.co/rhasspy/piper-voices/resolve/main/")
+
 # Piper builds most voices at 22.05 kHz; the speaker is open at 24 kHz. The
 # model reports its own rate and that is what gets used - assuming 22050 would
 # play a 16 kHz voice nine percent slow and sound like a worse model rather than
@@ -135,6 +139,11 @@ def catalog(refresh: bool = False) -> dict:
                 "name_native": lang.get("name_native", ""),
                 "name_english": lang.get("name_english", ""),
                 "quality": entry.get("quality", ""),
+                # The exact files this voice is made of, with their sizes and
+                # checksums. The downloader needs all three: the path to know
+                # what to fetch, the size to draw a progress bar that means
+                # something, and the digest to notice a truncated download.
+                "files": dict(entry.get("files") or {}),
             }
     except Exception:
         found = {}
@@ -201,21 +210,130 @@ def _use_certifi() -> bool:
     return True
 
 
-def download(voice: str, log=None) -> Path:
+class DownloadCancelled(Exception):
+    """The user asked for the download to stop. Not an error."""
+
+
+def _voice_files(voice: str) -> list[tuple[str, int, str]]:
+    """The files one voice is made of, as (relative path, size, md5).
+
+    Read from the catalogue, which lists them exactly. Empty when the
+    catalogue could not be fetched, which is the only case where the caller
+    falls back to Piper's own downloader."""
+    entry = (_catalog or {}).get(voice) or {}
+    files = entry.get("files") or {}
+    out: list[tuple[str, int, str]] = []
+    for path, meta in sorted(files.items()):
+        if not (path.endswith(".onnx") or path.endswith(".onnx.json")):
+            continue
+        meta = meta or {}
+        try:
+            size = int(meta.get("size_bytes") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        out.append((path, size, str(meta.get("md5_digest") or "")))
+    return out
+
+
+def _download_one(url: str, dest: Path, expected: int, digest: str,
+                  log=None, progress=None, cancel=None) -> None:
+    """Fetch one file, reporting progress and honouring a cancellation.
+
+    `progress(done_bytes, total_bytes)` and `cancel()` — a callable that
+    returns True to stop — are what turn a sixty-megabyte black box into
+    something a person can watch and, if they changed their mind, stop."""
+    import hashlib
+
+    import httpx
+
+    done = 0
+    md5 = hashlib.md5()
+    with httpx.Client(timeout=60.0, follow_redirects=True) as cl:
+        with cl.stream("GET", url) as response:
+            response.raise_for_status()
+            total = expected or int(response.headers.get("content-length") or 0)
+            with open(dest, "wb") as fh:
+                for chunk in response.iter_bytes(256 * 1024):
+                    if cancel is not None and cancel():
+                        raise DownloadCancelled()
+                    fh.write(chunk)
+                    md5.update(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total)
+    if digest:
+        if md5.hexdigest() != digest:
+            raise RuntimeError(
+                f"the downloaded file does not match its published checksum — "
+                f"the transfer was corrupted. Try again."
+            )
+    if log:
+        log(f"SYS: {dest.name} downloaded ({done} bytes)")
+
+
+def download(voice: str, log=None, progress=None, cancel=None) -> Path:
     """Fetch one voice. Blocking — callers run it off the interface thread.
 
-    Into a scratch folder first, moved into place only once both files are
-    complete. Piper writes straight to the final name, so a download cut short
-    left a truncated .onnx that every later check took for an installed voice."""
-    from piper.download_voices import download_voice
+    Into a scratch folder first, moved into place only once every file is
+    complete AND its checksum matches. Piper writes straight to the final
+    name, so a download cut short left a truncated .onnx that every later
+    check took for an installed voice.
 
+    `progress(done, total)` is called as the bytes arrive, and `cancel()` is
+    polled between chunks: a download nobody can stop is a download nobody
+    can abandon when the network turns out to be slow."""
     _VOICE_DIR.mkdir(parents=True, exist_ok=True)
     target = _VOICE_DIR / f"{voice}.onnx"
     if target.exists():
         return target
+
+    files = _voice_files(voice)
+    if not files:
+        # No catalogue: Piper's own downloader knows where the files are.
+        return _download_with_piper(voice, log=log)
+
     if log:
-        log(f"SYS: downloading the {voice} voice (about 60 MB, once)")
+        total_mb = sum(f[1] for f in files) / (1024 * 1024)
+        log(f"SYS: downloading the {voice} voice (about {total_mb:.0f} MB, once)")
     t0 = time.monotonic()
+    partial = _VOICE_DIR / ".partial"
+    shutil.rmtree(partial, ignore_errors=True)
+    partial.mkdir(parents=True, exist_ok=True)
+
+    def scaled(done: int, total: int, _done: int = 0, _total: int = 0):
+        # The catalogue's sizes are per file; the bar is for the whole voice.
+        done_all = _done + done
+        total_all = _total or sum(f[1] for f in files)
+        if progress:
+            progress(done_all, total_all)
+
+    done_total = 0
+    size_total = sum(f[1] for f in files)
+    try:
+        for path, size, digest in files:
+            url = _VOICE_FILES_URL + path
+            name = path.rsplit("/", 1)[-1]
+            _download_one(
+                url, partial / name, size, digest,
+                log=None,
+                progress=lambda d, t, _d=done_total, _s=size_total: scaled(
+                    d, t, _d, _s),
+                cancel=cancel,
+            )
+            done_total += size
+        for part in partial.iterdir():
+            os.replace(part, _VOICE_DIR / part.name)
+    finally:
+        shutil.rmtree(partial, ignore_errors=True)
+    if log:
+        log(f"SYS: {voice} downloaded in {time.monotonic() - t0:.1f}s")
+    return target
+
+
+def _download_with_piper(voice: str, log=None) -> Path:
+    """The fallback: Piper's own downloader, when the catalogue is unreachable."""
+    from piper.download_voices import download_voice
+
     partial = _VOICE_DIR / ".partial"
     shutil.rmtree(partial, ignore_errors=True)
     partial.mkdir(parents=True, exist_ok=True)
@@ -227,9 +345,8 @@ def download(voice: str, log=None) -> Path:
                 raise
             if not _use_certifi():
                 raise RuntimeError(
-                    "this Python cannot check HTTPS certificates. On macOS run "
-                    "'Install Certificates.command' from the Python folder in "
-                    "Applications, or: pip install certifi") from e
+                    "this Python cannot check HTTPS certificates. "
+                    "Install certifi and try again.") from e
             if log:
                 log("SYS: this Python has no certificate store — using certifi's and retrying")
             download_voice(voice, partial)
@@ -237,9 +354,7 @@ def download(voice: str, log=None) -> Path:
             os.replace(part, _VOICE_DIR / part.name)
     finally:
         shutil.rmtree(partial, ignore_errors=True)
-    if log:
-        log(f"SYS: {voice} downloaded in {time.monotonic() - t0:.1f}s")
-    return target
+    return _VOICE_DIR / f"{voice}.onnx"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -409,7 +524,12 @@ class PiperTTS:
                 rows.append((name, f"* {name}"))
         return rows
 
-    def probe(self) -> tuple[bool, str]:
+    def probe(self, progress=None, cancel=None) -> tuple[bool, str]:
+        """Is this voice ready? (ok, one line to show the user)
+
+        `progress(done_bytes, total_bytes)` and `cancel()` are optional and
+        only mean something while a voice is being fetched — sixty megabytes
+        is long enough to want to watch, and long enough to want to stop."""
         if find_spec("piper") is None:
             return False, "Piper is not installed."
         if not self.voice:
@@ -418,15 +538,22 @@ class PiperTTS:
                            f"{len({language_of(v) for v in catalog()})} languages."
                            if n else "Choose a voice.")
         try:
-            path = download(self.voice)
+            path = download(self.voice, log=self._log,
+                            progress=progress, cancel=cancel)
             if not path.exists():
                 return False, f"Could not download {self.voice}."
             t0 = time.monotonic()
             model = self._load(self.voice)
+            loaded = time.monotonic() - t0
             pcm = self._synth(model, "Test.")
             took = time.monotonic() - t0
         except Exception as e:
             return False, f"{type(e).__name__}: {str(e)[:120]}"
+        # The load is the expensive part — an ONNX session takes seconds to
+        # come up — and it is invisible unless it is written down. The log is
+        # where somebody looking at a slow first sentence will look.
+        self._log(f"SYS: the {self.voice} voice loaded in {loaded:.1f}s "
+                  f"(test audio in {took - loaded:.1f}s)")
         rate = int(getattr(model.config, "sample_rate", 22050))
         secs = len(pcm) / float(rate * 2)
         extra = ""
@@ -476,9 +603,20 @@ def prepare(values: dict, report=None) -> None:
         if report:
             report(None, f"downloading {voice} (about 60 MB, once)...")
         t0 = time.monotonic()
-        download(voice)
+
+        def progress(done: int, total: int) -> None:
+            if not report or not total:
+                return
+            pct = min(100, int(done * 100 / total))
+            report(None, f"downloading {voice} — {pct}% "
+                         f"({done // (1024 * 1024)} of {total // (1024 * 1024)} MB)")
+
+        download(voice, progress=progress)
         if report:
             report(True, f"{voice} downloaded in {time.monotonic() - t0:.1f}s.")
+    except DownloadCancelled:
+        if report:
+            report(None, f"the {voice} download was cancelled.")
     except Exception as e:
         if report:
             report(False, f"{type(e).__name__}: {str(e)[:120]}")
