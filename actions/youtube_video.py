@@ -33,9 +33,6 @@ try:
 except ImportError:
     _TRANSCRIPT_OK = False
 
-from config import get_os, is_windows, is_mac, is_linux
-
-
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -47,7 +44,7 @@ API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (X11; Linux x86_64) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
@@ -64,12 +61,7 @@ def _get_api_key() -> str:
 
 def _open_url(url: str) -> None:
     try:
-        if is_mac():
-            subprocess.Popen(["open", url])
-        elif is_linux():
-            subprocess.Popen(["xdg-open", url])
-        else:
-            subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
+        subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
     except Exception as e:
         print(f"[YouTube] ⚠️ open_url failed: {e}")
 
@@ -210,12 +202,7 @@ def _save_summary(content: str, video_url: str) -> str:
     filepath.write_text(header + content, encoding="utf-8")
 
     try:
-        if is_windows():
-            subprocess.Popen(["notepad.exe", str(filepath)])
-        elif is_mac():
-            subprocess.Popen(["open", "-t", str(filepath)])
-        else:
-            subprocess.Popen(["xdg-open", str(filepath)])
+        subprocess.Popen(["notepad.exe", str(filepath)])
     except Exception as e:
         print(f"[YouTube] ⚠️ Could not open text editor: {e}")
 

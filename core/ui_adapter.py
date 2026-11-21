@@ -5,7 +5,6 @@ actions. It never uses coordinates, arbitrary selectors, or shell commands.
 """
 from __future__ import annotations
 
-import platform
 from dataclasses import dataclass
 from typing import Any
 from _ctypes import COMError
@@ -37,15 +36,7 @@ def _selection_recovery(
 
 def capabilities() -> ApplicationCapabilities:
     """Describe the adapter without importing or launching UI automation."""
-    system = platform.system()
-    if system != "Windows":
-        return ApplicationCapabilities(
-            platform=system or "unknown",
-            available=False,
-            read_only=True,
-            capabilities=(),
-            reason="Windows UI Automation is the only supported adapter.",
-        )
+    system = "Windows"
     try:
         import pywinauto  # noqa: F401
     except (ImportError, AttributeError, OSError, RuntimeError):
@@ -503,12 +494,6 @@ def activate_window(window_name: str) -> dict[str, Any]:
         raise ValueError("window name must be non-empty text")
     if len(window_name) > 300:
         raise ValueError("window name must contain at most 300 characters")
-    if platform.system() != "Windows":
-        return {
-            "status": "failed",
-            "verified": False,
-            "reason": "Windows UI Automation is the only supported adapter.",
-        }
     caps = capabilities()
     if not caps.available:
         return {"status": "failed", "verified": False, "reason": caps.reason}

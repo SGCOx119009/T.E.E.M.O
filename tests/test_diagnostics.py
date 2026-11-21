@@ -46,7 +46,7 @@ class DiagnosticsTests(unittest.TestCase):
             ),
             patch.object(diagnostics, "_path_readable", return_value=False),
         ):
-            report = diagnostics._browser_status("Windows", True)
+            report = diagnostics._browser_status(True)
 
         self.assertFalse(report["cache_present"])
         self.assertEqual(

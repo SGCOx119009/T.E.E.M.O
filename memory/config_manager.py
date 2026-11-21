@@ -2,7 +2,6 @@ import functools
 import hashlib
 import json
 import os
-import platform
 import sys
 import tempfile
 import threading
@@ -122,7 +121,7 @@ def _secure_keyring():
     backend_type = type(backend)
     if backend_type.__name__.casefold().startswith("plaintext"):
         raise RuntimeError("Plaintext credential backends are not supported.")
-    if platform.system() == "Windows" and backend_type.__name__ != "WinVaultKeyring":
+    if backend_type.__name__ != "WinVaultKeyring":
         raise RuntimeError(
             "Windows credential storage requires the Windows Credential Locker."
         )

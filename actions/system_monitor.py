@@ -1,14 +1,13 @@
 """
 System Monitor — background metric checks with voice alert support.
-Zero subprocess calls on all platforms — uses ctypes/pynvml/psutil/wmi only.
+Zero subprocess calls at all — uses ctypes/pynvml/psutil/wmi only.
 """
 import ctypes
-import platform
 import time
 
 import psutil
 
-_OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+_OS = "Windows"
 
 DEFAULT_THRESHOLDS = {
     "cpu":  90.0,
@@ -20,13 +19,13 @@ DEFAULT_THRESHOLDS = {
 _COOLDOWN   = 300
 _CPU_STREAK = 3
 
-# ── NVML DLL cache (Windows: nvml.dll, Linux: libnvidia-ml.so.1) ─────────────
+# ── NVML DLL cache (nvml.dll) ────────────────────────────────────────────────
 _nvml_lib: object = None
 _nvml_ok:  object = None   # None=untested  True=works  False=unavailable
 
 
 def _nvml_gpu() -> float:
-    """GPU utilisation via NVML — zero subprocess on all platforms."""
+    """GPU utilisation via NVML — zero subprocess."""
     global _nvml_lib, _nvml_ok
     if _nvml_ok is False:
         return -1.0
@@ -35,16 +34,8 @@ def _nvml_gpu() -> float:
             _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
 
         if _nvml_lib is None:
-            if _OS == "Windows":
-                candidates = ("nvml", r"C:\Windows\System32\nvml.dll")
-                _load = ctypes.WinDLL
-            else:
-                candidates = (
-                    "libnvidia-ml.so.1",
-                    "libnvidia-ml.so",
-                    "libnvidia-ml.dylib",
-                )
-                _load = ctypes.CDLL
+            candidates = ("nvml", r"C:\Windows\System32\nvml.dll")
+            _load = ctypes.WinDLL
             for name in candidates:
                 try:
                     lib = _load(name)
@@ -83,7 +74,8 @@ def _get_gpu_usage() -> float:
 
 
 def _get_cpu_temp() -> float:
-    # psutil — works on Linux; occasionally Windows with proper drivers
+    # psutil — the sensors it can read depend on the driver, so it is a
+    # best-effort source and the WMI path below is the fallback.
     try:
         temps = psutil.sensors_temperatures()
         for name in ["coretemp", "k10temp", "cpu_thermal", "acpitz",
@@ -97,15 +89,14 @@ def _get_cpu_temp() -> float:
         pass
 
     # Windows: wmi module (pure Python COM, zero subprocess)
-    if _OS == "Windows":
-        try:
-            import wmi  # type: ignore
-            w = wmi.WMI(namespace="root/wmi")
-            tz = w.MSAcpi_ThermalZoneTemperature()
-            if tz:
-                return (tz[0].CurrentTemperature / 10.0) - 273.15
-        except Exception:
-            pass
+    try:
+        import wmi  # type: ignore
+        w = wmi.WMI(namespace="root/wmi")
+        tz = w.MSAcpi_ThermalZoneTemperature()
+        if tz:
+            return (tz[0].CurrentTemperature / 10.0) - 273.15
+    except Exception:
+        pass
 
     return -1.0
 

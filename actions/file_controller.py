@@ -1,6 +1,5 @@
 import os
 import shutil
-import platform
 from pathlib import Path
 from datetime import datetime
 
@@ -12,7 +11,7 @@ except ImportError:
 
 from core.undo import push_undo
 
-_OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+_OS = "Windows"
 
 # Undo keeps a file's previous contents in memory so `write` can be reversed.
 # Above this size it does not — a 200 MB log would sit in RAM for the rest of
@@ -105,47 +104,52 @@ def _is_safe_path(target: Path) -> bool:
     except Exception:
         return False
 
+def _known_folder(registry_name: str, fallback: str) -> Path:
+    """The real Windows folder, wherever the user moved it to.
+
+    `Path.home() / "Desktop"` is WRONG on the machines where Windows has
+    relocated the folder into OneDrive, which is most of them since 2021. The
+    registry is where Windows itself keeps the answer, and it is the only
+    place that knows.
+    """
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion"
+            r"\Explorer\User Shell Folders")
+        value, _ = winreg.QueryValueEx(key, registry_name)
+        winreg.CloseKey(key)
+        raw = os.path.expandvars(str(value)).strip()
+        if raw:
+            return Path(raw)
+    except Exception:
+        pass
+    return Path.home() / fallback
+
+
 def _get_desktop() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Desktop"
+    return _known_folder("Desktop", "Desktop")
+
 
 def _get_downloads() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOWNLOAD_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Downloads"
+    return _known_folder("Downloads", "Downloads")
+
 
 def _get_documents() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DOCUMENTS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Documents"
+    return _known_folder("Personal", "Documents")
+
 
 def _get_pictures() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_PICTURES_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Pictures"
+    return _known_folder("My Pictures", "Pictures")
+
 
 def _get_music() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_MUSIC_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Music"
+    return _known_folder("My Music", "Music")
+
 
 def _get_videos() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_VIDEOS_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
-    return Path.home() / "Videos"
+    return _known_folder("My Video", "Videos")
 
 
 def _resolve_path(raw: str) -> Path:

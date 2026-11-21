@@ -10,41 +10,34 @@ assistant while another window has focus.
 
 How it works, and what it costs
 -------------------------------
-Zero new dependencies, best available mechanism per platform:
+One mechanism, no dependencies: `GetAsyncKeyState` polled from one small
+thread. This is deliberately *not* `RegisterHotKey`, which only reports a
+press: push-to-talk needs the release too, and it needs to work while another
+application has focus. Polling two virtual-key codes 30 times a second is a
+rounding error of CPU and needs no message loop.
 
-* **Windows** — `GetAsyncKeyState` polled from one small thread. This is
-  deliberately *not* `RegisterHotKey`, which only reports a press: push-to-talk
-  needs the release too, and it needs to work while another application has
-  focus. Polling two virtual-key codes 30 times a second is a rounding error of
-  CPU and needs no message loop.
-* **macOS / Linux** — no portable way to read global key state without pulling
-  in a new package or asking for accessibility permissions, so the chord is
-  bound as an application shortcut instead: it works whenever the assistant's
-  window has focus. `scope` reports which of the two you got, so the UI can say
-  so honestly rather than pretending.
-
-The class never raises. If the platform hook cannot be installed it simply
-reports `scope == "window"` and the Qt shortcut carries it.
+The class never raises. If the hook cannot be installed it simply reports
+`scope == "window"` and the Qt shortcut carries it.
 """
 
 from __future__ import annotations
 
-import platform
 import threading
 import time
 from typing import Callable
 
-_OS = platform.system()
+_OS = "Windows"
 
 # The default chord. Ctrl+Space is free in most desktop environments and is the
 # same finger shape on every keyboard layout, which matters for a worldwide app.
 DEFAULT_CHORD = ("ctrl", "space")
 
-# Windows virtual-key codes for the names we accept.
+# Windows virtual-key codes for the names we accept, in decimal so the table
+# reads the same on every editor.
 _VK = {
-    "ctrl": 0x11, "shift": 0x10, "alt": 0x12,
-    "space": 0x20, "f8": 0x77, "f9": 0x78, "f10": 0x79,
-    "capslock": 0x14, "insert": 0x2D,
+    "ctrl": 17, "shift": 16, "alt": 18,
+    "space": 32, "f8": 119, "f9": 120, "f10": 121,
+    "capslock": 20, "insert": 45,
 }
 
 # Qt key sequence text for the same chord, used by the windowed fallback.

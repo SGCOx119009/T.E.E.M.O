@@ -44,9 +44,8 @@ from .base import DEFAULT_CAPS, Field, FunctionCall
 # choice and it is the single most common way this feature fails on Windows:
 # `localhost` resolves to ::1 before 127.0.0.1 there, Ollama and llama.cpp bind
 # to the IPv4 loopback only, and the connection is refused or waits out the
-# resolver before falling back. macOS and most Linux distributions happen to
-# order it the other way, which is exactly why it gets shipped broken — it works
-# on the developer's machine.
+# resolver before falling back. On the systems where the resolver orders it
+# the other way it gets shipped broken — it works on the developer's machine.
 # Spare Gemini models, fastest first, for when the chosen one is out of quota.
 _GEMINI_SPARES = ("gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-3-flash-preview",
                   "gemini-flash-lite-latest")

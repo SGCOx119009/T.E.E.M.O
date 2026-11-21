@@ -8,8 +8,8 @@ from core import ui_adapter
 
 
 class UiAdapterTests(unittest.TestCase):
-    def test_non_windows_adapter_is_unavailable_and_read_only(self) -> None:
-        with patch.object(ui_adapter.platform, "system", return_value="Linux"):
+    def test_adapter_is_unavailable_and_read_only_without_uia_backend(self) -> None:
+        with patch.dict("sys.modules", {"pywinauto": None}):
             result = ui_adapter.capabilities()
 
         self.assertFalse(result.available)
@@ -17,10 +17,7 @@ class UiAdapterTests(unittest.TestCase):
         self.assertEqual(result.capabilities, ())
 
     def test_missing_pywinauto_is_reported_without_installing(self) -> None:
-        with (
-            patch.object(ui_adapter.platform, "system", return_value="Windows"),
-            patch.object(ui_adapter, "capabilities") as capability,
-        ):
+        with patch.object(ui_adapter, "capabilities") as capability:
             capability.return_value = ui_adapter.ApplicationCapabilities(
                 "Windows", False, True, (), "pywinauto is not installed."
             )
@@ -29,20 +26,14 @@ class UiAdapterTests(unittest.TestCase):
 
     def test_windows_capabilities_mark_focus_as_non_read_only(self) -> None:
         fake_pywinauto = object()
-        with (
-            patch.object(ui_adapter.platform, "system", return_value="Windows"),
-            patch.dict("sys.modules", {"pywinauto": fake_pywinauto}),
-        ):
+        with patch.dict("sys.modules", {"pywinauto": fake_pywinauto}):
             result = ui_adapter.capabilities()
 
         self.assertFalse(result.read_only)
         self.assertIn("focus_verified_control", result.capabilities)
 
     def test_broken_uia_backend_is_reported_as_unavailable(self) -> None:
-        with (
-            patch.object(ui_adapter.platform, "system", return_value="Windows"),
-            patch.dict("sys.modules", {"pywinauto": None}),
-        ):
+        with patch.dict("sys.modules", {"pywinauto": None}):
             result = ui_adapter.capabilities()
 
         self.assertFalse(result.available)
@@ -606,14 +597,12 @@ class UiAdapterTests(unittest.TestCase):
         desktop = SimpleNamespace(windows=lambda **_kwargs: [window])
         fake_module = SimpleNamespace(Desktop=lambda **_kwargs: desktop)
         with (
-            patch.object(ui_adapter, "platform") as platform,
             patch.object(ui_adapter, "capabilities", return_value=
                 ui_adapter.ApplicationCapabilities(
                     "Windows", True, False, ("activate_verified_window",)
                 )),
             patch.dict("sys.modules", {"pywinauto": fake_module}),
         ):
-            platform.system.return_value = "Windows"
             result = ui_adapter.activate_window("Demo")
 
         self.assertEqual(result["status"], "done")
@@ -625,14 +614,12 @@ class UiAdapterTests(unittest.TestCase):
         desktop = SimpleNamespace(windows=lambda **_kwargs: windows)
         fake_module = SimpleNamespace(Desktop=lambda **_kwargs: desktop)
         with (
-            patch.object(ui_adapter, "platform") as platform,
             patch.object(ui_adapter, "capabilities", return_value=
                 ui_adapter.ApplicationCapabilities(
                     "Windows", True, False, ("activate_verified_window",)
                 )),
             patch.dict("sys.modules", {"pywinauto": fake_module}),
         ):
-            platform.system.return_value = "Windows"
             result = ui_adapter.activate_window("Demo")
 
         self.assertEqual(result["status"], "ambiguous")

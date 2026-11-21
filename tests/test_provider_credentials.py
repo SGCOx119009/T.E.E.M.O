@@ -29,7 +29,6 @@ class ProviderCredentialTests(unittest.TestCase):
             )
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
                 patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
             ):
@@ -54,7 +53,6 @@ class ProviderCredentialTests(unittest.TestCase):
             config_file = config_dir / "api_keys.json"
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
                 patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
             ):
@@ -92,7 +90,6 @@ class ProviderCredentialTests(unittest.TestCase):
             )
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
                 patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
             ):
@@ -120,7 +117,6 @@ class ProviderCredentialTests(unittest.TestCase):
             )
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
                 patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
                 patch.object(
@@ -143,7 +139,6 @@ class ProviderCredentialTests(unittest.TestCase):
             config_file = config_dir / "api_keys.json"
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
                 patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
                 patch.object(
@@ -170,7 +165,6 @@ class ProviderCredentialTests(unittest.TestCase):
             config_file = config_dir / "api_keys.json"
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
                 patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
             ):
@@ -189,7 +183,6 @@ class ProviderCredentialTests(unittest.TestCase):
             config_file = config_dir / "api_keys.json"
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
                 patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
                 patch.object(

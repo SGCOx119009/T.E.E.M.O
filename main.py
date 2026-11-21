@@ -1,18 +1,19 @@
 import platform as _platform
 import subprocess as _subprocess
 
-# ── Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call on Windows ───────
+# ── Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call ──────────────────
 # This patches Popen itself, so no per-file flag is needed anywhere.
-if _platform.system() == "Windows":
-    _OrigPopen = _subprocess.Popen
+_OrigPopen = _subprocess.Popen
 
-    class _Popen(_OrigPopen):
-        def __init__(self, args, **kw):
-            kw["creationflags"] = kw.get("creationflags", 0) | _subprocess.CREATE_NO_WINDOW
-            kw.pop("startupinfo", None)   # drop any stale/shared STARTUPINFO
-            super().__init__(args, **                       kw)
 
-    _subprocess.Popen = _Popen
+class _Popen(_OrigPopen):
+    def __init__(self, args, **kw):
+        kw["creationflags"] = kw.get("creationflags", 0) | _subprocess.CREATE_NO_WINDOW
+        kw.pop("startupinfo", None)   # drop any stale/shared STARTUPINFO
+        super().__init__(args, **                       kw)
+
+
+_subprocess.Popen = _Popen
 
 
 # ── Console must survive non-UTF-8 code pages ────────────────────────────────
@@ -329,14 +330,14 @@ def _describe_limits(has_vision: bool, has_mic: bool) -> str:
     ]
     # What the PLATFORM forbids, before what the build lacks.
     #
-    # On Wayland, and on a macOS without Accessibility, the keyboard, mouse and
-    # screen are simply not available to any program — and the APIs report
-    # success anyway. A model that does not know this reports clicks that never
-    # happened, which is how "it does not work properly on Linux" was described
-    # for a long time without anybody being able to name the failing part.
+    # On a Windows session with no interactive desktop — a service in session
+    # 0, a machine nobody is logged into, a privilege prompt holding the secure
+    # desktop — the keyboard, mouse and screen are simply not available to any
+    # program, and the APIs report success anyway. A model that does not know
+    # this reports clicks that never happened.
     try:
-        from core import platform_support
-        out.extend(platform_support.describe_for_model(platform_support.detect()))
+        from core import capability
+        out.extend(capability.describe_for_model(capability.detect()))
     except Exception as _e:
         print(f"[Limits] platform capabilities unavailable: {_e}")
 
@@ -625,7 +626,7 @@ def _keep_context_of(exc: BaseException) -> bool:
 class JarvisLive:
     def __init__(self, ui: JarvisUI):
         # Platform limits are announced once per run, not once per
-        # reconnect: a dropped connection is not news about Wayland.
+        # reconnect: a dropped connection is not news about the desktop.
         self._platform_notes_shown = False
         self.ui             = ui
         self._asst_name     = "JARVI    S"   # updated each session from config
@@ -1487,7 +1488,7 @@ class JarvisLive:
                   for d in _all_decls}
         sys_prompt = _render_prompt(sys_prompt, {
             "assistant_name": self._asst_name,
-            "platform": f"{_platform.system()} {_platform.release()}".strip(),
+            "platform": f"Windows {_platform.release()}".strip(),
             "capabilities": _describe_tools(_all_decls),
             "limits": _describe_limits(
                 has_vision="screen_process" in _names,
@@ -2877,18 +2878,18 @@ class JarvisLive:
 
                     # What this machine will not permit, said once, on screen.
                     #
-                    # A Wayland session or a macOS without Accessibility cannot
-                    # be typed into, clicked or captured — and the APIs report
-                    # success regardless. Telling the user at startup turns
-                    # "the assistant is broken" into one sentence they can act
-                    # on, and it is said once per session rather than on every
+                    # A session with no interactive desktop cannot be typed
+                    # into, clicked or captured — and the APIs report success
+                    # regardless. Telling the user at startup turns "the
+                    # assistant is broken" into one sentence they can act on,
+                    # and it is said once per session rather than on every
                     # attempt.
                     if not self._platform_notes_shown:
                         self._platform_notes_shown = True
                         try:
-                            from core import platform_support
-                            for _line in platform_support.describe_for_user(
-                                    platform_support.detect()):
+                            from core import capability
+                            for _line in capability.describe_for_user(
+                                    capability.detect()):
                                 self.ui.write_log(_line)
                         except Exception as _e:
                             print(f"[Platform] capability notes unavailable: {_e}")

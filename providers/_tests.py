@@ -205,7 +205,7 @@ async def test_real_caller_shapes():
     # main.py:_send_realtime
     try:
         await eng.send_realtime_input(
-            audio=types.Blob(data=b"\x11\x22" * 160, mime_type="audio/pcm"))
+            audio=types.Blob(data=bytes([17, 34]) * 160, mime_type="audio/pcm"))
         check("send_realtime_input accepts types.Blob", True)
     except Exception as e:
         check("send_realtime_input accepts types.Blob", False,
@@ -1032,20 +1032,22 @@ def test_panel_settings_survive():
 
         import pathlib
         writes = [0]
-        real = pathlib.Path.write_text
+        # The config is written atomically: a temporary file is filled and then
+        # moved into place (memory/config_manager.py). So the write is counted
+        # at the function that performs it, not at Path.write_text — which the
+        # atomic write never calls for the config file.
+        from memory import config_manager as _cm
+        real = _cm._write_api_config
 
-        def counted(self, *a, **k):
-            # The config is written to api_keys.json.tmp and moved into place
-            # in one step (memory/config_manager.py), so either name is a write.
-            if self.name in ("api_keys.json", "api_keys.json.tmp"):
-                writes[0] += 1
-            return real(self, *a, **k)
+        def counted(*a, **k):
+            writes[0] += 1
+            return real(*a, **k)
 
-        pathlib.Path.write_text = counted
+        _cm._write_api_config = counted
         try:
             ov._apply()
         finally:
-            pathlib.Path.write_text = real
+            _cm._write_api_config = real
 
         check("APPLY writes the config once", writes[0] == 1, str(writes[0]))
         check("the mode was stored", get_provider_mode() == "pipeline",

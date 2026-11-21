@@ -238,7 +238,6 @@ class WhatsAppDesktopTests(unittest.TestCase):
             _FakeControl("Edit", "Buscar un chat o iniciar uno nuevo"),
         ]
         with (
-            patch.object(whatsapp_core.platform, "system", return_value="Windows"),
             patch.object(
                 whatsapp_core, "_visible_windows",
                 side_effect=[[], [window]],
@@ -268,7 +267,6 @@ class WhatsAppDesktopTests(unittest.TestCase):
             return 1
 
         with (
-            patch.object(whatsapp_core.platform, "system", return_value="Windows"),
             patch.object(
                 whatsapp_core.ctypes.windll.user32,
                 "SetForegroundWindow",

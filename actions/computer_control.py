@@ -1,16 +1,12 @@
 #computer_control.py
 import io
 import json
-import platform
 import re
 import string
 import subprocess
 import sys
 
-if platform.system() == "Windows":
-    _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
-else:
-    _WIN_HIDE: dict = {}
+_WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
 import time
 import random
 from pathlib import Path
@@ -50,13 +46,9 @@ def _load_config() -> dict:
     except Exception:
         return {}
 
-def _platform_os() -> str:
-    return {"Windows": "windows", "Darwin": "mac", "Linux": "linux"}.get(
-        platform.system(), "linux"
-    )
-
 def _get_os() -> str:
-    return _load_config().get("os_system", _platform_os()).lower()
+    """The operating system this assistant runs on. Windows, always."""
+    return "windows"
 
 
 def _get_api_key() -> str:
@@ -189,8 +181,7 @@ def _smart_type(text: str, clear_first: bool = True) -> str:
     if len(text) > 20 and _require_pyperclip():
         pyperclip.copy(text)
         time.sleep(0.1)
-        paste_key = "command" if _get_os() == "mac" else "ctrl"
-        pyautogui.hotkey(paste_key, "v")
+        pyautogui.hotkey("ctrl", "v")
         return f"Smart-typed (clipboard): {text[:60]}{'…' if len(text) > 60 else ''}"
 
     pyautogui.typewrite(text, interval=0.04)
@@ -224,7 +215,7 @@ def _scroll(direction: str = "down", amount: int = 3) -> str:
     amount     = max(1, min(60, abs(int(amount))))
     # `amount` is wheel notches. pyautogui counts 1/120 of a notch on Windows and
     # whole notches elsewhere, so "scroll 3" moved the page by nothing on Windows.
-    units      = amount * 120 if sys.platform == "win32" else amount
+    units      = amount * 120
     clicks     = units if direction in ("up", "right") else -units
     pyautogui.scroll(clicks) if vertical else pyautogui.hscroll(clicks)
     return f"Scrolled {direction} ×{amount}"
@@ -256,8 +247,7 @@ def _clipboard_paste(text: str) -> str:
         pyperclip.copy(text)
         time.sleep(0.1)
         _require_pyautogui()
-        paste_key = "command" if _get_os() == "mac" else "ctrl"
-        pyautogui.hotkey(paste_key, "v")
+        pyautogui.hotkey("ctrl", "v")
         return f"Pasted: {text[:60]}{'…' if len(text) > 60 else ''}"
     return "pyperclip not available"
 
@@ -272,66 +262,22 @@ def _screenshot(save_path: str | None = None) -> str:
 
 def _clear_field() -> str:
     _require_pyautogui()
-    select_key = "command" if _get_os() == "mac" else "ctrl"
-    pyautogui.hotkey(select_key, "a")
+    pyautogui.hotkey("ctrl", "a")
     time.sleep(0.1)
     pyautogui.press("delete")
     return "Field cleared"
 
 def _focus_window(title: str) -> str:
-    os_name = _get_os()
-
-    if os_name == "windows":
-        try:
-            script = f'(New-Object -ComObject WScript.Shell).AppActivate("{title}")'
-            subprocess.run(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                capture_output=True, timeout=5, **_WIN_HIDE,
-            )
-            time.sleep(0.3)
-            return f"Focused window: {title}"
-        except Exception as e:
-            return f"focus_window (Windows) failed: {e}"
-
-    if os_name == "mac":
-        script = (
-            f'tell application "System Events" to '
-            f'set frontmost of (first process whose name contains "{title}") to true'
+    try:
+        script = f'(New-Object -ComObject WScript.Shell).AppActivate("{title}")'
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, timeout=5, **_WIN_HIDE,
         )
-        try:
-            subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, timeout=5,
-            )
-            time.sleep(0.3)
-            return f"Focused window: {title}"
-        except Exception as e:
-            return f"focus_window (macOS) failed: {e}"
-
-    if os_name == "linux":
-        try:
-            result = subprocess.run(
-                ["wmctrl", "-a", title],
-                capture_output=True, timeout=5,
-            )
-            if result.returncode == 0:
-                time.sleep(0.3)
-                return f"Focused window: {title}"
-        except FileNotFoundError:
-            pass
-        try:
-            result = subprocess.run(
-                ["xdotool", "search", "--name", title, "windowactivate"],
-                capture_output=True, timeout=5,
-            )
-            time.sleep(0.3)
-            return f"Focused window: {title}"
-        except FileNotFoundError:
-            return "focus_window (Linux) requires wmctrl or xdotool"
-        except Exception as e:
-            return f"focus_window (Linux) failed: {e}"
-
-    return f"focus_window: unknown OS '{os_name}'"
+        time.sleep(0.3)
+        return f"Focused window: {title}"
+    except Exception as e:
+        return f"focus_window (Windows) failed: {e}"
 
 def _close_app(app_name: str, confirmed_index: int | None = None) -> str:
     """Close the application the user named — that one, and never this one.
@@ -339,8 +285,7 @@ def _close_app(app_name: str, confirmed_index: int | None = None) -> str:
     THE BUG THIS REPLACES
         `computer_settings.close_app` was two lines:
 
-            if _OS == "Darwin": pyautogui.hotkey("command", "q")
-            else:               pyautogui.hotkey("alt", "f4")
+            pyautogui.hotkey("alt", "f4")
 
         No target. It sent Alt+F4 to whatever window had focus, and while
         somebody is talking to the assistant the window with focus is very

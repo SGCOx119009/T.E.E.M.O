@@ -1,6 +1,6 @@
-# ── MARK LVI — Python dependencies ────────────────────────────────────────────
-# pip skips any line whose sys_platform marker does not match your OS, so this
-# one file serves Windows, macOS and Linux. `python setup.py` runs it for you.
+# ── MARK LVII — Python dependencies ────────────────────────────────────────────
+# T.E.E.M.O. is a Windows desktop assistant. This file is the whole dependency
+# list for Windows: `python setup.py` installs it for you.
 
 # Version bounds: the lower bound is what the app is developed against, the
 # upper bound stops the next MAJOR release of a dependency from breaking every
@@ -81,16 +81,18 @@ openpyxl                     # excel_writer — spreadsheet output
 youtube-transcript-api       # youtube_video — transcript fetch for summaries
 pygetwindow                  # game_updater, chat_takeover — window geometry
 
-# ── Windows-only (pip skips these automatically on macOS / Linux) ─────────────
-comtypes;   sys_platform == "win32"
-pycaw;      sys_platform == "win32"
-win10toast; sys_platform == "win32"
-pywin32;    sys_platform == "win32"
-wmi;        sys_platform == "win32"
+# ── Windows-only ──────────────────────────────────────────────────────────────
+# These talk to Windows APIs directly. There is no marker any more: the app
+# only runs on Windows, so the marker would only ever be true.
+comtypes
+pycaw
+win10toast
+pywin32
+wmi
 # pywinauto drives the Windows accessibility tree. Three plugins read it:
 # screen_agent (to aim without a model call), the WhatsApp pair, and
 # game_updater (Steam's install dialog).
-pywinauto;  sys_platform == "win32"
+pywinauto
 
 # ── Documents, media & hardware readouts ──────────────────────────────────────
 # Also try/except-guarded at the point of use. They are declared because a
@@ -119,8 +121,8 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 #
 # NOTHING IS NEEDED FOR MOST OF IT. Talking to a model — Ollama, LM Studio,
 # llama.cpp, vLLM, or a hosted API like Groq, OpenAI, DeepSeek or OpenRouter —
-# uses httpx, which is already above. The system's own voices (SAPI on Windows,
-# `say` on macOS, espeak-ng on Linux) need no Python package at all.
+# uses httpx, which is already above. The system's own voices (SAPI on Windows)
+# need no Python package at all.
 #
 # Two things are downloads, and both install with one click from that panel:
 #
@@ -139,11 +141,10 @@ pynvml                       # system_monitor + the HUD's GPU meter (NVIDIA)
 # only ever uses Gemini should not pay for them. Deleting providers/ removes
 # the whole feature and the app runs exactly as it did before it existed.
 
-# ── Optional: local wake word ("Hey Jarvis") ──────────────────────────────────
+# ── Optional: local wake word ─────────────────────────────────────────────────
 # Deliberately NOT installed by default — it's opt-in. Enable it (and download
 # the tiny model) with one click from ⚙ → WAKE WORD in the app, or install it
 # yourself with:  pip install openwakeword
 #
-# macOS / Linux OS actions (volume, brightness, reminders) shell out to native
-# tools (pactl / brightnessctl / osascript / systemd), so no extra Python
-# packages are needed there — nothing Windows-specific is ever pulled in.
+# The OS actions (volume, brightness, reminders) use Windows APIs and tools
+# that ship with the system, so they need no extra Python packages either.

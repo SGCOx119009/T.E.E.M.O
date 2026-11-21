@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import platform
 import random
 import subprocess
 import sys
@@ -938,188 +937,76 @@ class MainWindow(QMainWindow):
     def _get_desktop_dir() -> Path:
         """
         Resolve the user's REAL desktop directory instead of assuming
-        ~/Desktop, which breaks when:
-          • OneDrive "Known Folder Move" relocates the desktop
-            (C:/Users/x/OneDrive/Desktop) — very common on Win 10/11;
-          • the XDG desktop is localized on Linux (~/Masaüstü,
-            ~/Schreibtisch, ~/Bureau, …).
+        ~/Desktop, which breaks when OneDrive "Known Folder Move" relocates the
+        desktop (C:/Users/x/OneDrive/Desktop) — very common on Win 10/11.
         Falls back to ~/Desktop only as a last resort.
         """
         home = Path.home()
-        _os = platform.system()
 
-        if _os == "Windows":
-            # ── 1) SHGetKnownFolderPath(FOLDERID_Desktop) — the canonical
-            #       answer; follows OneDrive redirection. No dependencies. ──
-            try:
-                import ctypes
-                from ctypes import wintypes
+        # ── 1) SHGetKnownFolderPath(FOLDERID_Desktop) — the canonical
+        #       answer; follows OneDrive redirection. No dependencies. ──
+        try:
+            import ctypes
+            from ctypes import wintypes
 
-                class _GUID(ctypes.Structure):
-                    _fields_ = [("Data1", wintypes.DWORD),
-                                ("Data2", wintypes.WORD),
-                                ("Data3", wintypes.WORD),
-                                ("Data4", ctypes.c_ubyte * 8)]
+            class _GUID(ctypes.Structure):
+                _fields_ = [("Data1", wintypes.DWORD),
+                            ("Data2", wintypes.WORD),
+                            ("Data3", wintypes.WORD),
+                            ("Data4", ctypes.c_ubyte * 8)]
 
-                # FOLDERID_Desktop {B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
-                fid = _GUID(0xB4BFCC3A, 0xDB2C, 0x424C,
-                            (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9,
-                                                 0x9A, 0x87, 0xC6, 0x41))
-                buf = ctypes.c_wchar_p()
-                if ctypes.windll.shell32.SHGetKnownFolderPath(
-                        ctypes.byref(fid), 0, None, ctypes.byref(buf)) == 0:
-                    p = Path(buf.value)
-                    ctypes.windll.ole32.CoTaskMemFree(buf)
-                    if p.is_dir():
-                        return p
-            except Exception:
-                pass
-
-            # ── 2) Registry: User Shell Folders (may contain %VARS%) ──────
-            try:
-                import winreg
-                with winreg.OpenKey(
-                        winreg.HKEY_CURRENT_USER,
-                        r"Software\Microsoft\Windows\CurrentVersion"
-                        r"\Explorer\User Shell Folders") as key:
-                    val, _t = winreg.QueryValueEx(key, "Desktop")
-                p = Path(os.path.expandvars(val))
+            # FOLDERID_Desktop {B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
+            fid = _GUID(0xB4BFCC3A, 0xDB2C, 0x424C,
+                        (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9,
+                                             0x9A, 0x87, 0xC6, 0x41))
+            buf = ctypes.c_wchar_p()
+            if ctypes.windll.shell32.SHGetKnownFolderPath(
+                    ctypes.byref(fid), 0, None, ctypes.byref(buf)) == 0:
+                p = Path(buf.value)
+                ctypes.windll.ole32.CoTaskMemFree(buf)
                 if p.is_dir():
                     return p
-            except Exception:
-                pass
+        except Exception:
+            pass
 
-        elif _os == "Linux":
-            # ── xdg-user-dir honours localized names (~/Masaüstü, …) ──────
-            try:
-                out = subprocess.run(["xdg-user-dir", "DESKTOP"],
-                                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
-                p = Path(out.stdout.strip())
-                if out.stdout.strip() and p != home and p.is_dir():
-                    return p
-            except Exception:
-                pass
-            try:
-                cfg = home / ".config" / "user-dirs.dirs"
-                for line in cfg.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line.startswith("XDG_DESKTOP_DIR"):
-                        val = line.split("=", 1)[1].strip().strip('"')
-                        p = Path(val.replace("$HOME", str(home)))
-                        if p != home and p.is_dir():
-                            return p
-            except Exception:
-                pass
+        # ── 2) Registry: User Shell Folders (may contain %VARS%) ──────────
+        try:
+            import winreg
+            with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion"
+                    r"\Explorer\User Shell Folders") as key:
+                val, _t = winreg.QueryValueEx(key, "Desktop")
+            p = Path(os.path.expandvars(val))
+            if p.is_dir():
+                return p
+        except Exception:
+            pass
 
-        # macOS: ~/Desktop is always the real path (localization is
-        # display-only). Everything else lands here as a last resort.
+        # Everything else lands here as a last resort.
         return home / "Desktop"
 
     def _create_desktop_shortcut(self):
         """
-        Create a desktop shortcut on Windows / macOS / Linux.
-        Never opens a terminal, console, or PowerShell window on any platform.
+        Create a desktop shortcut on Windows.
+        Never opens a terminal, console, or PowerShell window.
         """
-        import stat as _stat
         script  = Path(__file__).resolve().parent.parent / "main.py"
         python  = Path(sys.executable)
         desktop = self._get_desktop_dir()
 
-        # Arc-reactor icon (.ico — also exported as .png for Linux/macOS)
+        # Arc-reactor icon (.ico)
         ico_path = Path(__file__).resolve().parent.parent / "config" / "jarvis.ico"
         if not ico_path.exists():
             self._build_jarvis_icon(ico_path)
 
         try:
-            _os = platform.system()
-
-            # ── Windows ───────────────────────────────────────────────────────
-            if _os == "Windows":
-                pythonw  = python.parent / "pythonw.exe"
-                target   = str(pythonw if pythonw.exists() else python)
-                lnk      = str(desktop / "J.A.R.V.I.S.lnk")
-                icon_loc = str(ico_path) if ico_path.exists() else f"{target},0"
-                self._create_lnk_windows(lnk, target, str(script),
-                                         str(script.parent), icon_loc)
-
-            # ── macOS — proper .app bundle (no Terminal window) ───────────────
-            elif _os == "Darwin":
-                app     = desktop / "J.A.R.V.I.S.app"
-                mac_dir = app / "Contents" / "MacOS"
-                res_dir = app / "Contents" / "Resources"
-                mac_dir.mkdir(parents=True, exist_ok=True)
-                res_dir.mkdir(exist_ok=True)
-
-                # Launcher executable (bash — runs as background process,
-                # macOS does NOT open Terminal for executables inside .app bundles)
-                launcher = mac_dir / "JARVIS"
-                launcher.write_text(
-                    "#!/usr/bin/env bash\n"
-                    f'cd "{script.parent}"\n'
-                    f'exec "{python}" "{script}"\n'
-                )
-                launcher.chmod(launcher.stat().st_mode
-                               | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
-
-                # Minimal Info.plist (required for .app recognition)
-                (app / "Contents" / "Info.plist").write_text(
-                    '<?xml version="1.0" encoding="UTF-8"?>\n'
-                    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-                    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-                    '<plist version="1.0"><dict>\n'
-                    '  <key>CFBundleExecutable</key><string>JARVIS</string>\n'
-                    '  <key>CFBundleIdentifier</key>'
-                    '<string>com.jarvis.assistant</string>\n'
-                    '  <key>CFBundleName</key><string>J.A.R.V.I.S</string>\n'
-                    '  <key>CFBundlePackageType</key><string>APPL</string>\n'
-                    '  <key>CFBundleVersion</key><string>1.0</string>\n'
-                    '</dict></plist>\n'
-                )
-
-                # Optional: copy icon as .icns (skip silently if Pillow is missing)
-                try:
-                    import PIL.Image
-                    icns = res_dir / "AppIcon.icns"
-                    PIL.Image.open(ico_path).save(icns, format="ICNS")
-                    # Inject icon reference into plist
-                    plist = app / "Contents" / "Info.plist"
-                    txt = plist.read_text()
-                    plist.write_text(
-                        txt.replace(
-                            '</dict></plist>',
-                            '  <key>CFBundleIconFile</key>'
-                            '<string>AppIcon</string>\n</dict></plist>\n',
-                        )
-                    )
-                except Exception:
-                    pass  # icon is optional
-
-            # ── Linux — .desktop file (Terminal=false, no console) ────────────
-            else:
-                # Export .ico → .png for better desktop integration
-                png_path = ico_path.with_suffix(".png")
-                if not png_path.exists() and ico_path.exists():
-                    try:
-                        import PIL.Image
-                        PIL.Image.open(ico_path).resize(
-                            (256, 256), PIL.Image.LANCZOS
-                        ).save(png_path, format="PNG")
-                    except Exception:
-                        png_path = ico_path  # fallback to .ico
-
-                icon_line = f"Icon={png_path}\n" if png_path.exists() else ""
-                desk = desktop / "J.A.R.V.I.S.desktop"
-                desk.write_text(
-                    "[Desktop Entry]\n"
-                    "Name=J.A.R.V.I.S\n"
-                    f"Exec={python} {script}\n"
-                    f"Path={script.parent}\n"
-                    "Type=Application\n"
-                    "Terminal=false\n"
-                    "Categories=Utility;\n"
-                    + icon_line
-                )
-                desk.chmod(desk.stat().st_mode | 0o755)
+            pythonw  = python.parent / "pythonw.exe"
+            target   = str(pythonw if pythonw.exists() else python)
+            lnk      = str(desktop / "J.A.R.V.I.S.lnk")
+            icon_loc = str(ico_path) if ico_path.exists() else f"{target},0"
+            self._create_lnk_windows(lnk, target, str(script),
+                                     str(script.parent), icon_loc)
 
             self._log.append_log("SYS: Desktop shortcut created.")
         except Exception as e:
@@ -1354,7 +1241,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._net_panel)
 
         stp = HoloPanel("STATUS", "")
-        os_name = {"Windows": "WINDOWS", "Darwin": "MACOS", "Linux": "LINUX"}.get(_OS, _OS.upper())
+        os_name = "WINDOWS"
         self._row_uptime = DataRow("UPTIME", "--:--", "GREEN")
         self._row_proc = DataRow("PROCESSES", "--")
         self._row_net = DataRow("NETWORK", "--")
@@ -2343,22 +2230,16 @@ class MainWindow(QMainWindow):
     def _check_autostart(self) -> bool:
         """Returns True if auto-start is currently registered on this OS."""
         try:
-            if _OS == "Windows":
-                import winreg
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                    r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
-                try:
-                    winreg.QueryValueEx(key, "JARVIS_AI")
-                    return True
-                except FileNotFoundError:
-                    return False
-                finally:
-                    winreg.CloseKey(key)
-            elif _OS == "Darwin":
-                return (Path.home() / "Library" / "LaunchAgents"
-                        / "com.jarvis.assistant.plist").exists()
-            else:
-                return (Path.home() / ".config" / "autostart" / "jarvis.desktop").exists()
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
+            try:
+                winreg.QueryValueEx(key, "JARVIS_AI")
+                return True
+            except FileNotFoundError:
+                return False
+            finally:
+                winreg.CloseKey(key)
         except Exception:
             return False
 
@@ -2366,52 +2247,17 @@ class MainWindow(QMainWindow):
         currently_on = self._check_autostart()
         try:
             script = str(Path(__file__).resolve().parent.parent / "main.py")
-            if _OS == "Windows":
-                import winreg
-                reg = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                    r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
-                if currently_on:
-                    winreg.DeleteValue(reg, "JARVIS_AI")
-                else:
-                    pythonw = Path(sys.executable).parent / "pythonw.exe"
-                    exe = str(pythonw if pythonw.exists() else sys.executable)
-                    winreg.SetValueEx(reg, "JARVIS_AI", 0, winreg.REG_SZ,
-                                      f'"{exe}" "{script}"')
-                winreg.CloseKey(reg)
-            elif _OS == "Darwin":
-                plist_dir = Path.home() / "Library" / "LaunchAgents"
-                plist_dir.mkdir(parents=True, exist_ok=True)
-                plist = plist_dir / "com.jarvis.assistant.plist"
-                if currently_on:
-                    plist.unlink(missing_ok=True)
-                else:
-                    plist.write_text(
-                        '<?xml version="1.0" encoding="UTF-8"?>\n'
-                        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
-                        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
-                        '<plist version="1.0"><dict>\n'
-                        '  <key>Label</key><string>com.jarvis.assistant</string>\n'
-                        '  <key>ProgramArguments</key><array>\n'
-                        f'    <string>{sys.executable}</string>\n'
-                        f'    <string>{script}</string>\n'
-                        '  </array>\n'
-                        '  <key>RunAtLoad</key><true/>\n'
-                        '</dict></plist>\n'
-                    )
+            import winreg
+            reg = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
+            if currently_on:
+                winreg.DeleteValue(reg, "JARVIS_AI")
             else:
-                desk_dir = Path.home() / ".config" / "autostart"
-                desk_dir.mkdir(parents=True, exist_ok=True)
-                desk = desk_dir / "jarvis.desktop"
-                if currently_on:
-                    desk.unlink(missing_ok=True)
-                else:
-                    desk.write_text(
-                        "[Desktop Entry]\n"
-                        f"Name={self._assistant_name}\n"
-                        f"Exec={sys.executable} {script}\n"
-                        "Type=Application\nTerminal=false\n"
-                        "X-GNOME-Autostart-enabled=true\n"
-                    )
+                pythonw = Path(sys.executable).parent / "pythonw.exe"
+                exe = str(pythonw if pythonw.exists() else sys.executable)
+                winreg.SetValueEx(reg, "JARVIS_AI", 0, winreg.REG_SZ,
+                                  f'"{exe}" "{script}"')
+            winreg.CloseKey(reg)
             enabled = not currently_on
             self._update_autostart_btn(enabled)
             self._log.append_log(
@@ -2548,11 +2394,12 @@ class MainWindow(QMainWindow):
     def _apply_ptt_shortcut(self, needed: bool):
         """Bind the chord inside the window when no global hook is available.
 
-        On macOS and Linux there is no dependency-free way to read global key
-        state, so the chord is at least live whenever this window has focus.
-        Qt gives no key-release for a QShortcut, so a press latches the mic open
-        and a short timer closes it; held down, auto-repeat keeps pushing that
-        timer out, which behaves like holding a key.
+        The global hook is the preferred route — it works while another
+        application has focus. This is the fallback, and it is live whenever
+        this window has focus. Qt gives no key-release for a QShortcut, so a
+        press latches the mic open and a short timer closes it; held down,
+        auto-repeat keeps pushing that timer out, which behaves like holding a
+        key.
         """
         from PyQt6.QtGui import QKeySequence, QShortcut
         from core.hotkey import qt_sequence
@@ -2912,8 +2759,6 @@ class MainWindow(QMainWindow):
 
     def _check_config(self) -> bool:
         d = _read_full_config()
-        if not d.get("os_system"):
-            return False
         providers = d.get("providers") if isinstance(d.get("providers"), dict) else {}
         # A Gemini key, or a choice to run without one: a local engine needs no key.
         return bool(d.get("gemini_api_key") or d.get("local_only")
@@ -2932,13 +2777,13 @@ class MainWindow(QMainWindow):
         ov.show()
         self._overlay = ov
 
-    def _on_setup_done(self, key: str, os_name: str):
+    def _on_setup_done(self, key: str):
         # Merged into the settings, never written over them. This used to replace
         # the whole file with these two keys, so re-entering a key after an
         # "API key invalid" error erased every other setting — the wake word, the
         # local engine, plugin credentials, the assistant's name.
         from memory.config_manager import update_config
-        fields = {"os_system": os_name, "local_only": not key}
+        fields = {"local_only": not key}
         if key:
             fields["gemini_api_key"] = key
         update_config(**fields)
@@ -2955,6 +2800,6 @@ class MainWindow(QMainWindow):
             self._overlay = None
         self._apply_state("LISTENING")
         self._assistant_name = _read_full_config().get("assistant_name", "T.E.E.M.O.") or "T.E.E.M.O."
-        self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. {self._assistant_name} online.")
+        self._log.append_log(f"SYS: Initialised. Windows. {self._assistant_name} online.")
 
 

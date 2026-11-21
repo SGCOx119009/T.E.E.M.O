@@ -20,7 +20,7 @@ NO FFMPEG, ON ANY PLATFORM
     `WhisperModel.transcribe()` accepts a numpy array as well as a file path.
     Given a path it decodes with PyAV and can want ffmpeg; given samples it
     decodes nothing. The microphone already hands us raw 16 kHz PCM, so the
-    audio never becomes a file and the whole class of "works on my Linux box,
+    audio never becomes a file and the whole class of "works on my machine,
     fails on Windows because ffmpeg is not on PATH" never arises.
 
 THE LANGUAGE IS DETECTED, NOT CONFIGURED

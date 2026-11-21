@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import platform
 import random
 import subprocess
 import sys
@@ -100,7 +99,6 @@ class _SysMetrics:
         self._pynvml    = None         # cached pynvml module + device handle
         self._pynvml_h  = None
         self._pynvml_ok = None         # None=untested, False=unavailable here
-        self._nv_unix   = None         # cached (lib, dev) for Linux/macOS NVML
         self._wmi_conn  = None         # cached WMI connection (creating one is slow)
         self._wmi_ok    = None         # None=untested, False=unavailable here
         t = threading.Thread(target=self._loop, daemon=True)
@@ -168,32 +166,11 @@ class _SysMetrics:
         if _OS == "Windows":
             return _nvml_gpu_windows()
 
-        # Linux / macOS: libnvidia-ml shared lib via ctypes — init once, reuse
-        try:
-            import ctypes
-
-            class _Util(ctypes.Structure):
-                _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
-
-            if self._nv_unix is None:
-                _lib = "libnvidia-ml.so.1" if _OS == "Linux" else "libnvidia-ml.dylib"
-                nv = ctypes.CDLL(_lib)
-                nv.nvmlInit_v2()
-                dev = ctypes.c_void_p()
-                nv.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev))
-                self._nv_unix = (nv, dev)
-
-            nv, dev = self._nv_unix
-            u = _Util()
-            nv.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u))
-            return float(u.gpu)
-        except Exception:
-            pass
-
-        return -1.0   # N/A — zero subprocess on all platforms
+        return -1.0   # N/A — no subprocess at all
 
     def _get_temp(self) -> float:
-        # psutil — works on Linux; occasionally Windows with driver support
+        # psutil — the sensors it can read depend on the driver, so it is a
+        # best-effort source and the WMI path below is the fallback.
         try:
             temps = psutil.sensors_temperatures()
             for name in ["coretemp", "k10temp", "cpu_thermal", "acpitz",
@@ -221,7 +198,7 @@ class _SysMetrics:
                 self._wmi_ok   = False
                 self._wmi_conn = None
 
-        return -1.0   # N/A — zero subprocess on all platforms
+        return -1.0   # N/A — no subprocess at all
 
     def snapshot(self) -> dict:
         with self._lock:

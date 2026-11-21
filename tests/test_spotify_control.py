@@ -316,10 +316,9 @@ class SpotifyControlTests(unittest.TestCase):
                     "status=failed reason='Spotify requires Premium'"
                 ),
             ),
-            patch.object(spotify_control.platform, "system",
-                         return_value="Windows"),
-            patch.object(spotify_control, "_desktop_play",
-                         return_value="status=done action=play verified=true")
+            patch.object(
+                spotify_control, "_desktop_play",
+                return_value="status=done action=play verified=true")
             as desktop_play,
         ):
             result = spotify_control.run({
@@ -356,13 +355,15 @@ class SpotifyControlTests(unittest.TestCase):
         desktop_control.assert_called_once_with("play_pause")
         self.assertIn("status=done", control_result)
 
-    def test_free_desktop_route_reports_unsupported_platform_cleanly(self) -> None:
-        with patch.object(spotify_control.platform, "system",
-                          return_value="Linux"):
+    def test_free_desktop_route_reports_failure_cleanly(self) -> None:
+        with patch.object(
+            spotify_control.os, "startfile",
+            side_effect=OSError("no handler"),
+        ):
             result = spotify_control._desktop_play("Song", "Artist")
 
         self.assertIn("status=failed", result)
-        self.assertIn("supported on Windows", result)
+        self.assertIn("Could not open Spotify Desktop search", result)
 
     def test_play_refuses_to_guess_when_track_title_is_ambiguous(self) -> None:
         tracks = [

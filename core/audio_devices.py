@@ -88,11 +88,6 @@ _chosen_api: dict = {"input": None, "output": None}
 # amount of reasoning would have produced.
 _PREFERRED_APIS = {
     "Windows": ("directsound", "mme", "wasapi"),
-    # macOS has only Core Audio, so there is nothing to disambiguate.
-    "Darwin":  ("core audio",),
-    # PulseAudio/PipeWire present one clean endpoint per device; raw ALSA
-    # presents dozens of routing permutations of the same card.
-    "Linux":   ("pulse", "pipewire", "jack", "alsa"),
 }
 
 # ── "It opens" is not "it works" ─────────────────────────────────────────────
@@ -271,7 +266,7 @@ def _query() -> dict[str, list[str]]:
         except Exception:
             apis = []
 
-        preferred = _PREFERRED_APIS.get(platform.system(), ())
+        preferred = _PREFERRED_APIS.get("Windows", ())
 
         def _collect(api_filter, kind) -> list[tuple[int, str]]:
             """(index, name) for named, non-pseudo devices on one side that can
@@ -392,7 +387,7 @@ def resolve(name: str, kind: str):
         list_devices(kind)
         chosen = _chosen_api.get(kind)
         orders = ([chosen] if chosen is not None else []) \
-            + [a for a in _PREFERRED_APIS.get(platform.system(), ()) if a != chosen] \
+            + [a for a in _PREFERRED_APIS.get("Windows", ()) if a != chosen] \
             + [None]
 
         # A candidate only counts if it can be opened at the rate this side runs
@@ -626,8 +621,7 @@ def _endpoint_for(name: str):
 
 
 def _platform_is() -> str:
-    import platform
-    return platform.system()
+    return "Windows"
 
 
 def _fold(text: str) -> str:
@@ -643,9 +637,9 @@ def _fold(text: str) -> str:
 def get_output_volume(name: str = "") -> Optional[int]:
     """Volume 0-100 of ONE output, or of the system default when unnamed.
 
-    None where the platform will not report it — macOS and Linux have no
-    per-device volume through this plumbing, so a name there falls back to the
-    master level rather than silently answering about the wrong device.
+    None where the platform will not report it — Windows has no per-device
+    volume through this plumbing, so a name there falls back to the master
+    level rather than silently answering about the wrong device.
     """
     endpoint = _endpoint_for(name)
     if endpoint is not None:

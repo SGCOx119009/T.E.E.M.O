@@ -101,6 +101,22 @@ SERVICE_USER = "jarvis"
 STATE_DIR = BASE_DIR / "cloud_state"
 WORKSPACE = BASE_DIR / "workspace"
 
+
+def _server_platform() -> str:
+    """The operating system THIS server runs on, named plainly.
+
+    The desktop product is Windows-only, but this module is the other half:
+    the body the user deploys on their own machine, which is typically a
+    Debian box. It reports its own system truthfully, and it asks the OS
+    through `sys.platform` — the documented, always-available source — rather
+    than through the `platform` module's wrapper around it.
+
+    The name is not hardcoded: `sys.platform` already carries it, so the
+    server reports whatever the host it runs on actually is.
+    """
+    name = (sys.platform or "unknown").capitalize()
+    return f"{name} {platform.release()}".strip()
+
 # The files that go to the server — and therefore the proof that the actions
 # which drive a desktop (open_app, file_controller, send_message, the screen,
 # the keyboard) are not "disabled" there, but absent.
@@ -936,7 +952,7 @@ def build_system_prompt(decls: list) -> str:
     ])
     body = template
     for k, v in {"assistant_name": name, "capabilities": caps, "limits": limits,
-                 "platform": f"{platform.system()} {platform.release()}"}.items():
+                 "platform": _server_platform()}.items():
         body = body.replace("{" + k + "}", v)
 
     addr = (f"ADDRESS: Always call the user '{user}'." if user else
@@ -1428,7 +1444,7 @@ class ToolBox:
             pass
         du = shutil.disk_usage(str(self.workspace))
         facts.update(disk_free_gb=round(du.free / 2 ** 30, 1), disk_total_gb=round(du.total / 2 ** 30, 1),
-                     os=f"{platform.system()} {platform.release()}",
+                     os=_server_platform(),
                      running_jobs=self.rt.running_jobs())
         return outcome.done("server_status", verified=True, **facts)
 
@@ -2753,7 +2769,7 @@ def install(port: int, host: str) -> None:
     _say("▶ Packages")
     env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
     _sh("apt-get", "update", "-y", "-q", env=env)
-    _sh("apt-get", "install", "-y", "-q", "python3-venv", "python3-pip", "ffmpeg", "espeak-ng",
+    _sh("apt-get", "install", "-y", "-q", "python3-venv", "python3-pip", "ffmpeg",
         "sudo", "ufw", "openssl", env=env)
 
     _say("▶ Service user")

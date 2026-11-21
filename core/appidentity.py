@@ -18,11 +18,10 @@ HOW A NAME IS MATCHED, AND WHY THERE IS NO LIST OF APPLICATIONS
     nobody here has heard of works exactly as well as this one.
 
     `ALIASES` is not a list of permitted applications and never restricts
-    anything: it maps a few names that differ BETWEEN OPERATING SYSTEMS — the
-    browser called `chrome` on Windows is `Google Chrome` on macOS and
-    `google-chrome` on Linux. Anything not in it passes through untouched, and
+    anything: it maps a handful of words to the name Windows actually starts
+    that application by. Anything not in it passes through untouched, and
     matching then falls back on what is actually running. Delete the whole map
-    and the only thing that breaks is convenience on three-way-named apps.
+    and the only thing that breaks is convenience on the renamed apps.
 
 MATCHING IS RANKED, NOT BOOLEAN
     A substring test alone answers "close discord" with Discord AND
@@ -47,9 +46,7 @@ THE ASSISTANT IS NEVER A TARGET
 from __future__ import annotations
 
 import os
-import platform
 import re
-import subprocess
 import sys
 import time
 import unicodedata
@@ -60,8 +57,6 @@ from core.lazyimport import LazyModule, installed
 
 _PSUTIL = installed("psutil")
 psutil = LazyModule("psutil")
-
-_OS = platform.system()          # "Windows" | "Darwin" | "Linux"
 
 # Everything that is not a letter or a digit, in any script. Spaces, dots,
 # hyphens and underscores all vanish, so "Visual Studio Code", "visual-studio
@@ -95,61 +90,62 @@ def fold(text: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Cross-platform launcher names
+#  Launcher names
 # ─────────────────────────────────────────────────────────────────────────────
-# Read the module docstring before adding to this: it exists ONLY for names
-# that genuinely differ between operating systems. A name that is the same
-# everywhere does not belong here — it already works without an entry.
-ALIASES: dict[str, dict[str, str]] = {
-    "chrome":             {"Windows": "chrome",            "Darwin": "Google Chrome",        "Linux": "google-chrome"},
-    "google chrome":      {"Windows": "chrome",            "Darwin": "Google Chrome",        "Linux": "google-chrome"},
-    "firefox":            {"Windows": "firefox",           "Darwin": "Firefox",              "Linux": "firefox"},
-    "edge":               {"Windows": "msedge",            "Darwin": "Microsoft Edge",       "Linux": "microsoft-edge"},
-    "brave":              {"Windows": "brave",             "Darwin": "Brave Browser",        "Linux": "brave-browser"},
-    "safari":             {"Windows": "msedge",            "Darwin": "Safari",               "Linux": "firefox"},
-    "opera":              {"Windows": "opera",             "Darwin": "Opera",                "Linux": "opera"},
-    "whatsapp":           {"Windows": "WhatsApp",          "Darwin": "WhatsApp",             "Linux": "whatsapp"},
-    "telegram":           {"Windows": "Telegram",          "Darwin": "Telegram",             "Linux": "telegram"},
-    "discord":            {"Windows": "Discord",           "Darwin": "Discord",              "Linux": "discord"},
-    "slack":              {"Windows": "Slack",             "Darwin": "Slack",                "Linux": "slack"},
-    "zoom":               {"Windows": "Zoom",              "Darwin": "zoom.us",              "Linux": "zoom"},
-    "teams":              {"Windows": "msteams",           "Darwin": "Microsoft Teams",      "Linux": "teams"},
-    "skype":              {"Windows": "skype",             "Darwin": "Skype",                "Linux": "skype"},
-    "signal":             {"Windows": "signal",            "Darwin": "Signal",               "Linux": "signal"},
-    "spotify":            {"Windows": "Spotify",           "Darwin": "Spotify",              "Linux": "spotify"},
-    "vlc":                {"Windows": "vlc",               "Darwin": "VLC",                  "Linux": "vlc"},
-    "netflix":            {"Windows": "Netflix",           "Darwin": "Netflix",              "Linux": "firefox"},
-    "vscode":             {"Windows": "code",              "Darwin": "Visual Studio Code",   "Linux": "code"},
-    "visual studio code": {"Windows": "code",              "Darwin": "Visual Studio Code",   "Linux": "code"},
-    "code":               {"Windows": "code",              "Darwin": "Visual Studio Code",   "Linux": "code"},
-    "terminal":           {"Windows": "wt",                "Darwin": "Terminal",             "Linux": "x-terminal-emulator"},
-    "cmd":                {"Windows": "cmd.exe",           "Darwin": "Terminal",             "Linux": "bash"},
-    "powershell":         {"Windows": "powershell.exe",    "Darwin": "Terminal",             "Linux": "bash"},
-    "postman":            {"Windows": "Postman",           "Darwin": "Postman",              "Linux": "postman"},
-    "git":                {"Windows": "git-bash",          "Darwin": "Terminal",             "Linux": "bash"},
-    "figma":              {"Windows": "Figma",             "Darwin": "Figma",                "Linux": "figma"},
-    "blender":            {"Windows": "blender",           "Darwin": "Blender",              "Linux": "blender"},
-    "word":               {"Windows": "winword",           "Darwin": "Microsoft Word",       "Linux": "libreoffice --writer"},
-    "excel":              {"Windows": "excel",             "Darwin": "Microsoft Excel",      "Linux": "libreoffice --calc"},
-    "powerpoint":         {"Windows": "powerpnt",          "Darwin": "Microsoft PowerPoint", "Linux": "libreoffice --impress"},
-    "libreoffice":        {"Windows": "soffice",           "Darwin": "LibreOffice",          "Linux": "libreoffice"},
-    "notepad":            {"Windows": "notepad.exe",       "Darwin": "TextEdit",             "Linux": "gedit"},
-    "textedit":           {"Windows": "notepad.exe",       "Darwin": "TextEdit",             "Linux": "gedit"},
-    "explorer":           {"Windows": "explorer.exe",      "Darwin": "Finder",               "Linux": "nautilus"},
-    "file explorer":      {"Windows": "explorer.exe",      "Darwin": "Finder",               "Linux": "nautilus"},
-    "finder":             {"Windows": "explorer.exe",      "Darwin": "Finder",               "Linux": "nautilus"},
-    "task manager":       {"Windows": "taskmgr.exe",       "Darwin": "Activity Monitor",     "Linux": "gnome-system-monitor"},
-    "settings":           {"Windows": "ms-settings:",      "Darwin": "System Preferences",   "Linux": "gnome-control-center"},
-    "calculator":         {"Windows": "calc.exe",          "Darwin": "Calculator",           "Linux": "gnome-calculator"},
-    "paint":              {"Windows": "mspaint.exe",       "Darwin": "Preview",              "Linux": "gimp"},
-    "instagram":          {"Windows": "Instagram",         "Darwin": "Instagram",            "Linux": "firefox"},
-    "tiktok":             {"Windows": "TikTok",            "Darwin": "TikTok",               "Linux": "firefox"},
-    "notion":             {"Windows": "Notion",            "Darwin": "Notion",               "Linux": "notion"},
-    "obsidian":           {"Windows": "Obsidian",          "Darwin": "Obsidian",             "Linux": "obsidian"},
-    "capcut":             {"Windows": "CapCut",            "Darwin": "CapCut",               "Linux": "capcut"},
-    "steam":              {"Windows": "steam",             "Darwin": "Steam",                "Linux": "steam"},
-    "epic":               {"Windows": "EpicGamesLauncher", "Darwin": "Epic Games Launcher",  "Linux": "legendary"},
-    "epic games":         {"Windows": "EpicGamesLauncher", "Darwin": "Epic Games Launcher",  "Linux": "legendary"},
+# Read the module docstring before adding to this: it exists ONLY for words
+# whose spoken form differs from the name Windows starts the application by.
+# A name that is the same everywhere does not belong here — it already works
+# without an entry.
+ALIASES: dict[str, str] = {
+    "chrome":             "chrome",
+    "google chrome":      "chrome",
+    "firefox":            "firefox",
+    "edge":               "msedge",
+    "brave":              "brave",
+    "safari":             "msedge",
+    "opera":              "opera",
+    "whatsapp":           "WhatsApp",
+    "telegram":           "Telegram",
+    "discord":            "Discord",
+    "slack":              "Slack",
+    "zoom":               "Zoom",
+    "teams":              "msteams",
+    "skype":              "skype",
+    "signal":             "signal",
+    "spotify":            "Spotify",
+    "vlc":                "vlc",
+    "netflix":            "Netflix",
+    "vscode":             "code",
+    "visual studio code": "code",
+    "code":               "code",
+    "terminal":           "wt",
+    "cmd":                "cmd.exe",
+    "powershell":         "powershell.exe",
+    "postman":            "Postman",
+    "git":                "git-bash",
+    "figma":              "Figma",
+    "blender":            "blender",
+    "word":               "winword",
+    "excel":              "excel",
+    "powerpoint":         "powerpnt",
+    "libreoffice":        "soffice",
+    "notepad":            "notepad.exe",
+    "textedit":           "notepad.exe",
+    "explorer":           "explorer.exe",
+    "file explorer":      "explorer.exe",
+    "finder":             "explorer.exe",
+    "task manager":       "taskmgr.exe",
+    "settings":           "ms-settings:",
+    "calculator":         "calc.exe",
+    "paint":              "mspaint.exe",
+    "instagram":          "Instagram",
+    "tiktok":             "TikTok",
+    "notion":             "Notion",
+    "obsidian":           "Obsidian",
+    "capcut":             "CapCut",
+    "steam":              "steam",
+    "epic":               "EpicGamesLauncher",
+    "epic games":         "EpicGamesLauncher",
 }
 
 
@@ -182,7 +178,7 @@ def _contains_word(phrase: str, word: str) -> bool:
 
 
 def launcher_name(spoken: str) -> str:
-    """The name this OS starts the application by, or the word itself.
+    """The name Windows starts the application by, or the word itself.
 
     Falling through unchanged is the important half: it is what makes an
     application nobody anticipated work, and it is why this map restricts
@@ -198,11 +194,11 @@ def launcher_name(spoken: str) -> str:
     if not key:
         return spoken
     if key in ALIASES:
-        return ALIASES[key].get(_OS, spoken)
+        return ALIASES[key]
     # Longest alias first, so "google chrome" is not decided by "chrome".
     for alias in sorted(ALIASES, key=len, reverse=True):
         if _contains_word(key, alias):
-            return ALIASES[alias].get(_OS, spoken)
+            return ALIASES[alias]
     return spoken
 
 
@@ -444,13 +440,8 @@ def own_pids() -> set[int]:
 def _windows_by_pid() -> dict[int, list[str]]:
     """pid -> visible top-level window titles, best effort, never raising.
 
-    Only Windows is implemented natively. macOS and Linux fall back to process
-    names, which is enough to match and to close; titles there would each need
-    another external tool, and a missing tool must not be the difference
-    between closing the right application and the wrong one.
-    """
-    if _OS != "Windows":
-        return {}
+    The window titles are read straight from the window manager, so there is
+    no external tool to be missing and nothing to install."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -728,8 +719,6 @@ def _post_close_windows(pid: int) -> int:
     kill with no such chance — so it must never be the first thing tried on a
     desktop application somebody is using.
     """
-    if _OS != "Windows":
-        return 0
     try:
         import ctypes
         from ctypes import wintypes
@@ -767,10 +756,10 @@ def request_close(match: Match, timeout: float = 6.0) -> tuple[bool, str]:
     pass on; it is never a success message.
 
     POLITE, AND ONLY POLITE
-        Windows gets WM_CLOSE — the X button. Everything else gets SIGTERM,
-        which desktop applications on macOS and Linux handle as "quit". Both
-        give the application its chance to object, and an application that
-        objects has a reason: an unsaved document, an upload in flight.
+        Windows gets WM_CLOSE — the X button. A windowless process gets
+        SIGTERM, which is the closest a background service gets to "quit".
+        Both give the application its chance to object, and an application
+        that objects has a reason: an unsaved document, an upload in flight.
 
         Nothing here escalates to a kill. Not being able to close something is
         a sentence the user can act on; losing an hour of their work because
@@ -848,9 +837,7 @@ def request_close(match: Match, timeout: float = 6.0) -> tuple[bool, str]:
 
 
 def _hwnds_for(pid: int) -> list[int]:
-    """Visible top-level window handles belonging to one process (Windows)."""
-    if _OS != "Windows":
-        return []
+    """Visible top-level window handles belonging to one process."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -893,104 +880,57 @@ def focus(match: "Match") -> bool:
     returns False rather than pretending, and the caller falls through to
     launching it, which is what brings a tray app back.
     """
-    if _OS == "Windows":
-        hwnds = _hwnds_for(match.pid)
-        if not hwnds:
-            return False
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            SW_RESTORE = 9
-
-            # WINDOWS REFUSES TO LET A BACKGROUND PROCESS STEAL FOCUS.
-            #
-            # SetForegroundWindow only succeeds when the calling process
-            # already owns the foreground — a rule that exists so a background
-            # program cannot yank the screen away mid-sentence. It is also
-            # exactly our situation: the user says "open WhatsApp" while
-            # working in something else, so the assistant is NOT in front and
-            # the call is refused. Seen directly in testing — the same code
-            # succeeded twelve times in a row with the HUD in front, and failed
-            # every time with another window focused.
-            #
-            # The documented way through is to borrow the foreground thread's
-            # input queue for the length of the call: while two threads share
-            # one queue, Windows treats them as the same context and allows the
-            # change. Attach, raise, detach.
-            def _raise(hwnd) -> bool:
-                if user32.IsIconic(hwnd):
-                    user32.ShowWindow(hwnd, SW_RESTORE)
-                if user32.SetForegroundWindow(hwnd):
-                    return True
-
-                fore = user32.GetForegroundWindow()
-                if not fore:
-                    return False
-                their = user32.GetWindowThreadProcessId(fore, None)
-                ours = kernel32.GetCurrentThreadId()
-                if their == ours:
-                    return False
-                if not user32.AttachThreadInput(ours, their, True):
-                    return False
-                try:
-                    user32.BringWindowToTop(hwnd)
-                    return bool(user32.SetForegroundWindow(hwnd))
-                finally:
-                    user32.AttachThreadInput(ours, their, False)
-
-            for hwnd in hwnds:
-                if _raise(hwnd):
-                    return True
-            return False
-        except Exception as exc:
-            print(f"[appidentity] focus failed: {exc}")
-            return False
-
-    if _OS == "Darwin":
-        try:
-            r = subprocess.run(
-                ["osascript", "-e",
-                 f'tell application "System Events" to set frontmost of the '
-                 f'first process whose unix id is {match.pid} to true'],
-                capture_output=True, timeout=5)
-            return r.returncode == 0
-        except Exception:
-            return False
-
-    # Linux. There is no single API here — X11 window management is whatever
-    # the user installed — so the two tools nearly every desktop ships are
-    # tried in turn, and neither being present is a normal minimal-desktop
-    # state rather than an error. When both are missing this returns False and
-    # the caller launches the application instead, which on most desktops
-    # raises the existing window anyway.
-    #
-    # `xdotool` first because it can select by PID, which is exactly the
-    # question being asked. `wmctrl` has no PID selector, so it matches on the
-    # window title — looser, and only used when xdotool is absent.
+    hwnds = _hwnds_for(match.pid)
+    if not hwnds:
+        return False
     try:
-        r = subprocess.run(
-            ["xdotool", "search", "--pid", str(match.pid), "windowactivate"],
-            capture_output=True, timeout=5)
-        if r.returncode == 0:
-            return True
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
+        import ctypes
+        from ctypes import wintypes
 
-    for title in (match.titles or [match.label]):
-        if not title:
-            continue
-        try:
-            r = subprocess.run(["wmctrl", "-a", title],
-                               capture_output=True, timeout=5)
-            if r.returncode == 0:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        SW_RESTORE = 9
+
+        # WINDOWS REFUSES TO LET A BACKGROUND PROCESS STEAL FOCUS.
+        #
+        # SetForegroundWindow only succeeds when the calling process
+        # already owns the foreground — a rule that exists so a background
+        # program cannot yank the screen away mid-sentence. It is also
+        # exactly our situation: the user says "open WhatsApp" while
+        # working in something else, so the assistant is NOT in front and
+        # the call is refused. Seen directly in testing — the same code
+        # succeeded twelve times in a row with the HUD in front, and failed
+        # every time with another window focused.
+        #
+        # The documented way through is to borrow the foreground thread's
+        # input queue for the length of the call: while two threads share
+        # one queue, Windows treats them as the same context and allows the
+        # change. Attach, raise, detach.
+        def _raise(hwnd) -> bool:
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, SW_RESTORE)
+            if user32.SetForegroundWindow(hwnd):
                 return True
-        except FileNotFoundError:
-            return False        # not installed; no point trying other titles
-        except Exception:
-            continue
-    return False
+
+            fore = user32.GetForegroundWindow()
+            if not fore:
+                return False
+            their = user32.GetWindowThreadProcessId(fore, None)
+            ours = kernel32.GetCurrentThreadId()
+            if their == ours:
+                return False
+            if not user32.AttachThreadInput(ours, their, True):
+                return False
+            try:
+                user32.BringWindowToTop(hwnd)
+                return bool(user32.SetForegroundWindow(hwnd))
+            finally:
+                user32.AttachThreadInput(ours, their, False)
+
+        for hwnd in hwnds:
+            if _raise(hwnd):
+                return True
+        return False
+    except Exception as exc:
+        print(f"[appidentity] focus failed: {exc}")
+        return False

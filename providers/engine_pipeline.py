@@ -891,8 +891,9 @@ _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|(?<=[。！？؟۔।])\s*")
 
 # Characters that belong in writing but not in speech.
 #
-# A model ends a friendly sentence with an emoji, and espeak — which is what
-# Piper and every system voice phonemise with — has a NAME for each one. So
+# A model ends a friendly sentence with an emoji, and the phonemiser — which
+# is what Piper and every system voice speak through — has a NAME for each one.
+# So
 # "How can I help? 😊" is read out as "How can I help? smiling face with
 # smiling eyes", which is both absurd and, at three seconds, longer than the
 # sentence it decorates.

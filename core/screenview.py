@@ -1,5 +1,5 @@
 """
-core/screenview.py — what is on the screen, as data, on every operating system.
+core/screenview.py — what is on the screen, as data, on Windows.
 
 THE PROBLEM THIS EXISTS FOR
     A screen agent that only has a screenshot has to guess where things are.
@@ -7,14 +7,14 @@ THE PROBLEM THIS EXISTS FOR
     the model ever saw it, and when it guesses wrong it clicks something the
     user did not ask for. There is no undo for a click.
 
-    But the operating system already knows. Every desktop platform maintains an
-    accessibility tree — the same one a screen reader uses — and it holds
-    exactly what an agent needs: what each control IS, what it is CALLED, where
-    its rectangle is, and whether it is enabled. It is exact, it is local, it
-    costs no API request, and it is the answer to the question the vision model
-    was being asked to guess at.
+    But the operating system already knows. Windows maintains an accessibility
+    tree — the same one a screen reader uses — and it holds exactly what an
+    agent needs: what each control IS, what it is CALLED, where its rectangle
+    is, and whether it is enabled. It is exact, it is local, it costs no API
+    request, and it is the answer to the question the vision model was being
+    asked to guess at.
 
-    This module is that tree, reduced to one shape, on Windows, macOS and Linux.
+    This module is that tree, reduced to one shape.
 
 WHY IT BEATS OCR, WHICH IS THE OBVIOUS ALTERNATIVE
     OCR reads pixels into text, so it can tell you the word "Delete" is at a
@@ -32,15 +32,15 @@ THE ONE INTERFACE
     look() -> View.  A View carries the foreground app, the screen bounds, a
     list of Elements, and a digest. An Element is (role, name, value, rect,
     enabled, focused, scrollable). That is all any caller needs and it is
-    identical on all three platforms, so nothing above this file contains an
-    `if windows:`.
+    identical everywhere, so nothing above this file contains a platform
+    switch.
 
 RECTANGLES ARE ALWAYS LOGICAL, AND THAT IS THE WHOLE DPI STORY
     Two coordinate spaces exist on a modern desktop and mixing them is the
     single most common way a screen agent misses. The screen is captured in
-    PHYSICAL pixels — a 150% Windows display and a macOS Retina panel both hand
-    back an image larger than the desktop you click on — while the mouse is
-    driven in the LOGICAL space the OS reports.
+    PHYSICAL pixels — a 150% Windows display hands back an image larger than
+    the desktop you click on — while the mouse is driven in the LOGICAL space
+    the OS reports.
 
     Every backend in this file converts to LOGICAL before it returns. The
     factor is measured, never assumed, and it is measured once per look rather
@@ -51,10 +51,10 @@ NOT ONE WORD OF ANY HUMAN LANGUAGE IS HARDCODED HERE
     This is an open project used in dozens of languages, and a keyword list is
     a promise you can only keep in one of them. So:
 
-      * ROLES are a small fixed ENGLISH vocabulary that WE define, and each
-        backend maps its own platform's role identifiers onto it. Those
-        identifiers are API constants — "Button", "AXButton", "push button" —
-        and are the same whatever language the user's desktop is displaying in.
+      * ROLES are a small fixed ENGLISH vocabulary that WE define, and the
+        backend maps the platform's role identifiers onto it. Those identifiers
+        are API constants — "Button", "CheckBox", "Text" — and are the same
+        whatever language the user's desktop is displaying in.
       * NAMES are whatever the screen says, carried verbatim, in their own
         script. They are never parsed, matched against a word list, or
         translated.
@@ -85,7 +85,6 @@ import hashlib
 import io
 import json
 import os
-import platform
 import threading
 import time
 from dataclasses import dataclass, field
@@ -94,7 +93,7 @@ from typing import Any, Callable, Iterable, Optional
 from core.appidentity import fold
 from core.lazyimport import installed
 
-_OS = {"Windows": "windows", "Darwin": "mac"}.get(platform.system(), "linux")
+_OS = "windows"
 
 
 # ---------------------------------------------------------------------------
@@ -102,9 +101,7 @@ _OS = {"Windows": "windows", "Darwin": "mac"}.get(platform.system(), "linux")
 # find_spec reads metadata — so a machine that never opens the screen agent
 # pays nothing for the ones it does not have.
 # ---------------------------------------------------------------------------
-_HAS_PYWINAUTO = _OS == "windows" and installed("pywinauto")
-_HAS_PYOBJC = _OS == "mac" and installed("ApplicationServices")
-_HAS_ATSPI = _OS == "linux" and installed("pyatspi")
+_HAS_PYWINAUTO = installed("pywinauto")
 _HAS_MSS = installed("mss")
 _HAS_PIL = installed("PIL")
 _HAS_PYAUTOGUI = installed("pyautogui")
@@ -206,55 +203,6 @@ _UIA_ROLES = {
     "progressbar": ROLE_PROGRESS,
     "window": ROLE_WINDOW, "titlebar": ROLE_WINDOW,
 }
-
-# macOS AX roles, minus the "AX" prefix, lowercased.
-_AX_ROLES = {
-    "button": ROLE_BUTTON, "popupbutton": ROLE_BUTTON,
-    "menubutton": ROLE_BUTTON, "togglebutton": ROLE_BUTTON,
-    "link": ROLE_LINK,
-    "textfield": ROLE_EDIT, "textarea": ROLE_EDIT, "searchfield": ROLE_EDIT,
-    "statictext": ROLE_TEXT,
-    "checkbox": ROLE_CHECKBOX,
-    "radiobutton": ROLE_RADIO,
-    "combobox": ROLE_COMBOBOX,
-    "list": ROLE_LIST, "table": ROLE_TABLE, "outline": ROLE_TREE,
-    "row": ROLE_ROW, "cell": ROLE_CELL, "outlinerow": ROLE_TREEITEM,
-    "menu": ROLE_MENU, "menubar": ROLE_MENU,
-    "menuitem": ROLE_MENUITEM, "menubaritem": ROLE_MENUITEM,
-    "tabgroup": ROLE_LIST, "radiogroup": ROLE_GROUP,
-    "slider": ROLE_SLIDER, "incrementor": ROLE_SLIDER,
-    "image": ROLE_IMAGE,
-    "toolbar": ROLE_TOOLBAR,
-    "group": ROLE_GROUP, "splitgroup": ROLE_GROUP, "scrollarea": ROLE_GROUP,
-    "scrollbar": ROLE_SCROLLBAR,
-    "progressindicator": ROLE_PROGRESS,
-    "window": ROLE_WINDOW, "sheet": ROLE_DIALOG, "dialog": ROLE_DIALOG,
-}
-
-# AT-SPI role names, as getRoleName() returns them: lowercase, space separated.
-_ATSPI_ROLES = {
-    "push button": ROLE_BUTTON, "toggle button": ROLE_BUTTON,
-    "link": ROLE_LINK,
-    "entry": ROLE_EDIT, "text": ROLE_EDIT, "password text": ROLE_EDIT,
-    "label": ROLE_TEXT, "static": ROLE_TEXT, "heading": ROLE_TEXT,
-    "check box": ROLE_CHECKBOX, "check menu item": ROLE_CHECKBOX,
-    "radio button": ROLE_RADIO, "radio menu item": ROLE_RADIO,
-    "combo box": ROLE_COMBOBOX,
-    "list": ROLE_LIST, "list box": ROLE_LIST, "list item": ROLE_LISTITEM,
-    "menu": ROLE_MENU, "menu bar": ROLE_MENU, "menu item": ROLE_MENUITEM,
-    "page tab list": ROLE_LIST, "page tab": ROLE_TAB,
-    "slider": ROLE_SLIDER, "spin button": ROLE_SLIDER,
-    "image": ROLE_IMAGE, "icon": ROLE_IMAGE,
-    "table": ROLE_TABLE, "table row": ROLE_ROW, "table cell": ROLE_CELL,
-    "tree": ROLE_TREE, "tree table": ROLE_TREE, "tree item": ROLE_TREEITEM,
-    "tool bar": ROLE_TOOLBAR,
-    "panel": ROLE_GROUP, "filler": ROLE_GROUP, "scroll pane": ROLE_GROUP,
-    "scroll bar": ROLE_SCROLLBAR,
-    "progress bar": ROLE_PROGRESS,
-    "frame": ROLE_WINDOW, "window": ROLE_WINDOW,
-    "dialog": ROLE_DIALOG, "alert": ROLE_DIALOG,
-}
-
 
 # ---------------------------------------------------------------------------
 # Budgets.
@@ -418,7 +366,7 @@ class View:
     after look() returns it, which is what makes two of them comparable."""
 
     os_name: str = _OS
-    source: str = "none"            # uia | ax | atspi | ocr | none
+    source: str = "none"            # uia | ocr | none
     degraded: bool = True
     reason: str = ""                # plain English, safe to show a model
     app: str = ""                   # foreground process name, e.g. "opera"
@@ -736,11 +684,7 @@ def _logical_screen() -> tuple[int, int, int, int]:
 def _foreground() -> tuple[str, str, int, Any]:
     """(process name, window title, pid, platform handle). Never raises."""
     try:
-        if _OS == "windows":
-            return _foreground_windows()
-        if _OS == "mac":
-            return _foreground_mac()
-        return _foreground_linux()
+        return _foreground_windows()
     except Exception:
         return "", "", 0, None
 
@@ -754,11 +698,7 @@ def all_windows() -> list[tuple[str, str]]:
     application's message loop.
     """
     try:
-        if _OS == "windows":
-            return _all_windows_windows()
-        if _OS == "mac":
-            return _all_windows_mac()
-        return _all_windows_linux()
+        return _all_windows_windows()
     except Exception:
         return []
 
@@ -804,51 +744,6 @@ def _all_windows_windows() -> list[tuple[str, str]]:
     return found
 
 
-def _all_windows_mac() -> list[tuple[str, str]]:
-    # Quartz answers this without Accessibility permission, which matters: a
-    # machine that has not granted Accessibility can still tell whether the
-    # right document is open somewhere.
-    try:
-        import Quartz
-        options = (Quartz.kCGWindowListOptionOnScreenOnly
-                   | Quartz.kCGWindowListExcludeDesktopElements)
-        info = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID)
-    except Exception:
-        return []
-    found: list[tuple[str, str]] = []
-    for entry in info or []:
-        try:
-            title = str(entry.get("kCGWindowName") or "")
-            owner = str(entry.get("kCGWindowOwnerName") or "")
-            if title.strip():
-                found.append((owner, title))
-        except Exception:
-            continue
-    return found
-
-
-def _all_windows_linux() -> list[tuple[str, str]]:
-    try:
-        import pyatspi
-    except Exception:
-        return []
-    found: list[tuple[str, str]] = []
-    try:
-        desktop = pyatspi.Registry.getDesktop(0)
-        for app in desktop:
-            try:
-                owner = str(app.name or "")
-                for window in app:
-                    title = str(window.name or "")
-                    if title.strip():
-                        found.append((owner, title))
-            except Exception:
-                continue
-    except Exception:
-        return []
-    return found
-
-
 def _foreground_windows() -> tuple[str, str, int, Any]:
     import ctypes
     from ctypes import wintypes
@@ -873,42 +768,6 @@ def _foreground_windows() -> tuple[str, str, int, Any]:
     except Exception:
         pass
     return name, title, int(pid.value), int(hwnd)
-
-
-def _foreground_mac() -> tuple[str, str, int, Any]:
-    from AppKit import NSWorkspace
-
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    if app is None:
-        return "", "", 0, None
-    name = str(app.localizedName() or "")
-    pid = int(app.processIdentifier())
-    # The window title comes from the AX tree, which the backend below reads
-    # anyway. Asking for it twice would mean two round trips into another
-    # process for one string.
-    return name, "", pid, pid
-
-
-def _foreground_linux() -> tuple[str, str, int, Any]:
-    import pyatspi
-
-    desktop = pyatspi.Registry.getDesktop(0)
-    for app in desktop:
-        try:
-            for window in app:
-                state = window.getState()
-                if state.contains(pyatspi.STATE_ACTIVE):
-                    # The pid is what lets the self-guard work here too; without
-                    # it the assistant's own window was never recognised on Linux.
-                    try:
-                        pid = int(app.get_process_id())
-                    except Exception:
-                        pid = 0
-                    return (str(app.name or ""), str(window.name or ""),
-                            pid, window)
-        except Exception:
-            continue
-    return "", "", 0, None
 
 
 # ---------------------------------------------------------------------------
@@ -1128,233 +987,7 @@ def _element_from_uia(info: Any, eid: int, depth: int, scale: float) -> Optional
 
 
 # ---------------------------------------------------------------------------
-# Backend 2 — macOS Accessibility
-#
-# AX reports in points, which is already the space the mouse is driven in, so
-# no scaling happens here. That is not an oversight: Retina doubles the PIXELS
-# and leaves the POINTS alone, and converting would put every click at twice
-# its correct offset.
-# ---------------------------------------------------------------------------
-def _scan_mac(pid: int, deadline: float) -> tuple[list[Element], str]:
-    import ApplicationServices as AS
-
-    if not AS.AXIsProcessTrusted():
-        raise PermissionError(
-            "macOS has not granted Accessibility permission to this app; "
-            "grant it in System Settings > Privacy & Security > Accessibility"
-        )
-
-    app = AS.AXUIElementCreateApplication(pid)
-    if app is None:
-        raise RuntimeError("the frontmost application exposes no accessibility tree")
-
-    out: list[Element] = []
-    title = ""
-    frontier: list[tuple[Any, int]] = [(app, 0)]
-
-    while frontier and len(out) < MAX_ELEMENTS:
-        if time.monotonic() > deadline:
-            raise TimeoutError("accessibility scan exceeded its budget")
-
-        node, depth = frontier.pop(0)
-        el, node_title = _element_from_ax(AS, node, len(out), depth)
-        if el is not None:
-            out.append(el)
-        if node_title and not title:
-            title = node_title
-
-        if depth < MAX_DEPTH:
-            for child in _ax_children(AS, node):
-                frontier.append((child, depth + 1))
-
-    return out, title
-
-
-def _ax_attr(AS: Any, node: Any, attribute: str) -> Any:
-    """One AX attribute, or None. pyobjc returns (error_code, value)."""
-    try:
-        err, value = AS.AXUIElementCopyAttributeValue(node, attribute, None)
-        return value if err == 0 else None
-    except Exception:
-        return None
-
-
-def _ax_children(AS: Any, node: Any) -> list[Any]:
-    kids = _ax_attr(AS, node, "AXChildren")
-    if not kids:
-        return []
-    try:
-        return list(kids)
-    except Exception:
-        return []
-
-
-def _element_from_ax(AS: Any, node: Any, eid: int, depth: int
-                     ) -> tuple[Optional[Element], str]:
-    raw_role = _ax_attr(AS, node, "AXRole") or ""
-    role_key = str(raw_role).replace("AX", "", 1).lower()
-    role = _AX_ROLES.get(role_key, ROLE_OTHER)
-
-    window_title = ""
-    if role in (ROLE_WINDOW, ROLE_DIALOG):
-        window_title = str(_ax_attr(AS, node, "AXTitle") or "")
-
-    position = _ax_attr(AS, node, "AXPosition")
-    size = _ax_attr(AS, node, "AXSize")
-    if position is None or size is None:
-        return None, window_title
-
-    try:
-        ok_p, point = AS.AXValueGetValue(position, AS.kAXValueCGPointType, None)
-        ok_s, extent = AS.AXValueGetValue(size, AS.kAXValueCGSizeType, None)
-        if not (ok_p and ok_s):
-            return None, window_title
-        left, top = int(point.x), int(point.y)
-        width, height = int(extent.width), int(extent.height)
-    except Exception:
-        return None, window_title
-
-    if width < MIN_SIZE_PX or height < MIN_SIZE_PX:
-        return None, window_title
-
-    # AXTitle is the label, AXDescription is what an icon-only control offers
-    # instead, and AXValue is a field's contents. Taking the first that exists
-    # is what makes a toolbar of pictures addressable by name.
-    name = (str(_ax_attr(AS, node, "AXTitle") or "")
-            or str(_ax_attr(AS, node, "AXDescription") or "")
-            or str(_ax_attr(AS, node, "AXHelp") or ""))
-    # AXSubrole is how macOS says "this text field is a secure one". The role
-    # itself stays AXTextField, so a check on role alone would miss every
-    # password box on the platform.
-    subrole = str(_ax_attr(AS, node, "AXSubrole") or "")
-    protected = "secure" in subrole.lower()
-
-    value_raw = _ax_attr(AS, node, "AXValue")
-    value = str(value_raw) if isinstance(value_raw, (str, int, float)) else ""
-    if value == name or protected:
-        value = ""
-
-    enabled = bool(_ax_attr(AS, node, "AXEnabled"))
-    focused = bool(_ax_attr(AS, node, "AXFocused"))
-
-    if not name and not value and role in (ROLE_OTHER, ROLE_GROUP):
-        return None, window_title
-
-    return Element(
-        eid=eid, role=role, name=name, value=value,
-        left=left, top=top, width=width, height=height,
-        enabled=enabled, focused=focused,
-        scrollable=role in (ROLE_LIST, ROLE_TABLE, ROLE_TREE, ROLE_GROUP),
-        depth=depth, protected=protected,
-    ), window_title
-
-
-# ---------------------------------------------------------------------------
-# Backend 3 — Linux AT-SPI
-#
-# Coverage is genuinely uneven here and the module says so rather than
-# pretending: GTK applications expose well, Qt needs its accessibility bridge,
-# and a great many applications expose nothing at all. A caller that gets a
-# thin view escalates. On Wayland it is moot for acting anyway, which
-# core/platform_support.py already reports.
-# ---------------------------------------------------------------------------
-def _scan_linux(window: Any, deadline: float) -> list[Element]:
-    import pyatspi
-
-    if window is None:
-        raise RuntimeError("no active window is exposed through AT-SPI")
-
-    out: list[Element] = []
-    frontier: list[tuple[Any, int]] = [(window, 0)]
-
-    while frontier and len(out) < MAX_ELEMENTS:
-        if time.monotonic() > deadline:
-            raise TimeoutError("accessibility scan exceeded its budget")
-
-        node, depth = frontier.pop(0)
-        el = _element_from_atspi(pyatspi, node, len(out), depth)
-        if el is not None:
-            out.append(el)
-
-        if depth < MAX_DEPTH:
-            try:
-                for child in node:
-                    if child is not None:
-                        frontier.append((child, depth + 1))
-            except Exception:
-                pass
-
-    return out
-
-
-def _element_from_atspi(pyatspi: Any, node: Any, eid: int, depth: int) -> Optional[Element]:
-    try:
-        role_name = str(node.getRoleName() or "")
-    except Exception:
-        return None
-    role_key = role_name.strip().lower()
-    role = _ATSPI_ROLES.get(role_key, ROLE_OTHER)
-    # AT-SPI is the one platform that says it in the role name itself.
-    protected = role_key == "password text"
-
-    try:
-        component = node.queryComponent()
-        extents = component.getExtents(pyatspi.DESKTOP_COORDS)
-        left, top = int(extents.x), int(extents.y)
-        width, height = int(extents.width), int(extents.height)
-    except Exception:
-        return None
-
-    if width < MIN_SIZE_PX or height < MIN_SIZE_PX:
-        return None
-
-    try:
-        name = str(node.name or "")
-    except Exception:
-        name = ""
-    try:
-        description = str(node.description or "")
-    except Exception:
-        description = ""
-    if not name:
-        name = description
-
-    value = ""
-    if not protected:
-        try:
-            text_iface = node.queryText()
-            value = str(text_iface.getText(0, -1) or "")
-            if value == name:
-                value = ""
-        except Exception:
-            pass
-
-    enabled, focused, showing = True, False, True
-    try:
-        state = node.getState()
-        enabled = state.contains(pyatspi.STATE_ENABLED) or state.contains(
-            pyatspi.STATE_SENSITIVE)
-        focused = state.contains(pyatspi.STATE_FOCUSED)
-        showing = state.contains(pyatspi.STATE_SHOWING)
-    except Exception:
-        pass
-    if not showing:
-        return None
-
-    if not name and not value and role in (ROLE_OTHER, ROLE_GROUP):
-        return None
-
-    return Element(
-        eid=eid, role=role, name=name, value=value,
-        left=left, top=top, width=width, height=height,
-        enabled=enabled, focused=focused,
-        scrollable=role in (ROLE_LIST, ROLE_TABLE, ROLE_TREE, ROLE_GROUP),
-        depth=depth, protected=protected,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Backend 4 — OCR
+# Backend 2 — OCR
 #
 # The last resort, and labelled as one. It produces text with rectangles and
 # nothing else: no roles, no enabled state, no idea which of those words is a
@@ -1571,21 +1204,16 @@ def changed(before: Optional[View], after: Optional[View]) -> bool:
 def capabilities() -> dict:
     """What perception this machine can actually do, for the model and the log.
 
-    Reported rather than assumed, in the same spirit as
-    core/platform_support.py: an agent that says "I cannot read this window's
-    controls, so I am going to look at it instead" is telling the truth, and
-    one that silently returns nothing is not.
+    Reported rather than assumed, in the same spirit as core/capability.py: an
+    agent that says "I cannot read this window's controls, so I am going to
+    look at it instead" is telling the truth, and one that silently returns
+    nothing is not.
     """
-    backend = {
-        "windows": ("uia", _HAS_PYWINAUTO, "pywinauto"),
-        "mac": ("ax", _HAS_PYOBJC, "pyobjc-framework-ApplicationServices"),
-        "linux": ("atspi", _HAS_ATSPI, "pyatspi"),
-    }[_OS]
     return {
         "os": _OS,
-        "accessibility_backend": backend[0],
-        "accessibility_available": backend[1],
-        "accessibility_package": backend[2],
+        "accessibility_backend": "uia",
+        "accessibility_available": _HAS_PYWINAUTO,
+        "accessibility_package": "pywinauto",
         "ocr_available": _HAS_OCR,
         "capture_available": _HAS_MSS and _HAS_PIL,
     }
@@ -1610,12 +1238,11 @@ def monitors() -> list[dict]:
     """[the whole desktop, monitor 1, monitor 2, ...] in mouse coordinates.
 
     THE COORDINATE SPACE, STATED ONCE
-        mss reports monitor rectangles in the space the mouse is driven in on
-        every platform: physical pixels in a DPI-aware Windows process (which a
-        Qt application is, and which mss itself requests), points on macOS,
-        pixels on X11. The IMAGE it grabs is always real pixels. On a Retina
-        panel those differ by two, and that difference is measured per capture
-        by `capture()` rather than assumed anywhere.
+        mss reports monitor rectangles in the space the mouse is driven in:
+        physical pixels in a DPI-aware Windows process (which a Qt application
+        is, and which mss itself requests). The IMAGE it grabs is always real
+        pixels, and on a scaled display the two differ, and that difference is
+        measured per capture by `capture()` rather than assumed anywhere.
     """
     if not _HAS_MSS:
         return [dict(_NO_MONITOR)]
@@ -1707,134 +1334,37 @@ def is_own_pid(pid: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Which window is where, on each platform
+# Which window is where
 #
 # The actuator asks two questions before it touches anything: "whose window is
 # at this point" and "whose window has the keyboard". Both have to be answered
-# on all three platforms, because the answer is what stops a screen agent
-# clicking or typing into the assistant's own interface.
+# on Windows, because the answer is what stops a screen agent clicking or
+# typing into the assistant's own interface.
 # ---------------------------------------------------------------------------
-def _quartz_windows(normal_layer_only: bool = True) -> list[tuple[int, tuple]]:
-    """macOS on-screen windows, front to back, as (owner pid, rect in points).
-
-    Quartz answers without Accessibility permission, and in the same points the
-    mouse is driven in.
-    """
-    import Quartz
-    options = (Quartz.kCGWindowListOptionOnScreenOnly
-               | Quartz.kCGWindowListExcludeDesktopElements)
-    out: list[tuple[int, tuple]] = []
-    for entry in Quartz.CGWindowListCopyWindowInfo(options,
-                                                   Quartz.kCGNullWindowID) or []:
-        try:
-            if normal_layer_only and int(entry.get("kCGWindowLayer", 0)) != 0:
-                continue
-            if float(entry.get("kCGWindowAlpha", 1.0)) <= 0.01:
-                continue
-            b = entry.get("kCGWindowBounds") or {}
-            rect = (int(b.get("X", 0)), int(b.get("Y", 0)),
-                    int(b.get("Width", 0)), int(b.get("Height", 0)))
-            if rect[2] > 0 and rect[3] > 0:
-                out.append((int(entry.get("kCGWindowOwnerPID", 0)), rect))
-        except Exception:
-            continue
-    return out
-
-
-def _x11_display():
-    if not os.environ.get("DISPLAY"):
-        return None
-    from Xlib import display as xdisplay
-    return xdisplay.Display()
-
-
-def _x11_pid(disp: Any, window: Any) -> int:
-    """_NET_WM_PID of a window, looking a few levels down: the window under a
-    point is often the window manager's frame, and the pid is on the client
-    window inside it."""
-    from Xlib import X
-    atom = disp.intern_atom("_NET_WM_PID")
-    frontier = [(window, 0)]
-    while frontier:
-        win, depth = frontier.pop(0)
-        try:
-            prop = win.get_full_property(atom, X.AnyPropertyType)
-            if prop is not None and len(prop.value):
-                return int(prop.value[0])
-            if depth < 3:
-                frontier.extend((child, depth + 1)
-                                for child in win.query_tree().children)
-        except Exception:
-            continue
-    return 0
-
-
-def _x11_active_pid() -> int:
-    disp = _x11_display()
-    if disp is None:
-        return 0
-    try:
-        from Xlib import X
-        root = disp.screen().root
-        active = root.get_full_property(disp.intern_atom("_NET_ACTIVE_WINDOW"),
-                                        X.AnyPropertyType)
-        if active is None or not len(active.value) or not active.value[0]:
-            return 0
-        window = disp.create_resource_object("window", int(active.value[0]))
-        return _x11_pid(disp, window)
-    finally:
-        disp.close()
-
-
 def foreground_pid() -> int:
     """The process whose window has the keyboard. 0 when nobody will say."""
     try:
-        if _OS == "linux":
-            pid = _x11_active_pid()
-            if pid:
-                return pid
         return int(_foreground()[2] or 0)
     except Exception:
         return 0
 
 
 def window_pid_at(x: int, y: int) -> int:
-    """The process owning the window at this point. 0 when unknown.
-
-    On X11 the only cheap answer is "the window under the pointer", so there it
-    answers only when the pointer is already at (x, y) — the actuator asks after
-    moving, which makes that the normal case rather than a limitation.
-    """
+    """The process owning the window at this point. 0 when unknown."""
     try:
-        if _OS == "windows":
-            import ctypes
-            from ctypes import wintypes
-            # A private handle on user32, so the prototypes set here never
-            # leak into anybody else's calls through the shared windll object.
-            user32 = ctypes.WinDLL("user32")
-            user32.WindowFromPoint.argtypes = [wintypes.POINT]
-            user32.WindowFromPoint.restype = wintypes.HWND
-            hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
-            if not hwnd:
-                return 0
-            pid = wintypes.DWORD(0)
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            return int(pid.value)
-        if _OS == "mac":
-            for pid, (left, top, width, height) in _quartz_windows(False):
-                if left <= x < left + width and top <= y < top + height:
-                    return pid
+        import ctypes
+        from ctypes import wintypes
+        # A private handle on user32, so the prototypes set here never
+        # leak into anybody else's calls through the shared windll object.
+        user32 = ctypes.WinDLL("user32")
+        user32.WindowFromPoint.argtypes = [wintypes.POINT]
+        user32.WindowFromPoint.restype = wintypes.HWND
+        hwnd = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+        if not hwnd:
             return 0
-        disp = _x11_display()
-        if disp is None:
-            return 0
-        try:
-            pointer = disp.screen().root.query_pointer()
-            if (int(pointer.root_x), int(pointer.root_y)) != (int(x), int(y)):
-                return 0
-            return _x11_pid(disp, pointer.child) if pointer.child else 0
-        finally:
-            disp.close()
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
     except Exception:
         return 0
 
@@ -1849,57 +1379,34 @@ def own_window_rects() -> list[tuple[int, int, int, int]]:
     """
     me = os.getpid()
     try:
-        if _OS == "windows":
-            import ctypes
-            from ctypes import wintypes
-            user32 = ctypes.WinDLL("user32")
-            scale = _physical_to_logical()
-            found: list[tuple[int, int, int, int]] = []
-            callback = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND,
-                                          wintypes.LPARAM)
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32")
+        scale = _physical_to_logical()
+        found: list[tuple[int, int, int, int]] = []
+        callback = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND,
+                                      wintypes.LPARAM)
 
-            def visit(hwnd, _param):
-                try:
-                    if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
-                        return True
-                    pid = wintypes.DWORD(0)
-                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                    if int(pid.value) != me:
-                        return True
-                    rect = wintypes.RECT()
-                    if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                        w, h = rect.right - rect.left, rect.bottom - rect.top
-                        if w > 0 and h > 0:
-                            found.append((int(rect.left * scale), int(rect.top * scale),
-                                          int(w * scale), int(h * scale)))
-                except Exception:
-                    pass
-                return True
+        def visit(hwnd, _param):
+            try:
+                if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                    return True
+                pid = wintypes.DWORD(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if int(pid.value) != me:
+                    return True
+                rect = wintypes.RECT()
+                if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                    w, h = rect.right - rect.left, rect.bottom - rect.top
+                    if w > 0 and h > 0:
+                        found.append((int(rect.left * scale), int(rect.top * scale),
+                                      int(w * scale), int(h * scale)))
+            except Exception:
+                pass
+            return True
 
-            user32.EnumWindows(callback(visit), 0)
-            return found
-        if _OS == "mac":
-            return [rect for pid, rect in _quartz_windows(False) if pid == me]
-        disp = _x11_display()
-        if disp is None:
-            return []
-        try:
-            from Xlib import X
-            root = disp.screen().root
-            clients = root.get_full_property(
-                disp.intern_atom("_NET_CLIENT_LIST"), X.AnyPropertyType)
-            found = []
-            for wid in (clients.value if clients is not None else []):
-                window = disp.create_resource_object("window", int(wid))
-                if _x11_pid(disp, window) != me:
-                    continue
-                geometry = window.get_geometry()
-                origin = window.translate_coords(root, 0, 0)
-                found.append((-int(origin.x), -int(origin.y),
-                              int(geometry.width), int(geometry.height)))
-            return found
-        finally:
-            disp.close()
+        user32.EnumWindows(callback(visit), 0)
+        return found
     except Exception:
         return []
 
@@ -1907,7 +1414,7 @@ def own_window_rects() -> list[tuple[int, int, int, int]]:
 def _foreground_rect(handle: Any, pid: int, scale: float) -> tuple[int, int, int, int]:
     """The foreground window's rectangle, in mouse coordinates. Never raises."""
     try:
-        if _OS == "windows" and handle:
+        if handle:
             import ctypes
             from ctypes import wintypes
             rect = wintypes.RECT()
@@ -1917,22 +1424,13 @@ def _foreground_rect(handle: Any, pid: int, scale: float) -> tuple[int, int, int
                 if w > 0 and h > 0:
                     return (int(round(rect.left * scale)), int(round(rect.top * scale)),
                             int(round(w * scale)), int(round(h * scale)))
-        elif _OS == "mac" and pid:
-            for owner, rect in _quartz_windows():
-                if owner == pid:
-                    return rect
-        elif _OS == "linux" and handle is not None:
-            import pyatspi
-            ext = handle.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
-            if ext.width > 0 and ext.height > 0:
-                return int(ext.x), int(ext.y), int(ext.width), int(ext.height)
     except Exception:
         pass
     return 0, 0, 0, 0
 
 
 def _accessibility_source() -> str:
-    return {"windows": "uia", "mac": "ax", "linux": "atspi"}[_OS]
+    return "uia"
 
 
 def _thinness_reason(app: str, elements: list[Element],
@@ -1970,12 +1468,8 @@ def missing_packages() -> list[str]:
     """What to install to make this machine's perception work. Empty when it
     already does."""
     out: list[str] = []
-    if _OS == "windows" and not _HAS_PYWINAUTO:
+    if not _HAS_PYWINAUTO:
         out.append("pywinauto")
-    if _OS == "mac" and not _HAS_PYOBJC:
-        out.append("pyobjc-framework-ApplicationServices")
-    if _OS == "linux" and not _HAS_ATSPI:
-        out.append("pyatspi")
     if not _HAS_MSS:
         out.append("mss")
     if not _HAS_PIL:
@@ -2044,17 +1538,9 @@ def look(*, budget_s: float = SCAN_BUDGET_S, allow_ocr: bool = True) -> View:
     else:
         try:
             elements: list[Element] = []
-            if _OS == "windows" and _HAS_PYWINAUTO and handle:
+            if _HAS_PYWINAUTO and handle:
                 elements = _scan_windows(handle, scale, deadline)
                 view.source = "uia"
-            elif _OS == "mac" and _HAS_PYOBJC and pid:
-                elements, ax_title = _scan_mac(pid, deadline)
-                view.source = "ax"
-                if ax_title and not view.title:
-                    view.title = ax_title
-            elif _OS == "linux" and _HAS_ATSPI:
-                elements = _scan_linux(handle, deadline)
-                view.source = "atspi"
             else:
                 reason = ("no accessibility package is installed for this "
                           "platform: " + ", ".join(missing_packages()))

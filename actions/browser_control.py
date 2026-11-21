@@ -5,7 +5,6 @@ import asyncio
 import concurrent.futures
 import importlib.util
 import os
-import platform
 import shutil
 import subprocess
 import threading
@@ -81,7 +80,7 @@ def _load_playwright() -> None:
     PlaywrightTimeout = _timeout
 
 
-_OS = platform.system()   # "Windows" | "Darwin" | "Linux"
+_OS = "Windows"
 
 def _normalize_url(url: str) -> str:
     """
@@ -107,20 +106,8 @@ def _normalize_url(url: str) -> str:
 
 
 def _user_agent() -> str:
-    if _OS == "Windows":
-        return (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    if _OS == "Darwin":
-        return (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
     return (
-        "Mozilla/5.0 (X11; Linux x86_64) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     )
@@ -133,42 +120,17 @@ def _real_profile_dir(browser: str) -> str:
 
     candidates: list[Path] = []
 
-    if _OS == "Windows":
-        m = {
-            "chrome":   [Path(local) / "Google"          / "Chrome"          / "User Data"],
-            "edge":     [Path(local) / "Microsoft"        / "Edge"            / "User Data"],
-            "brave":    [Path(local) / "BraveSoftware"    / "Brave-Browser"   / "User Data"],
-            "vivaldi":  [Path(local) / "Vivaldi"          / "User Data"],
-            "opera":    [Path(roam)  / "Opera Software"   / "Opera Stable",
-                         Path(local) / "Opera Software"   / "Opera Stable"],
-            "operagx":  [Path(roam)  / "Opera Software"   / "Opera GX Stable",
-                         Path(local) / "Opera Software"   / "Opera GX Stable"],
-        }
-        candidates = m.get(browser, [])
-
-    elif _OS == "Darwin":
-        lib = home / "Library" / "Application Support"
-        m = {
-            "chrome":   [lib / "Google"             / "Chrome"],
-            "edge":     [lib / "Microsoft Edge"],
-            "brave":    [lib / "BraveSoftware"       / "Brave-Browser"],
-            "vivaldi":  [lib / "Vivaldi"],
-            "opera":    [lib / "com.operasoftware.Opera"],
-            "operagx":  [lib / "com.operasoftware.OperaGX"],
-        }
-        candidates = m.get(browser, [])
-
-    elif _OS == "Linux":
-        cfg = home / ".config"
-        m = {
-            "chrome":   [cfg / "google-chrome", cfg / "chromium"],
-            "edge":     [cfg / "microsoft-edge"],
-            "brave":    [cfg / "BraveSoftware" / "Brave-Browser"],
-            "vivaldi":  [cfg / "vivaldi"],
-            "opera":    [cfg / "opera"],
-            "operagx":  [cfg / "opera-gx"],
-        }
-        candidates = m.get(browser, [])
+    m = {
+        "chrome":   [Path(local) / "Google"          / "Chrome"          / "User Data"],
+        "edge":     [Path(local) / "Microsoft"        / "Edge"            / "User Data"],
+        "brave":    [Path(local) / "BraveSoftware"    / "Brave-Browser"   / "User Data"],
+        "vivaldi":  [Path(local) / "Vivaldi"          / "User Data"],
+        "opera":    [Path(roam)  / "Opera Software"   / "Opera Stable",
+                     Path(local) / "Opera Software"   / "Opera Stable"],
+        "operagx":  [Path(roam)  / "Opera Software"   / "Opera GX Stable",
+                     Path(local) / "Opera Software"   / "Opera GX Stable"],
+    }
+    candidates = m.get(browser, [])
 
     for p in candidates:
         if p.exists():
@@ -182,13 +144,7 @@ def _real_profile_dir(browser: str) -> str:
 
 def _firefox_profile_dir() -> Optional[str]:
     home = Path.home()
-
-    if _OS == "Windows":
-        base = Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox"
-    elif _OS == "Darwin":
-        base = home / "Library" / "Application Support" / "Firefox"
-    else:
-        base = home / ".mozilla" / "firefox"
+    base = Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox"
 
     ini = base / "profiles.ini"
     if not ini.exists():
@@ -293,28 +249,6 @@ _BROWSER_SPECS: dict[str, dict] = {
         "vivaldi":  {"engine": "chromium", "channel": None,      "bins": ["vivaldi.exe"]},
         "safari":   None,
     },
-    "Darwin": {
-        "chrome":   {"engine": "chromium", "channel": "chrome",  "bins": []},
-        "edge":     {"engine": "chromium", "channel": "msedge",  "bins": ["microsoft-edge"]},
-        "firefox":  {"engine": "firefox",  "channel": None,      "bins": ["firefox"]},
-        "opera":    {"engine": "chromium", "channel": None,      "bins": ["opera"]},
-        "operagx":  {"engine": "chromium", "channel": None,      "bins": ["opera"]},
-        "brave":    {"engine": "chromium", "channel": None,      "bins": ["brave browser", "brave"]},
-        "vivaldi":  {"engine": "chromium", "channel": None,      "bins": ["vivaldi"]},
-        "safari":   {"engine": "webkit",   "channel": None,      "bins": []},
-    },
-    "Linux": {
-        "chrome":   {"engine": "chromium", "channel": None,
-                     "bins": ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]},
-        "edge":     {"engine": "chromium", "channel": None,
-                     "bins": ["microsoft-edge", "microsoft-edge-stable"]},
-        "firefox":  {"engine": "firefox",  "channel": None, "bins": ["firefox"]},
-        "opera":    {"engine": "chromium", "channel": None, "bins": ["opera", "opera-stable"]},
-        "operagx":  {"engine": "chromium", "channel": None, "bins": ["opera", "opera-stable"]},
-        "brave":    {"engine": "chromium", "channel": None, "bins": ["brave-browser", "brave"]},
-        "vivaldi":  {"engine": "chromium", "channel": None, "bins": ["vivaldi-stable", "vivaldi"]},
-        "safari":   None,
-    },
 }
 
 _ALIASES: dict[str, str] = {
@@ -353,24 +287,7 @@ def _resolve_browser(name: str) -> dict | None:
             exe = found
             break
 
-    if not exe and _OS == "Darwin":
-        app_names = {
-            "chrome":  ["Google Chrome.app"],
-            "edge":    ["Microsoft Edge.app"],
-            "firefox": ["Firefox.app"],
-            "opera":   ["Opera.app", "Opera GX.app"],
-            "brave":   ["Brave Browser.app"],
-            "vivaldi": ["Vivaldi.app"],
-        }
-        for app in app_names.get(name, []):
-            app_dir = Path("/Applications") / app / "Contents" / "MacOS"
-            if app_dir.exists():
-                found_bins = list(app_dir.iterdir())
-                if found_bins:
-                    exe = str(found_bins[0])
-                    break
-
-    if not exe and _OS == "Windows" and not channel:
+    if not exe and not channel:
         exe = _find_exe_windows(name)
 
     return {"engine": engine, "exe": exe, "channel": channel}
@@ -378,36 +295,17 @@ def _resolve_browser(name: str) -> dict | None:
 
 def _detect_default_browser() -> str:
     try:
-        if _OS == "Windows":
-            import winreg
-            k = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\Shell\Associations"
-                r"\UrlAssociations\http\UserChoice",
-            )
-            prog_id = winreg.QueryValueEx(k, "ProgId")[0].lower()
-            winreg.CloseKey(k)
-            for kw in ("edge", "firefox", "opera", "brave", "vivaldi", "chrome"):
-                if kw in prog_id:
-                    return kw
-        elif _OS == "Darwin":
-            out = subprocess.run(
-                ["defaults", "read",
-                 "com.apple.LaunchServices/com.apple.launchservices.secure",
-                 "LSHandlers"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
-            ).stdout.lower()
-            for kw in ("firefox", "opera", "brave", "vivaldi", "safari", "chrome", "edge"):
-                if kw in out:
-                    return kw
-        elif _OS == "Linux":
-            out = subprocess.run(
-                ["xdg-settings", "get", "default-web-browser"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
-            ).stdout.lower()
-            for kw in ("firefox", "opera", "brave", "vivaldi", "chrome", "edge"):
-                if kw in out:
-                    return kw
+        import winreg
+        k = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\Shell\Associations"
+            r"\UrlAssociations\http\UserChoice",
+        )
+        prog_id = winreg.QueryValueEx(k, "ProgId")[0].lower()
+        winreg.CloseKey(k)
+        for kw in ("edge", "firefox", "opera", "brave", "vivaldi", "chrome"):
+            if kw in prog_id:
+                return kw
     except Exception:
         pass
     return "chrome"
@@ -418,17 +316,6 @@ _SEARCH_ENGINES: dict[str, str] = {
     "bing":       "https://www.bing.com/search?q=",
     "duckduckgo": "https://duckduckgo.com/?q=",
     "yandex":     "https://yandex.com/search/?text=",
-}
-
-_MAC_APP_NAMES: dict[str, str] = {
-    "chrome":  "Google Chrome",
-    "edge":    "Microsoft Edge",
-    "firefox": "Firefox",
-    "opera":   "Opera",
-    "operagx": "Opera GX",
-    "brave":   "Brave Browser",
-    "vivaldi": "Vivaldi",
-    "safari":  "Safari",
 }
 
 # Windows registry lookup names for browsers whose spec has no explicit binary
@@ -508,7 +395,7 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
     about:blank tab or a blank profile NEVER shows up.
     If url is empty the browser starts with no URL (its own start page /
     session restore) — exactly as if the user had opened it themselves.
-    Works on all three of Windows / macOS / Linux.
+    Works on Windows.
     """
     url = _normalize_url(url) if url and url.strip() else ""
     if url == "about:blank":
@@ -523,19 +410,9 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
 
     # Specific browser → launch its own executable, exactly like the user would.
     if name:
-        if _OS == "Darwin":
-            app = _MAC_APP_NAMES.get(name)
-            if app:
-                cmd = ["open", "-a", app] + ([url] if url else [])
-                try:
-                    subprocess.run(cmd, check=True, timeout=10)
-                    return _native_outcome(name, url)
-                except Exception as e:
-                    print(f"[Browser] 'open -a {app}' failed ({e}), trying binary…")
-
         spec = _resolve_browser(name)
         exe  = spec.get("exe") if spec else None
-        if not exe and _OS == "Windows":
+        if not exe:
             if name in ("opera", "operagx"):
                 exe = _find_opera_windows()
             else:
@@ -558,23 +435,14 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
 
     # Default browser via the OS — exactly like the user clicking a link.
     try:
-        if _OS == "Windows":
-            os.startfile(url)                       # ShellExecute → default browser
-        elif _OS == "Darwin":
-            subprocess.run(["open", url], check=True, timeout=10)
-        else:
-            subprocess.Popen(
-                ["xdg-open", url],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+        os.startfile(url)                       # ShellExecute → default browser
         # HANDED TO THE OPERATING SYSTEM, NOT CONFIRMED.
         #
-        # os.startfile / open / xdg-open all return as soon as the request is
-        # accepted. None of them waits for a browser, and none reports whether
-        # the page loaded — the same gap that made open_app say "Opened
-        # Spotify." off the back of a shell starting. Unlike the playwright
-        # path above there is no page object here to read a url from, so this
-        # says what it actually knows.
+        # os.startfile returns as soon as the request is accepted. It does not
+        # wait for a browser, and it does not report whether the page loaded —
+        # the same gap that made open_app say "Opened Spotify." off the back of
+        # a shell starting. Unlike the playwright path above there is no page
+        # object here to read a url from, so this says what it actually knows.
         return outcome.unverified(
             "browser_control",
             "the address was handed to the system's default browser, which "

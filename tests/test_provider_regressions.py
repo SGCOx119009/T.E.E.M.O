@@ -56,13 +56,18 @@ class ProviderRegressionTests(unittest.TestCase):
             "https://api.example.test/api/v1",
         )
 
-    def test_spd_say_alone_is_not_advertised_as_a_wav_engine(self) -> None:
-        def find_executable(name: str) -> str | None:
-            return "/usr/bin/spd-say" if name == "spd-say" else None
+    def test_no_engine_is_advertised_when_none_is_installed(self) -> None:
+        """An engine that is not really installed must never be advertised.
 
+        The assistant tells the model which speech engine it has. Claiming
+        one that is not there turns every later synthesis into a silence the
+        model has to explain away, so an empty catalogue has to read as
+        "nothing available", never as a fallback that will work later.
+        """
         with (
-            patch.object(tts_system, "_SYS", "Linux"),
-            patch.object(tts_system.shutil, "which", side_effect=find_executable),
+            patch.object(tts_system, "_has_comtypes", return_value=False),
+            patch.object(tts_system, "_powershell", return_value=None),
+            patch.object(tts_system, "_has_winrt", return_value=False),
         ):
             self.assertEqual(tts_system.engine_name(), "")
             self.assertFalse(tts_system.available())

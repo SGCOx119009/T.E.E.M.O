@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import platform
 import random
 import subprocess
 import sys
@@ -16,10 +15,8 @@ from pathlib import Path
 
 import psutil
 
-if platform.system() == "Windows":
-    _WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
-else:
-    _WIN_HIDE: dict = {}
+# Windows-only: a console window must never open behind the HUD.
+_WIN_HIDE: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
 
 # Qt's video backend prints the ffmpeg stream banner — codec, bitrate, the
 # whole signed googlevideo URL — to the console for every stream it opens. That
@@ -93,7 +90,9 @@ _MIN_W,     _MIN_H     = 820, 580
 _LEFT_W  = 148
 _RIGHT_W = 340
 
-_OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+# T.E.E.M.O. is a Windows-only desktop assistant. The OS is a fact about the
+# product, not a runtime question: nothing here asks what it is running on.
+_OS = "Windows"
 
 
 class C:

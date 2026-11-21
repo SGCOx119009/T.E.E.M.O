@@ -5,7 +5,6 @@ import base64
 import hashlib
 import json
 import os
-import platform
 import secrets
 import threading
 import time
@@ -391,8 +390,6 @@ def _desktop_candidates(
     query: str, artist: str
 ) -> tuple[Any | None, list[tuple[Any, dict]], str | None]:
     """Search Spotify Desktop and read exact song rows through Windows UIA."""
-    if platform.system() != "Windows":
-        return None, [], "Spotify Free desktop control is supported on Windows."
     if (
         not isinstance(query, str) or not query.strip()
         or len(query) > _MAX_QUERY_LENGTH
@@ -672,12 +669,6 @@ def _desktop_play(query: str, artist: str) -> str:
 
 
 def _desktop_control(action: str) -> str:
-    if platform.system() != "Windows":
-        return outcome.failed(
-            "spotify_control",
-            "Spotify Free desktop controls are supported on Windows.",
-            action=action,
-        )
     from _ctypes import COMError
 
     effect_started = False
@@ -954,7 +945,7 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
         if not _api_is_configured():
             return _desktop_play(query.strip(), artist)
         result = _play(query.strip(), artist)
-        if "Premium" in result and platform.system() == "Windows":
+        if "Premium" in result:
             return _desktop_play(query.strip(), artist)
         return result
     if action not in {"play_pause", "next", "previous"}:
@@ -966,7 +957,7 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     if not _api_is_configured():
         return _desktop_control(action)
     result = _control_current_playback(action)
-    if "Premium" in result and platform.system() == "Windows":
+    if "Premium" in result:
         return _desktop_control(action)
     return result
 

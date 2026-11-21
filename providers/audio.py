@@ -96,10 +96,9 @@ def to_mono(pcm: bytes, channels: int) -> bytes:
 def wav_to_pcm(data: bytes, want_rate: int = SPEAKER_RATE) -> bytes:
     """A WAV file (however it was produced) -> mono 16-bit PCM at `want_rate`.
 
-    This is how every system speech engine hands audio back: Windows SAPI writes
-    a wave file, macOS `say` writes one, espeak-ng writes one to stdout. Parsed
-    with the standard library, so there is nothing to install and nothing that
-    behaves differently per platform.
+    This is how every system speech engine hands audio back: Windows SAPI
+    writes a wave file. Parsed with the standard library, so there is nothing
+    to install and nothing that behaves differently per platform.
     """
     if not data:
         return b""

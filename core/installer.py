@@ -7,7 +7,6 @@ Installs only the packages that are actually missing, then exits cleanly.
 from __future__ import annotations
 
 import importlib.util
-import platform
 import subprocess
 import sys
 from typing import Callable
@@ -97,8 +96,7 @@ def install_for_config(config: dict, log: Callable | None = None) -> None:
     needed: list[tuple[str, str]] = list(_CORE)
     needed += _STT.get(stt, [])
     needed += _TTS.get(tts, [])
-    if platform.system() == "Windows":
-        needed += _WINDOWS
+    needed += _WINDOWS
 
     # Deduplicate (preserve order, key = pip name)
     seen: set[str] = set()

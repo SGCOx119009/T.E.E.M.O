@@ -46,8 +46,6 @@ class SavedReportTests(unittest.TestCase):
             home = Path(temp_dir)
             with (
                 patch.object(Path, "home", return_value=home),
-                patch.object(flight_finder, "is_windows", return_value=False),
-                patch.object(flight_finder, "is_mac", return_value=False),
                 patch.object(flight_finder.subprocess, "Popen") as popen,
                 patch("builtins.print"),
             ):
@@ -57,15 +55,13 @@ class SavedReportTests(unittest.TestCase):
 
             self.assertEqual(saved_path.parent, home / "Desktop")
             self.assertEqual(saved_path.read_text(encoding="utf-8"), "flight results")
-            popen.assert_called_once_with(["xdg-open", str(saved_path)])
+            popen.assert_called_once_with(["notepad.exe", str(saved_path)])
 
     def test_youtube_summary_is_saved_without_opening_a_real_editor(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             home = Path(temp_dir)
             with (
                 patch.object(Path, "home", return_value=home),
-                patch.object(youtube_video, "is_windows", return_value=False),
-                patch.object(youtube_video, "is_mac", return_value=True),
                 patch.object(youtube_video.subprocess, "Popen") as popen,
             ):
                 saved_path = Path(
@@ -76,7 +72,7 @@ class SavedReportTests(unittest.TestCase):
 
             self.assertEqual(saved_path.parent, home / "Desktop")
             self.assertIn("video summary", saved_path.read_text(encoding="utf-8"))
-            popen.assert_called_once_with(["open", "-t", str(saved_path)])
+            popen.assert_called_once_with(["notepad.exe", str(saved_path)])
 
 
 if __name__ == "__main__":

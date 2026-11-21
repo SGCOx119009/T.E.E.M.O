@@ -5,9 +5,9 @@ one voice instead of forty slightly different ones.
 
 Type. No font files ship with the app, and none are downloaded: each role
 names a list of families and Qt takes the first one the system has. Windows
-has Bahnschrift, a DIN-style face that suits a HUD; macOS and Linux fall
-through to their own sans. Numbers use a monospace so they do not jitter
-while they change.
+has Bahnschrift, a DIN-style face that suits a HUD, and falls through to the
+next family it was given when it is missing. Numbers use a monospace so they do
+not jitter while they change.
 
 Colour. Stylesheets only ever use the palette's own hex values, because the
 live re-theme (theme.retheme_all_widgets) works by replacing those exact

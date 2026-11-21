@@ -1,5 +1,6 @@
 """
-Speech synthesis through the operating system's own voices.
+providers/tts_system.py — speech synthesis through the Windows voices already
+installed on the machine.
 
 WHY THIS ONE EXISTS AT ALL
     Every other way of speaking locally starts with a download — a neural voice
@@ -8,15 +9,26 @@ WHY THIS ONE EXISTS AT ALL
     something has been fetched, and it works in one language until something
     else has been fetched.
 
-    Every one of the three supported systems already ships a speech synthesiser
-    with the languages its owner installed. Nothing to download, nothing to
-    build, no model files in the repository. It is not as good as a neural
-    voice. It is available immediately, everywhere, which for a fallback matters
-    more.
+    Windows already ships a speech synthesiser with the languages its owner
+    installed. Nothing to download, nothing to build, no model files in the
+    repository. It is not as good as a neural voice. It is available
+    immediately, everywhere, which for a fallback matters more.
 
-        Windows   System.Speech (SAPI5), driven through PowerShell
-        macOS     `say`
-        Linux     `espeak-ng`, or `spd-say` where that is what is installed
+    TWO ENGINES, TWO CATALOGUES, ONE LIST
+        SAPI 5 is the classic engine. It is driven here through `comtypes`
+        (`SAPI.SpVoice`), which needs no Python package beyond the binding
+        itself, and it is the route that works on every Windows install.
+
+        SAPI OneCore is the modern engine, and it is the one that carries the
+        "Modern" voices Windows 10 and 11 download on demand. It is a
+        DIFFERENT CATALOGUE: a voice installed for OneCore is often not in the
+        SAPI 5 list at all, and vice versa. That is the whole reason a user
+        can install a voice for their language, see it in the list, and still
+        be told the engine does not cover the language.
+
+        So this module reads BOTH catalogues and merges them into one list,
+        each entry carrying the engine that can speak it. A voice the classic
+        engine cannot see is not missing; it is spoken by the other one.
 
     THE HONEST LIMIT: it speaks the languages the machine has VOICES for, which
     is not the same as the languages the machine displays. Measured on an
@@ -38,10 +50,10 @@ THE ENCODING TRAP, WHICH IS THE WHOLE REASON THIS FILE IS CAREFUL
     bitten by exactly this: a status line with an emoji in it raised
     UnicodeEncodeError and took the session down.
 
-    So the text is NEVER an argument. It is written to a UTF-8 file and the
-    engine is told to read that file. Every one of the three supports it, and it
-    is the difference between a synthesiser that works in one language and one
-    that works in all of them.
+    So the text is NEVER an argument on the route that shells out. It is
+    written to a UTF-8 file and the engine is told to read that file. The
+    in-process route (`comtypes`) has no code page at all, which is one more
+    reason it is the primary one.
 
 NO LANGUAGE DETECTION HERE EITHER
     Which voice speaks is a setting, listed from what the system actually has
@@ -54,19 +66,17 @@ from __future__ import annotations
 
 import asyncio
 import os
-import platform
 import re
 import shutil
+import struct
 import subprocess
-import sys
 import tempfile
 import threading
+import unicodedata
 from typing import AsyncIterator, Optional
 
 from . import audio
 from .base import DEFAULT_CAPS, Field
-
-_SYS = platform.system()
 
 # Sentence-ending punctuation across the scripts this assistant is actually used
 # in. Not grammar and not language detection — just the marks after which it is
@@ -82,7 +92,12 @@ _SYS = platform.system()
 _SENTENCE_END = re.compile(r"(?<=[.!?…])\s+|(?<=[。！？؟۔।])\s*")
 
 # Windows only: keep a console window from flashing open on every sentence.
-_NO_WINDOW = 0x08000000 if _SYS == "Windows" else 0
+_NO_WINDOW = 0x08000000
+
+# The two engines, by name. SAPI5 first: it is on every Windows install, and
+# OneCore is an addition, never a requirement.
+_ENGINE_SAPI5 = "SAPI 5"
+_ENGINE_ONECORE = "SAPI OneCore"
 
 
 def _run(args: list[str], timeout: float = 60.0,
@@ -102,24 +117,50 @@ def _powershell() -> Optional[str]:
     return shutil.which("pwsh") or shutil.which("powershell")
 
 
+def _has_comtypes() -> bool:
+    from importlib.util import find_spec
+    try:
+        return find_spec("comtypes") is not None
+    except Exception:
+        return False
+
+
+def _has_winrt() -> bool:
+    from importlib.util import find_spec
+    try:
+        return find_spec("winrt") is not None
+    except Exception:
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  Listing the voices the machine actually has
+#  The catalogue: every voice this machine has, from every engine
 # ─────────────────────────────────────────────────────────────────────────────
-# Enumerating voices costs a subprocess — PowerShell on Windows, `say -v ?` on
-# macOS, `espeak-ng --voices` on Linux. Measured on Windows: **1.70 seconds**,
-# every single call.
-#
-# The panel rebuilds its form on every dropdown change, and each rebuild asks
-# for this list, so an uncached version freezes the interface for the better
-# part of two seconds every time somebody touches a control. That is the same
-# fault as the 2.104-second `openwakeword` import that used to make the settings
-# drawer stutter — measured, found, and fixed once already in this project.
+# Enumerating voices costs something — a COM call for SAPI 5, an async
+# enumeration for OneCore — and the panel rebuilds its form on every dropdown
+# change, so the merged list is answered once and cached. Measured on the
+# classic engine: 1.70 seconds per enumeration, every single call.
 #
 # The installed voices do not change while the app is running, so this is
 # answered once. `refresh=True` exists for somebody who has just installed a
 # voice and does not want to restart.
 _voice_cache: Optional[list] = None
 _voice_lock = threading.Lock()
+
+
+class Voice:
+    """One installed voice, and the engine that can speak it."""
+
+    __slots__ = ("name", "engine", "language", "token")
+
+    def __init__(self, name: str, engine: str, language: str = "", token=None):
+        self.name = name
+        self.engine = engine
+        self.language = language
+        self.token = token          # the engine's own handle, when it has one
+
+    def __repr__(self) -> str:
+        return f"Voice({self.name!r}, {self.engine})"
 
 
 def prefetch(on_ready=None) -> None:
@@ -149,9 +190,23 @@ def prefetch(on_ready=None) -> None:
 
 
 def list_voices(refresh: bool = False) -> list[str]:
-    """Installed voice names. Empty when the platform's engine is missing, which
-    the panel shows as 'no system voices found' rather than an empty dropdown
-    with no explanation."""
+    """Installed voice names. Empty when no engine is present, which the panel
+    shows as 'no system voices found' rather than an empty dropdown with no
+    explanation."""
+    global _voice_cache
+    with _voice_lock:
+        if _voice_cache is not None and not refresh:
+            return [v.name for v in _voice_cache]
+    found = _read_voices()
+    with _voice_lock:
+        _voice_cache = found
+    return [v.name for v in found]
+
+
+def voice_records(refresh: bool = False) -> list[Voice]:
+    """The full catalogue: names, the engine that speaks each, and its
+    language. `list_voices()` is the names alone; this is what the rest of the
+    module reasons about."""
     global _voice_cache
     with _voice_lock:
         if _voice_cache is not None and not refresh:
@@ -162,59 +217,179 @@ def list_voices(refresh: bool = False) -> list[str]:
     return list(found)
 
 
-def _read_voices() -> list[str]:
+def _read_voices() -> list[Voice]:
+    """Every voice on this machine, from every engine, without duplicates."""
+    found: list[Voice] = []
+    seen: set[str] = set()
+
+    for voice in _read_voices_sapi5():
+        key = voice.name.strip().casefold()
+        if key and key not in seen:
+            seen.add(key)
+            found.append(voice)
+
+    for voice in _read_voices_onecore():
+        key = voice.name.strip().casefold()
+        if key and key not in seen:
+            seen.add(key)
+            found.append(voice)
+
+    return found
+
+
+_com_state = threading.local()
+
+
+def _com_ready() -> None:
+    """Initialise the COM apartment for THIS thread.
+
+    `comtypes` initialises the apartment once, on the thread that imported it.
+    Every other thread that touches SAPI has to ask for its own apartment, or
+    COM answers CO_E_NOTINITIALIZED — which is exactly what happened when the
+    catalogue was read from the event loop while the synthesis ran on a
+    worker thread.
+
+    The apartment is left initialised for the life of the thread: unbalancing
+    it would only risk tearing down an apartment the thread is still using.
+    """
+    if getattr(_com_state, "ready", False):
+        return
     try:
-        if _SYS == "Windows":
-            ps = _powershell()
-            if not ps:
-                return []
-            out = _run([ps, "-NoProfile", "-NonInteractive", "-Command",
-                        "Add-Type -AssemblyName System.Speech; "
-                        "(New-Object System.Speech.Synthesis.SpeechSynthesizer)"
-                        ".GetInstalledVoices() | "
-                        "ForEach-Object { $_.VoiceInfo.Name }"], timeout=20)
-            return [l.strip() for l in
-                    out.stdout.decode("utf-8", "replace").splitlines() if l.strip()]
-
-        if _SYS == "Darwin":
-            out = _run(["say", "-v", "?"], timeout=20)
-            names = []
-            for line in out.stdout.decode("utf-8", "replace").splitlines():
-                # "Alice               it_IT    # Salve, mi chiamo Alice"
-                name = line.split("  ")[0].strip()
-                if name:
-                    names.append(name)
-            return names
-
-        # Linux
-        if shutil.which("espeak-ng") or shutil.which("espeak"):
-            exe = shutil.which("espeak-ng") or shutil.which("espeak")
-            out = _run([exe, "--voices"], timeout=20)
-            names = []
-            for line in out.stdout.decode("utf-8", "replace").splitlines()[1:]:
-                cols = line.split()
-                if len(cols) >= 4:
-                    names.append(cols[3])
-            return sorted(set(names))
-        return []
+        import comtypes
+        comtypes.CoInitialize()
     except Exception:
+        pass
+    _com_state.ready = True
+
+
+def _read_voices_sapi5() -> list[Voice]:
+    """The classic engine's catalogue, through comtypes."""
+    if not _has_comtypes():
+        return []
+    try:
+        _com_ready()
+        import comtypes.client
+
+        sapi = comtypes.client.CreateObject("SAPI.SpVoice")
+        out: list[Voice] = []
+        for token in sapi.GetVoices():
+            try:
+                name = str(token.GetDescription() or "")
+                language = ""
+                try:
+                    attr = token.GetAttribute("Language")
+                    language = f"{int(attr) & 0x3FF:03d}"
+                except Exception:
+                    language = ""
+                if name.strip():
+                    out.append(Voice(name.strip(), _ENGINE_SAPI5, language, token))
+            except Exception:
+                continue
+        return out
+    except Exception as e:
+        print(f"[tts] SAPI 5 catalogue unavailable: {e}")
+        return []
+
+
+def _read_voices_onecore() -> list[Voice]:
+    """The modern engine's catalogue. Only present when `winrt` is installed."""
+    if not _has_winrt():
+        return []
+    try:
+        import winrt.windows.media.speechsynthesis as syn
+
+        out: list[Voice] = []
+        for voice in syn.SpeechSynthesizer.all_voices:
+            try:
+                name = str(voice.display_name or "")
+                language = str(voice.language or "")
+                if name.strip():
+                    out.append(Voice(name.strip(), _ENGINE_ONECORE, language, voice))
+            except Exception:
+                continue
+        return out
+    except Exception as e:
+        print(f"[tts] SAPI OneCore catalogue unavailable: {e}")
         return []
 
 
 def engine_name() -> str:
-    if _SYS == "Windows":
-        return "System.Speech (SAPI5)" if _powershell() else ""
-    if _SYS == "Darwin":
-        return "say" if shutil.which("say") else ""
-    for exe in ("espeak-ng", "espeak", "spd-say"):
-        if shutil.which(exe):
-            return exe
+    """What is actually installed, as one name. Empty when nothing is."""
+    if _has_comtypes():
+        try:
+            import comtypes.client
+            comtypes.client.CreateObject("SAPI.SpVoice")
+            return f"{_ENGINE_SAPI5} (comtypes)"
+        except Exception:
+            pass
+    if _powershell():
+        return f"{_ENGINE_SAPI5} (System.Speech)"
+    if _has_winrt():
+        return _ENGINE_ONECORE
     return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Synthesis
 # ─────────────────────────────────────────────────────────────────────────────
+def _pcm_to_wav(pcm: bytes, rate: int = audio.SPEAKER_RATE,
+                channels: int = 1) -> bytes:
+    """Wrap raw PCM in a WAV container, so every engine's output can be read
+    by the same reader."""
+    bits = 16
+    block = channels * bits // 8
+    header = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt "
+    header += struct.pack("<IHHIIHH", 16, 1, channels, rate,
+                          rate * block, block, bits)
+    header += b"data" + struct.pack("<I", len(pcm))
+    return header + pcm
+
+
+def _script_of(text: str) -> str:
+    """The name of the script a text is written in, for the error message.
+
+    Only the scripts that change the answer. Latin is the default because it
+    is the script of the overwhelming majority of the text that passes
+    through here, and "this is Latin" never explains a silence.
+    """
+    samples = [c for c in text if not c.isspace() and not c.isascii()]
+    if not samples:
+        return "Latin"
+    counts: dict[str, int] = {}
+    for ch in samples:
+        name = _script_of_char(ch)
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return "Latin"
+    return max(counts, key=lambda k: counts[k])
+
+
+_SCRIPT_RANGES = (
+    ("Cyrillic", 0x0400, 0x04FF),
+    ("Greek", 0x0370, 0x03FF),
+    ("Armenian", 0x0530, 0x058F),
+    ("Georgian", 0x10A0, 0x10FF),
+    ("Hebrew", 0x0590, 0x05FF),
+    ("Arabic", 0x0600, 0x06FF),
+    ("Devanagari", 0x0900, 0x097F),
+    ("Thai", 0x0E00, 0x0E7F),
+    ("Hangul", 0xAC00, 0xD7AF),
+    ("Han", 0x4E00, 0x9FFF),
+    ("Hiragana", 0x3040, 0x309F),
+    ("Katakana", 0x30A0, 0x30FF),
+    ("CJK", 0x3000, 0x303F),
+)
+
+
+def _script_of_char(ch: str) -> str:
+    code = ord(ch)
+    for name, low, high in _SCRIPT_RANGES:
+        if low <= code <= high:
+            return name
+    return ""
+
+
 class SystemTTS:
     def __init__(self, cfg: dict):
         self.voice = (cfg.get("voice") or "").strip()
@@ -223,15 +398,56 @@ class SystemTTS:
         self.caps["audio_out"] = True
         self._engine = engine_name()
 
-    # -- per platform, all returning a WAV file's bytes ----------------------
-    def _windows(self, text_file: str, wav_file: str) -> None:
+    # -- the engines ---------------------------------------------------------
+    def _synth_sapi5(self, text_file: str, wav_file: str) -> None:
+        """SAPI 5 through comtypes. The primary route: no code page, no shell,
+        no PowerShell between the text and the voice."""
+        import comtypes.client
+
+        _com_ready()
+        sapi = comtypes.client.CreateObject("SAPI.SpVoice")
+        sapi.Rate = max(-10, min(10, self.rate))
+        if self.voice:
+            sapi.Voice = self._sapi5_token(sapi, self.voice)
+
+        stream = comtypes.client.CreateObject("SAPI.SpFileStream")
+        # SSFMCreateForWrite = 3
+        stream.Open(wav_file, 3)
+        try:
+            sapi.AudioOutputStream = stream
+            with open(text_file, "r", encoding="utf-8") as f:
+                text = f.read()
+            sapi.Speak(text)
+        finally:
+            try:
+                sapi.AudioOutputStream = None
+            except Exception:
+                pass
+            stream.Close()
+
+    def _sapi5_token(self, sapi, wanted: str):
+        """The SAPI 5 token whose description is `wanted`."""
+        for token in sapi.GetVoices():
+            try:
+                if str(token.GetDescription() or "").strip() == wanted:
+                    return token
+            except Exception:
+                continue
+        raise RuntimeError(
+            f"there is no installed voice called {wanted!r} for the classic "
+            f"speech engine")
+
+    def _synth_powershell(self, text_file: str, wav_file: str) -> None:
+        """SAPI 5 through System.Speech, for a machine without `comtypes`.
+
+        The text is READ FROM A UTF-8 FILE, never interpolated into this
+        script — see the module docstring. The voice name is the only thing
+        substituted, and it is quoted and doubled so a name with an
+        apostrophe cannot end the string early.
+        """
         ps = _powershell()
         if not ps:
             raise RuntimeError("PowerShell was not found")
-        # The text is READ FROM A UTF-8 FILE, never interpolated into this
-        # script — see the module docstring. The voice name is the only thing
-        # substituted, and it is quoted and doubled so a name with an
-        # apostrophe cannot end the string early.
         voice = self.voice.replace("'", "''")
         select = (f"$s.SelectVoice('{voice}');" if self.voice else "")
         script = (
@@ -250,61 +466,108 @@ class SystemTTS:
             raise RuntimeError(r.stderr.decode("utf-8", "replace")[:200]
                                or "the speech engine failed")
 
-    def _macos(self, text_file: str, wav_file: str) -> None:
-        args = ["say", "-f", text_file, "-o", wav_file,
-                # Ask for exactly what the speaker wants, so nothing is
-                # resampled on the way out.
-                "--data-format=LEI16@24000"]
-        if self.voice:
-            args[1:1] = ["-v", self.voice]
-        if self.rate:
-            # `say` takes words per minute; 175 is its default, and the -10..10
-            # scale is mapped onto it so one setting means the same thing on
-            # every platform.
-            args[1:1] = ["-r", str(max(90, min(400, 175 + self.rate * 15)))]
-        r = _run(args)
-        if r.returncode != 0:
-            raise RuntimeError(r.stderr.decode("utf-8", "replace")[:200]
-                               or "`say` failed")
+    def _synth_onecore(self, text_file: str, wav_file: str) -> None:
+        """SAPI OneCore, for the voices the classic engine cannot see."""
+        import asyncio as _asyncio
 
-    def _linux(self, text_file: str, wav_file: str) -> None:
-        exe = shutil.which("espeak-ng") or shutil.which("espeak")
-        if exe:
-            args = [exe, "-f", text_file, "-w", wav_file]
-            if self.voice:
-                args += ["-v", self.voice]
-            if self.rate:
-                args += ["-s", str(max(80, min(450, 175 + self.rate * 15)))]
-            r = _run(args)
-            if r.returncode != 0:
-                raise RuntimeError(r.stderr.decode("utf-8", "replace")[:200]
-                                   or "espeak-ng failed")
-            return
-        raise RuntimeError(
-            "no speech engine found — install espeak-ng "
-            "(apt install espeak-ng, dnf install espeak-ng, pacman -S espeak-ng)")
+        import winrt.windows.media.speechsynthesis as syn
+        import winrt.windows.storage.Streams as streams
+
+        with open(text_file, "r", encoding="utf-8") as f:
+            text = f.read()
+
+        synth = syn.SpeechSynthesizer()
+        if self.voice:
+            for voice in syn.SpeechSynthesizer.all_voices:
+                try:
+                    if str(voice.display_name or "").strip() == self.voice:
+                        synth.voice = voice
+                        break
+                except Exception:
+                    continue
+
+        async def _go() -> bytes:
+            stream = await synth.synthesize_text_to_stream_async(text)
+            reader = await streams.DataReader.load_async(
+                stream.get_input_stream_at(0))
+            data = reader.read_bytes(reader.size)
+            return bytes(data)
+
+        pcm = _asyncio.run(_go())
+        with open(wav_file, "wb") as f:
+            f.write(_pcm_to_wav(pcm))
 
     def _synth_blocking(self, text: str) -> bytes:
         # Both files are created and closed before the engine is pointed at
         # them: on Windows a file still open in this process cannot be written
-        # by another one, which is the standard way this fails there and not
-        # anywhere else.
-        td = tempfile.mkdtemp(prefix="mark_tts_")
+        # by another one, which is the standard way this fails there.
+        td = tempfile.mkdtemp(prefix="teemo_tts_")
         txt = os.path.join(td, "say.txt")
         wav = os.path.join(td, "say.wav")
         try:
             with open(txt, "w", encoding="utf-8") as f:
                 f.write(text)
-            if _SYS == "Windows":
-                self._windows(txt, wav)
-            elif _SYS == "Darwin":
-                self._macos(txt, wav)
-            else:
-                self._linux(txt, wav)
+            self._synth(txt, wav)
             with open(wav, "rb") as f:
                 return f.read()
         finally:
             shutil.rmtree(td, ignore_errors=True)
+
+    def _synth(self, txt: str, wav: str) -> None:
+        """Speak `txt` into the WAV file at `wav`, with the best engine that
+        can take this voice."""
+        reasons: list[str] = []
+
+        if self.voice:
+            engine = self._engine_for(self.voice)
+            if engine == _ENGINE_ONECORE:
+                try:
+                    self._synth_onecore(txt, wav)
+                    return
+                except Exception as e:
+                    reasons.append(str(e))
+            else:
+                if _has_comtypes():
+                    try:
+                        self._synth_sapi5(txt, wav)
+                        return
+                    except Exception as e:
+                        reasons.append(str(e))
+                if _powershell():
+                    try:
+                        self._synth_powershell(txt, wav)
+                        return
+                    except Exception as e:
+                        reasons.append(str(e))
+            raise RuntimeError("; ".join(reasons) or "no speech engine accepted the request")
+
+        # No voice chosen: the first engine that works takes it.
+        if _has_comtypes():
+            try:
+                self._synth_sapi5(txt, wav)
+                return
+            except Exception as e:
+                reasons.append(str(e))
+        if _powershell():
+            try:
+                self._synth_powershell(txt, wav)
+                return
+            except Exception as e:
+                reasons.append(str(e))
+        if _has_winrt():
+            try:
+                self._synth_onecore(txt, wav)
+                return
+            except Exception as e:
+                reasons.append(str(e))
+        raise RuntimeError("; ".join(reasons) or "no speech engine was found")
+
+    def _engine_for(self, name: str) -> str:
+        """Which engine owns the voice called `name`."""
+        for voice in voice_records():
+            if voice.name.strip().casefold() == name.strip().casefold():
+                return voice.engine
+        return _ENGINE_SAPI5
 
     # -- the contract -------------------------------------------------------
     async def speak(self, text: str, voice: str = "") -> AsyncIterator[bytes]:
@@ -333,20 +596,24 @@ class SystemTTS:
         # mode there is — the assistant looks like it ignored the user, and the
         # obvious suspicion falls on the speakers or the microphone.
         #
-        # So it is turned into something that can be said out loud.
+        # So it is turned into something that can be said out loud, and the
+        # message names the script the text is written in, because "install a
+        # voice" is useless advice without knowing WHICH language.
         if sentences and produced == 0:
+            script = _script_of(text)
             raise RuntimeError(
-                f"{self._engine} produced no audio for that text — the "
-                f"installed voice ({self.voice or 'system default'}) does not "
-                f"cover this script. Install a voice for this language in your "
+                f"{self._engine or 'the speech engine'} produced no audio for "
+                f"that text — the installed voice "
+                f"({self.voice or 'system default'}) does not cover "
+                f"{script} script. Install a voice for that language in your "
                 f"system settings, or use a downloadable or hosted voice."
             )
 
     def probe(self) -> tuple[bool, str]:
         if not self._engine:
-            if _SYS == "Linux":
-                return False, "No speech engine — install espeak-ng."
-            return False, "No speech engine was found on this system."
+            return False, ("No speech engine was found on this system — "
+                           "SAPI 5 needs either the comtypes package or "
+                           "Windows PowerShell.")
         try:
             wav = self._synth_blocking("ok")
             pcm = audio.wav_to_pcm(wav, audio.SPEAKER_RATE)
@@ -421,13 +688,13 @@ def available() -> bool:
 def choices_for(field_key: str) -> tuple:
     """Live values for a `choices` field the panel cannot know in advance.
 
-    NEVER blocks. Reading the voices costs 1.70 seconds of subprocess, and this
-    is called while a form is being drawn; waiting for it here is what made the
-    panel take two seconds to open. Before the cache is warm this answers with
-    nothing, `prefetch()` fills it in the background, and the panel redraws once
-    it arrives. The voice already saved is still shown, because the form adds
-    the stored value to the list whether or not it was offered."""
+    NEVER blocks. Reading the voices costs a COM call, and this is called while
+    a form is being drawn; waiting for it here is what made the panel take two
+    seconds to open. Before the cache is warm this answers with nothing,
+    `prefetch()` fills it in the background, and the panel redraws once it
+    arrives. The voice already saved is still shown, because the form adds the
+    stored value to the list whether or not it was offered."""
     if field_key != "voice":
         return ()
     with _voice_lock:
-        return tuple(_voice_cache) if _voice_cache is not None else ()
+        return tuple(v.name for v in _voice_cache) if _voice_cache is not None else ()

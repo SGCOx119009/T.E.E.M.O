@@ -38,8 +38,8 @@ WHAT IT REFUSES TO DO, AND WHY REFUSING IS THE FEATURE
       label said "password" — labels are in every language and can lie — but
       because the platform itself flagged it. This one is unconditional: there
       is no parameter that turns it off.
-    * Anything at all, on a system that does not permit it. Wayland and an
-      ungranted macOS both accept synthetic input and silently discard it, so
+    * Anything at all, on a system that does not permit it. A session with no
+      interactive desktop accepts synthetic input and silently discards it, so
       here it is an honest failure instead of a click that never happened.
 
 EVERY RESULT IS AN OBSERVATION, NOT AN INTENTION
@@ -52,16 +52,16 @@ EVERY RESULT IS AN OBSERVATION, NOT AN INTENTION
 
 NO LANGUAGE, ANYWHERE
     Key names are ASCII identifiers from the pyautogui vocabulary plus aliases
-    for what people actually say. Modifier names are mapped per platform, so
-    "ctrl+s" is Command+S on a Mac without any caller knowing. Text is sent as
-    CHARACTERS through each platform's Unicode input, never as key presses,
-    because a key-press typist produces what a US keyboard produces and most of
-    the world does not use one.
+    for what people actually say. Modifier names are mapped onto the Windows
+    ones, so "ctrl+s" and "cmd+s" are the same chord and no plugin, prompt or
+    plan ever has to know which one it was. Text is sent as CHARACTERS through
+    Windows' Unicode input, never as key presses, because a key-press typist
+    produces what a US keyboard produces and most of the world does not use
+    one.
 """
 from __future__ import annotations
 
 import os
-import platform as _platform
 import re
 import threading
 import time
@@ -182,9 +182,9 @@ def _fail(action: str, error: str, **kw) -> Act:
 # ---------------------------------------------------------------------------
 # Can this machine be driven at all?
 #
-# Asked once and cached. platform_support.detect() reads the environment and
-# the OS, neither of which changes inside a session, and asking it before every
-# keystroke would put a filesystem probe in the input path.
+# Asked once and cached. capability.detect() reads the session and the desktop,
+# neither of which changes inside a session, and asking it before every
+# keystroke would put a system call in the input path.
 # ---------------------------------------------------------------------------
 _support: Any = None
 _support_lock = threading.Lock()
@@ -196,8 +196,8 @@ def _permitted() -> tuple[bool, str]:
     with _support_lock:
         if _support is None:
             try:
-                from core import platform_support
-                _support = platform_support.detect()
+                from core import capability
+                _support = capability.detect()
             except Exception:
                 _support = False        # sentinel: could not tell, assume yes
     if _support is False or _support is None:
@@ -501,37 +501,30 @@ def drag(start: Target, end: Target, *, duration: float = 0.45) -> Act:
                point=(b.x, b.y), detail=f"{a.x},{a.y} -> {b.x},{b.y}")
 
 
-# What one notch of a mouse wheel is, in the unit each platform's scroll call
-# counts in. pyautogui passes its number straight through, and the three
-# platforms read it three different ways:
+# What one notch of a mouse wheel is, in the unit Windows' scroll call counts
+# in. pyautogui passes its number straight through, and on Windows that number
+# is the wheel delta: one notch is 120 (WHEEL_DELTA).
 #
-#     Windows   wheel delta; one notch is 120 (WHEEL_DELTA)
-#     macOS     lines; a notch is about three
-#     X11       button 4/5 clicks; one click is one notch
-#
-# The old code sent 120 everywhere, which was right on Windows and asked macOS
-# for 360 lines and X11 for 360 separate wheel clicks per notch.
-_NOTCH = {"windows": 120, "mac": 3, "linux": 1}
+# The old code sent 120 everywhere, which was right on Windows and asked other
+# platforms for 360 lines or 360 separate wheel clicks per notch.
+_NOTCH = 120
 
 
 def _wheel(direction: str, notches: int) -> None:
     """Turn the wheel `notches` times, in any of the four directions."""
     d = direction.strip().lower()
     horizontal = d.startswith(("l", "r"))
-    # Up and right are positive on every platform's scroll API.
+    # Up and right are positive.
     sign = 1 if d.startswith(("u", "r")) else -1
-    amount = sign * notches * _NOTCH.get(_OS, 1)
+    amount = sign * notches * _NOTCH
     if not horizontal:
         pyautogui.scroll(amount)
         return
-    if _OS == "windows":
-        # pyautogui's Windows hscroll is literally its vertical scroll, so a
-        # horizontal request scrolled the page down. MOUSEEVENTF_HWHEEL is the
-        # real horizontal wheel.
-        import ctypes
-        ctypes.WinDLL("user32").mouse_event(0x01000, 0, 0, int(amount), 0)
-        return
-    pyautogui.hscroll(amount)
+    # pyautogui's Windows hscroll is literally its vertical scroll, so a
+    # horizontal request scrolled the page down. MOUSEEVENTF_HWHEEL is the
+    # real horizontal wheel.
+    import ctypes
+    ctypes.WinDLL("user32").mouse_event(0x01000, 0, 0, int(amount), 0)
 
 
 def scroll(direction: str = "down", amount: int = 3, *,
@@ -579,7 +572,7 @@ def scroll(direction: str = "down", amount: int = 3, *,
 # anybody's language: "enter" is the name of a key in the library's vocabulary,
 # the same way "Button" is the name of a role in UIA's.
 # ---------------------------------------------------------------------------
-_OS = {"Windows": "windows", "Darwin": "mac"}.get(_platform.system(), "linux")
+_OS = "windows"
 
 _KEY_ALIASES = {
     "return": "enter", "cr": "enter", "newline": "enter",
@@ -588,7 +581,8 @@ _KEY_ALIASES = {
     "pgup": "pageup", "pgdn": "pagedown", "pagedn": "pagedown",
     "control": "ctrl", "ctl": "ctrl",
     "option": "alt", "opt": "alt",
-    "cmd": "command", "meta": "command", "apple": "command",
+    "cmd": "ctrl", "meta": "ctrl", "apple": "ctrl", "command": "ctrl",
+    "macctrl": "ctrl",
     "super": "winleft", "win": "winleft", "windows": "winleft", "start": "winleft",
     "spacebar": "space", "spc": "space",
     "caps": "capslock",
@@ -599,26 +593,14 @@ _KEY_ALIASES = {
 
 
 def normalise_key(name: str) -> str:
-    """One key name, in pyautogui's vocabulary, correct for this platform.
+    """One key name, in pyautogui's vocabulary, correct for Windows.
 
-    The platform swap is the point. A caller writes "ctrl+s" once and it is
-    Command+S on macOS and Control+S everywhere else, so no plugin, prompt or
-    plan ever has to branch on the operating system to save a file.
-
-    That promise was only half kept: "cmd" became Control off the Mac, but
-    "ctrl" stayed Control ON the Mac, so every "ctrl+s", "ctrl+a" and "ctrl+v" a
-    planner wrote did nothing there. "ctrl" and "cmd" are now both the
-    platform's shortcut modifier. The rare shortcut that needs the physical
-    Control key on a Mac is written "macctrl".
+    The modifier aliases are the point. A caller writes "ctrl+s" once, and
+    "cmd+s" means exactly the same chord here, so no plugin, prompt or plan
+    ever has to branch on which one it was asked for.
     """
     key = str(name or "").strip().lower()
-    if key == "macctrl":
-        return "ctrl"
     key = _KEY_ALIASES.get(key, key)
-    if key in ("ctrl", "command"):
-        return "command" if _OS == "mac" else "ctrl"
-    if key == "winleft" and _OS == "mac":
-        key = "command"
     return key
 
 
@@ -676,12 +658,10 @@ def type_text(text: str, *, target: Optional[Target] = None,
         be typed at all. The same happens on German, French, Nordic and most
         other layouts, and on every non-Latin one.
 
-        So text never goes through key presses. Each platform has a way to
-        deliver a character itself, independent of the layout:
+        So text never goes through key presses. Windows has a way to deliver a
+        character itself, independent of the layout:
 
             Windows   SendInput with KEYEVENTF_UNICODE
-            macOS     a keyboard event carrying a Unicode string
-            X11       xdotool type, when it is installed
 
         When that route is unavailable the clipboard carries it instead, and
         the clipboard the user had is put back afterwards.
@@ -748,16 +728,13 @@ def _deliver_text(text: str) -> tuple[str, str]:
     if not text:
         return "nothing to type", ""
     reasons: list[str] = []
-    native = {"windows": _type_windows, "mac": _type_mac,
-              "linux": _type_linux}.get(_OS)
-    if native is not None:
-        try:
-            problem = native(text)
-        except Exception as e:
-            problem = str(e)
-        if problem is None:
-            return "unicode input", ""
-        reasons.append(problem)
+    try:
+        problem = _type_windows(text)
+    except Exception as e:
+        problem = str(e)
+    if problem is None:
+        return "unicode input", ""
+    reasons.append(problem)
 
     problem = _paste(text)
     if problem is None:
@@ -843,64 +820,6 @@ def _type_windows(text: str) -> Optional[str]:
             return (f"Windows accepted {sent} of {len(chunk)} input records "
                     f"(error {ctypes.get_last_error()})")
         time.sleep(0.01)
-    return None
-
-
-def _type_mac(text: str) -> Optional[str]:
-    """Quartz keyboard events carrying Unicode strings. None on success."""
-    import Quartz
-
-    RETURN, TAB = 36, 48          # virtual key codes; positions, not letters
-
-    def post_string(chunk: str) -> None:
-        units = len(chunk.encode("utf-16-le")) // 2
-        for down in (True, False):
-            event = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
-            Quartz.CGEventKeyboardSetUnicodeString(event, units, chunk)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
-        time.sleep(0.008)
-
-    def post_key(code: int) -> None:
-        for down in (True, False):
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap,
-                               Quartz.CGEventCreateKeyboardEvent(None, code, down))
-        time.sleep(0.008)
-
-    # macOS reads at most 20 UTF-16 units from one event, so text goes in short
-    # runs that never split a character.
-    run = ""
-    for ch in text.replace("\r\n", "\n").replace("\r", "\n"):
-        if ch in "\n\t":
-            if run:
-                post_string(run)
-                run = ""
-            post_key(RETURN if ch == "\n" else TAB)
-            continue
-        if len((run + ch).encode("utf-16-le")) // 2 > 16:
-            post_string(run)
-            run = ""
-        run += ch
-    if run:
-        post_string(run)
-    return None
-
-
-def _type_linux(text: str) -> Optional[str]:
-    """xdotool on X11. None on success, else why not."""
-    import shutil
-    import subprocess
-
-    if os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"):
-        return "a Wayland session does not accept typed input from programs"
-    tool = shutil.which("xdotool")
-    if not tool:
-        return "xdotool is not installed"
-    result = subprocess.run(
-        [tool, "type", "--clearmodifiers", "--delay", "8", "--", text],
-        capture_output=True, timeout=max(10.0, len(text) * 0.05))
-    if result.returncode != 0:
-        return (result.stderr or b"").decode("utf-8", "replace").strip() \
-            or f"xdotool exited with {result.returncode}"
     return None
 
 

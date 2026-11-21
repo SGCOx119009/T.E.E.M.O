@@ -12,7 +12,6 @@ class SecureCredentialTests(unittest.TestCase):
     def test_secure_key_is_preferred_over_config_file(self) -> None:
         with (
             patch.dict("sys.modules", {"keyring": _FakeKeyring("secure-key")}),
-            patch.object(config_manager.platform, "system", return_value="Windows"),
             patch.object(
                 config_manager,
                 "load_api_keys",
@@ -34,7 +33,6 @@ class SecureCredentialTests(unittest.TestCase):
         fake.backend.priority = None
         with (
             patch.dict("sys.modules", {"keyring": fake}),
-            patch.object(config_manager.platform, "system", return_value="Windows"),
         ):
             with self.assertRaisesRegex(RuntimeError, "backend is unavailable"):
                 config_manager.save_api_keys("some-secret")
@@ -49,8 +47,7 @@ class SecureCredentialTests(unittest.TestCase):
             )
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(config_manager, "CONFIG_FILE", config_file),
+                    patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
             ):
                 self.assertIs(config_manager.delete_gemini_key(), True)
@@ -67,8 +64,7 @@ class SecureCredentialTests(unittest.TestCase):
             config_file.write_text('{"language": "es"}', encoding="utf-8")
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(config_manager, "CONFIG_FILE", config_file),
+                    patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
             ):
                 config_manager.save_api_keys("  new-secret  ")
@@ -92,8 +88,7 @@ class SecureCredentialTests(unittest.TestCase):
                     "sys.modules",
                     {"keyring": fake, "core.gemini": gemini_module},
                 ),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(
+                    patch.object(
                     config_manager, "CONFIG_FILE", config_dir / "api_keys.json"
                 ),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
@@ -110,8 +105,7 @@ class SecureCredentialTests(unittest.TestCase):
             config_file.write_text('{"language": "es"}', encoding="utf-8")
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(config_manager, "CONFIG_FILE", config_file),
+                    patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
                 patch.object(
                     config_manager,
@@ -134,8 +128,7 @@ class SecureCredentialTests(unittest.TestCase):
             )
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(config_manager, "CONFIG_FILE", config_file),
+                    patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", Path(temp_dir)),
             ):
                 self.assertEqual(config_manager.get_gemini_key(), "legacy-secret")
@@ -155,8 +148,7 @@ class SecureCredentialTests(unittest.TestCase):
             )
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(config_manager, "CONFIG_FILE", config_file),
+                    patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
                 patch.object(
                     config_manager,
@@ -181,8 +173,7 @@ class SecureCredentialTests(unittest.TestCase):
             )
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(config_manager, "CONFIG_FILE", config_file),
+                    patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
             ):
                 self.assertEqual(config_manager.get_gemini_key(), "secure-secret")
@@ -201,8 +192,7 @@ class SecureCredentialTests(unittest.TestCase):
             )
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(config_manager, "CONFIG_FILE", config_file),
+                    patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
                 patch.object(
                     config_manager,
@@ -224,8 +214,7 @@ class SecureCredentialTests(unittest.TestCase):
             config_file.write_text("null", encoding="utf-8")
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(config_manager, "CONFIG_FILE", config_file),
+                    patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_dir),
             ):
                 self.assertEqual(config_manager.load_api_keys(), {})
@@ -238,8 +227,7 @@ class SecureCredentialTests(unittest.TestCase):
             config_file = Path(temp_dir) / "config" / "api_keys.json"
             with (
                 patch.dict("sys.modules", {"keyring": fake}),
-                patch.object(config_manager.platform, "system", return_value="Windows"),
-                patch.object(config_manager, "CONFIG_FILE", config_file),
+                    patch.object(config_manager, "CONFIG_FILE", config_file),
                 patch.object(config_manager, "CONFIG_DIR", config_file.parent),
             ):
                 with self.assertRaisesRegex(RuntimeError, "Plaintext"):

@@ -954,8 +954,9 @@ Mark LVII/
 │   ├── appidentity.py        # Which applications are running, which one the user named,
 │   │                         #   and which processes are the assistant's own (never a target)
 │   ├── lazyimport.py         # Heavy third-party imports paid only if they are used
-│   ├── platform_support.py   # What THIS machine permits — Wayland, macOS permissions —
-│   │                         #   reported to the user and to the model, never guessed at
+│   ├── capability.py          # What THIS machine permits — interactive desktop, session,
+│   │                         #   secure desktop — reported to the user and to the model,
+│   │                         #   never guessed at
 │   ├── gemini.py             # One place for every one-shot Gemini call — model ladder, timeouts,
 │   │                         #   cooldowns, and the configured provider as one more rung
 │   ├── prompt.txt            # All prompt wording — {tokens} are filled from the live system at startup

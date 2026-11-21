@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import platform
 import shutil
 import sys
 import tempfile
@@ -81,19 +80,15 @@ def _path_readable(path: Path) -> bool:
     return path.exists() and os.access(path, os.R_OK)
 
 
-def _playwright_cache_dir(system: str) -> Path:
+def _playwright_cache_dir() -> Path:
     configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
     if configured:
         return Path(configured)
-    if system == "Windows":
-        return Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"
-    if system == "Darwin":
-        return Path.home() / "Library" / "Caches" / "ms-playwright"
-    return Path.home() / ".cache" / "ms-playwright"
+    return Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"
 
 
-def _browser_status(system: str, package_available: bool) -> dict[str, Any]:
-    cache = _playwright_cache_dir(system)
+def _browser_status(package_available: bool) -> dict[str, Any]:
+    cache = _playwright_cache_dir()
     names = {
         "chromium": any(cache.glob("chromium-*")),
         "firefox": any(cache.glob("firefox-*")),
@@ -106,13 +101,8 @@ def _browser_status(system: str, package_available: bool) -> dict[str, Any]:
     }
 
 
-def _native_tools(system: str) -> dict[str, bool]:
-    if system == "Windows":
-        names = ("powershell", "cmd", "where")
-    elif system == "Darwin":
-        names = ("osascript", "open", "afplay")
-    else:
-        names = ("xdg-open", "wmctrl", "pactl")
+def _native_tools() -> dict[str, bool]:
+    names = ("powershell", "cmd", "where")
     return {name: shutil.which(name) is not None for name in names}
 
 
@@ -141,7 +131,7 @@ def _secure_storage_status() -> dict[str, bool]:
 def run_diagnostics(base_dir: Path | None = None) -> dict[str, Any]:
     """Return a JSON-serializable, local-only capability report."""
     root = (base_dir or Path(__file__).resolve().parent.parent).resolve()
-    system = platform.system() or "unknown"
+    system = "Windows"
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
     dependencies = {
         package: _module_available(module)
@@ -152,23 +142,13 @@ def run_diagnostics(base_dir: Path | None = None) -> dict[str, Any]:
         "available": False,
         "provider": "none",
     }
-    if system == "Windows" and _module_available("pywinauto"):
+    if _module_available("pywinauto"):
         accessibility = {"available": True, "provider": "pywinauto"}
-    elif system == "Darwin" and shutil.which("osascript"):
-        accessibility = {"available": True, "provider": "osascript"}
-    elif system == "Linux":
-        provider = next(
-            (name for name in ("ydotool", "xdotool", "wmctrl")
-             if shutil.which(name)),
-            None,
-        )
-        if provider:
-            accessibility = {"available": True, "provider": provider}
 
     config_dir = root / "config"
     temp_dir = Path(tempfile.gettempdir())
     config_permission_path = config_dir if config_dir.exists() else root
-    browser = _browser_status(system, dependencies["playwright"])
+    browser = _browser_status(dependencies["playwright"])
     return {
         "system": system,
         "python": {
@@ -182,7 +162,7 @@ def run_diagnostics(base_dir: Path | None = None) -> dict[str, Any]:
             "package": dependencies["sounddevice"],
             "devices_queryable": _audio_available(),
         },
-        "native_tools": _native_tools(system),
+        "native_tools": _native_tools(),
         "optional": _optional_status(),
         "secure_storage": _secure_storage_status(),
         "ui_automation": _ui_automation_status(),
@@ -204,7 +184,7 @@ def _ui_automation_status() -> dict[str, Any]:
         return capabilities().as_dict()
     except (ImportError, AttributeError, OSError, RuntimeError):
         return {
-            "platform": platform.system() or "unknown",
+            "platform": "Windows",
             "available": False,
             "read_only": True,
             "capabilities": [],

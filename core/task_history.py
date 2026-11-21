@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import os
-import platform
 from pathlib import Path
 import tempfile
 import threading
@@ -53,18 +52,12 @@ class HistoryStorageError(RuntimeError):
 
 
 def _history_path() -> Path:
-    if platform.system() == "Windows":
-        base = os.environ.get("LOCALAPPDATA", "").strip()
-        if not base:
-            raise HistoryStorageError("LOCALAPPDATA is not configured")
-        root = Path(base)
-        if not root.is_absolute():
-            raise HistoryStorageError("LOCALAPPDATA is not an absolute path")
-    else:
-        base = os.environ.get("XDG_DATA_HOME", "").strip()
-        root = Path(base) if base else Path.home() / ".local" / "share"
-        if not root.is_absolute():
-            raise HistoryStorageError("the user data directory is not an absolute path")
+    base = os.environ.get("LOCALAPPDATA", "").strip()
+    if not base:
+        raise HistoryStorageError("LOCALAPPDATA is not configured")
+    root = Path(base)
+    if not root.is_absolute():
+        raise HistoryStorageError("LOCALAPPDATA is not an absolute path")
     return root / "MARK-LVI" / "task_history.json"
 
 

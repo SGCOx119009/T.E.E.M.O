@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import ctypes
-import platform
 import re
 import time
 import unicodedata
@@ -62,9 +61,6 @@ def _visible_windows():
 
 
 def _connect_window():
-    if platform.system() != "Windows":
-        return None, "verified WhatsApp Desktop automation is currently Windows-only"
-
     try:
         windows = _visible_windows()
     except Exception as error:
@@ -136,8 +132,6 @@ def _bring_to_front(window) -> bool:
             return True
     except Exception:
         pass
-    if platform.system() != "Windows":
-        return False
     try:
         if not ctypes.windll.user32.SetForegroundWindow(int(window.handle)):
             return False
@@ -195,9 +189,6 @@ def _wait_for_value(getter, expected: str) -> bool:
 
 
 def _send_unicode(text: str) -> bool:
-    if platform.system() != "Windows":
-        return False
-
     class _KeyboardInput(ctypes.Structure):
         _fields_ = [
             ("virtual_key", ctypes.c_ushort),

@@ -5,7 +5,6 @@ import json
 import shutil
 import subprocess
 import time
-import platform
 from pathlib import Path
 from datetime import datetime
 
@@ -16,7 +15,7 @@ from core.undo import push_undo
 # was the only thing using it — see the note below. Nothing here drives the
 # mouse or the keyboard any more; that is computer_control's job.
 
-_OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+_OS = "Windows"
 
 
 def _get_base_dir() -> Path:
@@ -30,10 +29,6 @@ def _get_api_key() -> str:
         return json.load(f)["gemini_api_key"]
     
 def _get_desktop() -> Path:
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_DESKTOP_DIR", "")
-        if xdg and Path(xdg).exists():
-            return Path(xdg)
     return Path.home() / "Desktop"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,9 +110,9 @@ def _unknown(said: str) -> str:
 #      back at once often saw the OLD value, and a change that had worked was
 #      reported as unconfirmed. PNG and WEBP went through a temp BMP, so the
 #      name read back never matched the name that was set. A downloaded
-#      picture was deleted right after being set, which on macOS and Linux
-#      takes the wallpaper away at the next login. And the macOS and Linux
-#      branches threw away every exit code, so a refusal looked like success.
+#      picture was deleted right after being set, which takes the wallpaper
+#      away at the next login. And every branch used to throw away its exit
+#      code, so a refusal looked like success.
 _WIN_NATIVE = {".bmp", ".dib", ".jpg", ".jpeg", ".jfif",
                ".png", ".gif", ".tif", ".tiff"}
 
@@ -129,21 +124,17 @@ def _keep_dir() -> Path:
 
     This used to be `tempfile.mktemp()`, and the file was deleted the moment
     the wallpaper had been set. On Windows that survives by accident, because
-    the shell transcodes the picture into a cache of its own; on macOS and
-    Linux the desktop holds the path itself, so deleting the file takes the
-    wallpaper away with it at the next login. A wallpaper is a file the system
-    needs for as long as it remains the wallpaper.
+    the shell transcodes the picture into a cache of its own; on any desktop
+    that holds the path itself, deleting the file takes the wallpaper away with
+    it at the next login. A wallpaper is a file the system needs for as long
+    as it remains the wallpaper.
 
     It lands beside the user's pictures rather than in the project, so it is
     somewhere they would look.
     """
     pictures = Path.home() / "Pictures"
-    if _OS == "Linux":
-        xdg = os.environ.get("XDG_PICTURES_DIR", "")
-        if xdg and Path(xdg).is_dir():
-            pictures = Path(xdg)
     base = pictures if pictures.is_dir() else _get_base_dir() / "config"
-    keep = base / "Jarvis Wallpapers"
+    keep = base / "T.E.E.M.O. Wallpapers"
     keep.mkdir(parents=True, exist_ok=True)
     return keep
 
@@ -155,7 +146,7 @@ def _transcoded() -> Path:
 
 
 def _prepare(path: Path) -> tuple[Path | None, str]:
-    """The same picture in a format this platform's wallpaper setter accepts.
+    """The same picture in a format the Windows wallpaper setter accepts.
 
     Only the formats Windows genuinely cannot read are converted. The old code
     converted every PNG as well, which was unnecessary — Windows has taken PNG
@@ -164,7 +155,7 @@ def _prepare(path: Path) -> tuple[Path | None, str]:
     the read-back check then compared two unrelated file names and reported a
     successful change as unverified.
     """
-    if _OS != "Windows" or path.suffix.lower() in _WIN_NATIVE:
+    if path.suffix.lower() in _WIN_NATIVE:
         return path, ""
     try:
         from PIL import Image
@@ -190,139 +181,34 @@ def _read_current() -> str:
     is a string parse standing between the tool and the truth.
     """
     try:
-        if _OS == "Windows":
-            import winreg
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                r"Control Panel\Desktop") as key:
-                val, _ = winreg.QueryValueEx(key, "Wallpaper")
-            return str(val or "").strip()
-
-        if _OS == "Darwin":
-            result = subprocess.run(
-                ["osascript", "-e",
-                 'tell application "System Events" to get picture of desktop 1'],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=10,
-            )
-            return result.stdout.strip() if result.returncode == 0 else ""
-
-        env = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-        if "gnome" in env or "unity" in env or "cinnamon" in env:
-            schema = ("org.cinnamon.desktop.background" if "cinnamon" in env
-                      else "org.gnome.desktop.background")
-            result = subprocess.run(
-                ["gsettings", "get", schema, "picture-uri"],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=10,
-            )
-            if result.returncode != 0:
-                return ""
-            raw = result.stdout.strip().strip("'\"")
-            return _clean_path(raw)
-        if "xfce" in env:
-            result = subprocess.run(
-                ["xfconf-query", "-c", "xfce4-desktop", "-p",
-                 "/backdrop/screen0/monitor0/workspace0/last-image"],
-                capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=10,
-            )
-            return result.stdout.strip() if result.returncode == 0 else ""
-        return ""
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Control Panel\Desktop") as key:
+            val, _ = winreg.QueryValueEx(key, "Wallpaper")
+        return str(val or "").strip()
     except Exception:                                       # noqa: BLE001
         return ""
 
 
 def _apply(path: Path) -> str:
-    """Hand the picture to the platform. '' means it was accepted.
+    """Hand the picture to Windows. '' means it was accepted.
 
-    Every branch used to throw its result away — `capture_output=True` with
-    nothing reading it — so a refusal looked exactly like a success. macOS is
-    the case that matters most: System Events needs Automation permission, and
-    without it osascript fails with a message that was being discarded.
+    The exit code used to be thrown away — `capture_output=True` with nothing
+    reading it — so a refusal looked exactly like a success.
     """
     try:
-        if _OS == "Windows":
-            import ctypes
-            user32 = ctypes.windll.user32
-            user32.SystemParametersInfoW.restype = ctypes.c_bool
-            user32.SystemParametersInfoW.argtypes = [
-                ctypes.c_uint, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint
-            ]
-            # SPI_SETDESKWALLPAPER, then write it to the profile and broadcast.
-            ok = user32.SystemParametersInfoW(20, 0, str(path), 0x01 | 0x02)
-            if not ok:
-                code = ctypes.GetLastError()
-                return f"Windows refused the image ({ctypes.WinError(code).strerror})"
-            return ""
-
-        if _OS == "Darwin":
-            script = ('tell application "System Events" to tell every desktop '
-                      f'to set picture to POSIX file "{path}"')
-            result = subprocess.run(["osascript", "-e", script],
-                                    capture_output=True, text=True,
-                                    encoding="utf-8", errors="replace",
-                                    timeout=20)
-            if result.returncode != 0:
-                detail = (result.stderr or "").strip().splitlines()
-                hint = detail[-1] if detail else "osascript refused the request"
-                if "not allowed" in hint.lower() or "-1743" in hint:
-                    hint = ("macOS has not granted this app permission to "
-                            "control System Events - System Settings, Privacy "
-                            "& Security, Automation")
-                return hint
-            return ""
-
-        env = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
-        uri = f"file://{path}"
-
-        def _run(cmd: list[str]) -> str:
-            done = subprocess.run(cmd, capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=20)
-            if done.returncode != 0:
-                return ((done.stderr or done.stdout or "").strip()
-                        or f"{cmd[0]} exited {done.returncode}")
-            return ""
-
-        if "gnome" in env or "unity" in env or "cinnamon" in env:
-            schema = ("org.cinnamon.desktop.background" if "cinnamon" in env
-                      else "org.gnome.desktop.background")
-            err = _run(["gsettings", "set", schema, "picture-uri", uri])
-            if err:
-                return err
-            # Dark mode has its own key since GNOME 42 and a desktop that only
-            # gets the light one changes back the moment the theme flips.
-            _run(["gsettings", "set", schema, "picture-uri-dark", uri])
-            return ""
-
-        if "kde" in env:
-            script = f"""
-var allDesktops = desktops();
-for (var i = 0; i < allDesktops.length; i++) {{
-    d = allDesktops[i];
-    d.wallpaperPlugin = "org.kde.image";
-    d.currentConfigGroup = ["Wallpaper", "org.kde.image", "General"];
-    d.writeConfig("Image", "file://{path}");
-}}
-"""
-            for tool in ("qdbus", "qdbus6", "qdbus-qt6"):
-                if not shutil.which(tool):
-                    continue
-                err = _run([tool, "org.kde.plasmashell", "/PlasmaShell",
-                            "org.kde.PlasmaShell.evaluateScript", script])
-                if not err:
-                    return ""
-            return "Plasma would not accept the wallpaper through qdbus"
-
-        if "xfce" in env:
-            return _run(["xfconf-query", "-c", "xfce4-desktop", "-p",
-                         "/backdrop/screen0/monitor0/workspace0/last-image",
-                         "-s", str(path)])
-
-        if shutil.which("feh"):
-            return _run(["feh", "--bg-scale", str(path)])
-        return (f"this desktop ({env or 'unknown'}) has no wallpaper setter I "
-                f"can drive - installing 'feh' would give me one")
-
+        import ctypes
+        user32 = ctypes.windll.user32
+        user32.SystemParametersInfoW.restype = ctypes.c_bool
+        user32.SystemParametersInfoW.argtypes = [
+            ctypes.c_uint, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint
+        ]
+        # SPI_SETDESKWALLPAPER, then write it to the profile and broadcast.
+        ok = user32.SystemParametersInfoW(20, 0, str(path), 0x01 | 0x02)
+        if not ok:
+            code = ctypes.GetLastError()
+            return f"Windows refused the image ({ctypes.WinError(code).strerror})"
+        return ""
     except FileNotFoundError as e:
         return f"the tool needed to set the wallpaper is not installed: {e}"
     except subprocess.TimeoutExpired:
@@ -359,13 +245,12 @@ def _verify(expected: Path, since: float) -> bool | None:
                 pass
             if Path(reported).name.lower() == expected.name.lower():
                 return True
-        if _OS == "Windows":
-            try:
-                cache = _transcoded()
-                if cache.exists() and cache.stat().st_mtime >= since - 1.0:
-                    return True
-            except OSError:
-                pass
+        try:
+            cache = _transcoded()
+            if cache.exists() and cache.stat().st_mtime >= since - 1.0:
+                return True
+        except OSError:
+            pass
         if time.monotonic() >= deadline:
             break
         time.sleep(0.15)
@@ -375,14 +260,14 @@ def _verify(expected: Path, since: float) -> bool | None:
 def _clean_path(text: str) -> str:
     """A path as the model or a desktop setting hands it over, made usable.
 
-    Quotes around it, `~`, and a `file://` URI - GNOME reports its wallpaper as
-    one, and on Windows `file:///C:/x.jpg` has to lose its leading slash.
+    Quotes around it, `~`, and a `file://` URI - on Windows `file:///C:/x.jpg`
+    has to lose its leading slash.
     """
     from urllib.parse import unquote, urlparse
     raw = str(text or "").strip().strip('"').strip("'").strip()
     if raw.lower().startswith("file://"):
         raw = unquote(urlparse(raw).path)
-        if _OS == "Windows" and len(raw) > 2 and raw[0] == "/" and raw[2] == ":":
+        if len(raw) > 2 and raw[0] == "/" and raw[2] == ":":
             raw = raw[1:]
     return os.path.expanduser(raw)
 
@@ -391,10 +276,9 @@ def set_wallpaper(image_path: str) -> str:
     """Set the wallpaper, then READ IT BACK before saying it worked.
 
     Nothing underneath reports more than "your request was accepted": Windows
-    returns a bool, osascript exits 0 whether or not the picture changed, and
-    `feh` succeeds on a file the compositor then ignores. A wallpaper that did
-    not change is also the one failure the user can see from across the room,
-    so this is checked rather than claimed.
+    returns a bool that says the call was made, not that the picture changed.
+    A wallpaper that did not change is also the one failure the user can see
+    from across the room, so this is checked rather than claimed.
     """
     raw = _clean_path(image_path)
     if not raw:
@@ -532,16 +416,12 @@ FILE_TYPE_MAP = {
     "Executables": {".exe", ".msi", ".bat", ".cmd", ".sh", ".appimage", ".deb", ".rpm"},
 }
 
-_SKIP_EXTENSIONS = {
-    "Windows": {".lnk", ".url"},
-    "Darwin":  {".webloc"},
-    "Linux":   {".desktop"},
-}
+_SKIP_EXTENSIONS = {".lnk", ".url"}
 
 
 def organize_desktop(mode: str = "by_type") -> str:
     desktop       = _get_desktop()
-    skip_exts     = _SKIP_EXTENSIONS.get(_OS, set())
+    skip_exts     = _SKIP_EXTENSIONS
     moved, skipped = [], []
 
     for item in desktop.iterdir():
