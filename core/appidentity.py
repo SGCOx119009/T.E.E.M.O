@@ -315,6 +315,39 @@ def _ancestor_pids() -> set[int]:
     return pids
 
 
+def identity_exes() -> set[str]:
+    """The executables that are unambiguously the assistant ITSELF.
+
+    `self_exes()` also collects the executables of every ANCESTOR, and that
+    is right for one question — "what must never be closed" — and wrong for
+    another one: "is this window the assistant's own?"
+
+    A shell started from File Explorer makes explorer.exe an ancestor. From
+    then on every Explorer window on the machine is the assistant's own
+    window, and the screen agent goes blind to the file manager it was
+    asked to work in. Measured on this machine: four Explorer windows, all
+    refused, every one of them the user's own.
+
+    So identity is narrower: our own binary, and nothing else. A generic
+    interpreter is not an identity either — every other python.exe on the
+    machine is somebody else's script, and claiming it would be the same
+    mistake in a smaller hat.
+    """
+    found: set[str] = set()
+    if sys.executable:
+        stem = fold(os.path.splitext(os.path.basename(sys.executable))[0])
+        if stem and stem not in _GENERIC_INTERPRETERS:
+            found.add(os.path.normcase(sys.executable))
+    return found
+
+
+# Interpreters are not identities. Two processes running python.exe are two
+# different programs that happen to share a file name.
+_GENERIC_INTERPRETERS = frozenset({
+    "python", "pythonw", "python3", "py", "pypy", "ipython",
+})
+
+
 def self_exes() -> set[str]:
     """The executables the assistant IS, lowercased — never the ones it starts.
 

@@ -253,7 +253,13 @@ class BehaviourUnchangedTests(unittest.TestCase):
         self.assertEqual(eager.declarations(), before)
 
     def test_the_bundled_actions_keep_their_names(self) -> None:
-        """The nineteen bundled actions, with the names they have always had."""
+        """The bundled actions, with the names they have always had.
+
+        `screen_mark` is the twentieth-something: it arrived with FASE 6,
+        the grounding layer, and it is here because the list is a
+        tripwire — it must change when a tool is ADDED ON PURPOSE, and it
+        must never change by accident.
+        """
         actions = discover_actions(BASE / "actions", logger=lambda m: None, eager=False)
         self.assertEqual(
             sorted(actions.names()),
@@ -262,8 +268,8 @@ class BehaviourUnchangedTests(unittest.TestCase):
                 "computer_control", "computer_settings", "desktop_control",
                 "dev_agent", "file_controller", "file_processor", "flight_finder",
                 "game_updater", "meet_control", "open_app", "reminder", "routines",
-                "send_message", "task_planner", "video_player", "weather_report",
-                "web_search", "youtube_video",
+                "screen_mark", "send_message", "task_planner", "video_player",
+                "weather_report", "web_search", "youtube_video",
             ]),
         )
 

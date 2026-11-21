@@ -90,6 +90,7 @@ _READ_ONLY_VERIFICATION_ACTIONS = {
     "computer_control": {
         "inspect_windows", "inspect_controls", "read_control",
     },
+    "screen_mark": {"observe"},
     "file_processor": {
         "extract_preview", "search",
     },
@@ -129,6 +130,17 @@ _ACTION_RISK = {
         "play_pause": "state_change",
         "next": "state_change",
         "previous": "state_change",
+    },
+    "screen_mark": {
+        # Looking at the screen and naming what is on it changes nothing.
+        "observe": "read_or_navigate",
+        # Acting on a NAMED element is a state change, and not more than
+        # that: it presses one control the user could have pressed. The
+        # grounding layer refuses the assistant's own controls and secret
+        # fields, and the executor's own guards still apply underneath.
+        "click": "state_change",
+        "type": "state_change",
+        "focus": "state_change",
     },
     "video_player": {
         "play": "state_change",

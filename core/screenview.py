@@ -655,6 +655,27 @@ def _physical_to_logical() -> float:
     return 1.0
 
 
+def physical_to_logical() -> float:
+    """Public name for the physical->logical multiplier.
+
+    The grounding layer needs it too, and it is the number that decides
+    whether a click lands on the control the model was shown or on the one
+    that happens to be there. Exposed rather than duplicated so that there is
+    one measurement of the display and not two.
+    """
+    return _physical_to_logical()
+
+
+def has_uia() -> bool:
+    """Is the accessibility backend usable on this machine?"""
+    return bool(_HAS_PYWINAUTO)
+
+
+def has_ocr() -> bool:
+    """Is there an OCR engine that can read words out of a picture?"""
+    return bool(_HAS_OCR)
+
+
 def _logical_screen() -> tuple[int, int, int, int]:
     """The desktop in the coordinate space the mouse is driven in."""
     if _HAS_PYAUTOGUI:
@@ -835,6 +856,50 @@ _UIA_TEXT_LIMIT = 400          # a document can be a novel; a postcondition is n
 # element for nothing.
 _TEXTUAL_ROLES = frozenset({ROLE_EDIT, ROLE_COMBOBOX, ROLE_TEXT, ROLE_SLIDER})
 
+# The COM type library, loaded once. It is a GENERATED module: the first
+# import of it builds the wrapper classes, and that costs about 190
+# milliseconds. Cached here so that cost is paid once per session instead
+# of once per process that happens to be the first one to ask.
+_UIA_CLIENT: Any = None
+
+
+def _uia_client() -> Any:
+    """The UIAutomationClient type library, or None when it is unavailable."""
+    global _UIA_CLIENT
+    if _UIA_CLIENT is None:
+        try:
+            from comtypes.gen import UIAutomationClient as _client
+            _UIA_CLIENT = _client
+        except Exception:
+            _UIA_CLIENT = False
+    return _UIA_CLIENT or None
+
+
+def warm_up() -> None:
+    """Load the accessibility machinery once, outside anyone's budget.
+
+    The first UI Automation query in a process pays for importing
+    pywinauto and for generating the COM type library — measured here,
+    190 milliseconds for the type library alone. That is the cost of the
+    SESSION, not the cost of a query, and it must not be charged to the
+    budget of an observation: measured with it inside, the walk stopped
+    after three elements because the fourth one arrived after the deadline.
+    """
+    _uia_client()
+    try:
+        from pywinauto.uia_element_info import UIAElementInfo  # noqa: F401
+    except Exception:
+        pass
+    # The automation object itself. Creating it is a CoCreateInstance, and
+    # it is created ONCE — on the thread that asks for it first. That is
+    # why this half of the warm-up is NOT done in the background: a COM
+    # object belongs to the apartment of the thread that made it.
+    try:
+        from pywinauto.uia_defines import IUIA
+        IUIA().iuia
+    except Exception:
+        pass
+
 
 def _uia_value(info: Any, role: str, name: str) -> str:
     """What a control currently CONTAINS, as opposed to what it is called.
@@ -871,10 +936,7 @@ def _uia_value(info: Any, role: str, name: str) -> str:
     if raw is None:
         return ""
 
-    try:
-        from comtypes.gen import UIAutomationClient as _UIA
-    except Exception:
-        _UIA = None
+    _UIA = _uia_client()
 
     if _UIA is not None:
         try:
@@ -984,6 +1046,19 @@ def _element_from_uia(info: Any, eid: int, depth: int, scale: float) -> Optional
         scrollable=role in (ROLE_LIST, ROLE_TABLE, ROLE_TREE, ROLE_GROUP),
         depth=depth, protected=protected,
     )
+
+
+def element_from_uia(info: Any, eid: int, depth: int,
+                     scale: float) -> Optional[Element]:
+    """Public name for the UIA node -> Element conversion.
+
+    The grounding layer walks the tree itself — it needs the automation id
+    and the owning process of every node, which this function does not
+    carry — but it must not have its own copy of the role mapping, the size
+    filter or the password rule. Those live here, once, and the grounding
+    layer borrows them.
+    """
+    return _element_from_uia(info, eid, depth, scale)
 
 
 # ---------------------------------------------------------------------------
@@ -1306,8 +1381,16 @@ def _is_own_window(pid: int) -> bool:
     The pid comparison answers it for every ordinary run, packaged or from
     source, because the interface and this code live in one process. The
     executable comparison behind it catches the case where they do not — a
-    future split, a helper that owns a window — and it is free, because
-    appidentity caches its answer for the life of the process.
+    packaged build whose interface is a separate process with its own
+    binary — and it is free, because appidentity caches its answer for the
+    life of the process.
+
+    The executable it compares against is `identity_exes()` and NOT
+    `self_exes()`. The second one also contains the executables of every
+    ANCESTOR, and that made a shell started from File Explorer turn
+    explorer.exe into "the assistant": four Explorer windows on this
+    machine, all of them the user's own, all of them refused. The screen
+    agent was blind to the file manager it was being asked to work in.
 
     Cheap on purpose: this runs before every single look.
     """
@@ -1317,13 +1400,12 @@ def _is_own_window(pid: int) -> bool:
         return True
     try:
         import psutil
-        # self_exes(), not own_exes(): the second one includes whatever this
-        # process has launched, so after opening Chrome it would answer that
-        # every Chrome window on the machine is the assistant's own and refuse
-        # to read any of them. Which is exactly what it did.
-        from core.appidentity import self_exes
+        from core.appidentity import identity_exes
+        identities = identity_exes()
+        if not identities:
+            return False
         exe = psutil.Process(int(pid)).exe()
-        return bool(exe) and os.path.normcase(exe) in self_exes()
+        return bool(exe) and os.path.normcase(exe) in identities
     except Exception:
         return False
 
@@ -1367,6 +1449,41 @@ def window_pid_at(x: int, y: int) -> int:
         return int(pid.value)
     except Exception:
         return 0
+
+
+def own_window_handles() -> set[int]:
+    """The window handles of the assistant's own visible windows.
+
+    This is the precise question — "is THIS window ours" — as opposed to
+    "is this process somewhere in our ancestry", which is a different
+    question with a much worse answer. The grounding layer uses it to
+    decide what may never be clicked.
+    """
+    me = os.getpid()
+    found: set[int] = set()
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.WinDLL("user32")
+        callback = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND,
+                                      wintypes.LPARAM)
+
+        def visit(hwnd, _param):
+            try:
+                if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+                    return True
+                pid = wintypes.DWORD(0)
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if int(pid.value) == me:
+                    found.add(int(hwnd))
+            except Exception:
+                pass
+            return True
+
+        user32.EnumWindows(callback(visit), 0)
+        return found
+    except Exception:
+        return found
 
 
 def own_window_rects() -> list[tuple[int, int, int, int]]:

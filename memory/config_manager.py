@@ -709,6 +709,23 @@ def get_brief_enabled() -> bool:
     return load_api_keys().get("morning_brief_enabled", True)
 
 
+def get_grounding_vlm_enabled() -> bool:
+    """May the grounding model (level N2) be used?
+
+    OFF by default. It is the only grounding level that spends tokens and
+    the only one that reads pixels as if they were instructions, so turning
+    it on is the user's decision and not a side effect of installing
+    something.
+    """
+    return bool(load_api_keys().get("grounding_vlm_enabled", False))
+
+
+@_locked
+def save_grounding_vlm_enabled(enabled: bool) -> None:
+    ensure_config_dir()
+    _save_flag("grounding_vlm_enabled", bool(enabled))
+
+
 @_locked
 def save_brief_enabled(enabled: bool) -> None:
     ensure_config_dir()

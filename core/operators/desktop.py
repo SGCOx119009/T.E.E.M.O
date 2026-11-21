@@ -36,6 +36,7 @@ class DesktopOperator(Operator):
         "computer_control",
         "desktop_control",
         "open_app",
+        "screen_mark",
         "task_planner",
         "background_tasks",
         "system_status",

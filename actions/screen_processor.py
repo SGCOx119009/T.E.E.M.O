@@ -90,15 +90,42 @@ def _compress(img_bytes: bytes, source_format: str = "PNG") -> tuple[bytes, str]
 
 
 def _capture_screen() -> tuple[bytes, str]:
+    """A picture of the screen, or a RuntimeError that says what happened.
 
+    THE CAPTURE CAN BE REFUSED, AND THAT IS NOT A BUG
+        Windows puts the desktop on a different surface while a UAC prompt
+        is up, and a screen capture on that surface is denied. The denial
+        arrives as `BitBlt: Acceso denegado` from the graphics stack, and
+        the moment it does is the moment the assistant is most likely to be
+        looking at the screen — because the user just clicked "Yes".
+
+        Unhandled, that exception walked all the way up through the tool
+        dispatcher and took the turn with it: a traceback on the console
+        and no answer to the user. So it is caught here, named, and
+        re-raised as something that says what to do about it.
+    """
     if not _MSS:
         raise RuntimeError("mss is not installed. Run: pip install mss")
 
-    with mss.mss() as sct:
-        monitors = sct.monitors          # [0] = all combined, [1..n] = real screens
-        target   = monitors[1] if len(monitors) > 1 else monitors[0]
-        shot     = sct.grab(target)
-        png      = mss.tools.to_png(shot.rgb, shot.size)
+    try:
+        with mss.mss() as sct:
+            monitors = sct.monitors      # [0] = all combined, [1..n] = real screens
+            target   = monitors[1] if len(monitors) > 1 else monitors[0]
+            shot     = sct.grab(target)
+            png      = mss.tools.to_png(shot.rgb, shot.size)
+    except PermissionError as exc:
+        raise RuntimeError(
+            "Windows refused the screen capture. A security prompt is on "
+            "screen, or the session is locked; answer it and try again."
+        ) from exc
+    except OSError as exc:
+        # WinError 5 is "Access denied" and arrives here on the secure
+        # desktop; anything else in this family is the same story told
+        # with different words.
+        raise RuntimeError(
+            f"the screen could not be captured ({exc}). A security prompt "
+            f"may be on screen, or the session may be locked."
+        ) from exc
 
     return _compress(png, "PNG")
 
