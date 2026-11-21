@@ -17,7 +17,7 @@ class InputValidationTests(unittest.TestCase):
             computer_control._screen_click_history.clear()
 
     def _run_core_tool(self, name: str, args: object):
-        dispatcher = object.__new__(main.JarvisLive)
+        dispatcher = object.__new__(main.TeemoLive)
         dispatcher.ui = SimpleNamespace(
             muted=False,
             set_state=lambda _state: None,

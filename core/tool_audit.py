@@ -26,7 +26,7 @@ _EXTERNAL_TOOLS = {
 }
 _TOOL_RISK = {
     "dev_agent": "high",
-    "shutdown_jarvis": "high",
+    "shutdown_teemo": "high",
     "flight_finder": "read_or_navigate",
     "reminder": "high",
     "screen_process": "read_or_navigate",

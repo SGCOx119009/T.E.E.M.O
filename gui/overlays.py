@@ -1,6 +1,6 @@
 """gui/overlays.py — Panels that open over the HUD: setup, customise, plugins, confirm, audio, memory, remote.
 
-Split out of ui.py in Mark LVII; behaviour unchanged."""
+Split out of ui.py in the previous chassis; behaviour unchanged."""
 from __future__ import annotations
 
 import json
@@ -673,11 +673,11 @@ class ConfirmBanner(_HudOverlay):
 
 
 class AudioDeviceOverlay(_HudOverlay):
-    """Choose which microphone JARVIS listens to and which speakers it uses.
+    """Choose which microphone the assistant listens to and which speakers it uses.
 
     Both audio streams used to open with no `device=` at all, so they always
     took the OS default — which on Windows moves by itself the moment a headset
-    is plugged in. 'JARVIS can't hear me' is usually 'JARVIS is listening to the
+    is plugged in. 'it can't hear me' is usually 'it is listening to the
     webcam'."""
 
     picked = pyqtSignal()      # emitted after Apply, when something changed
@@ -777,7 +777,7 @@ class AudioDeviceOverlay(_HudOverlay):
             # speaking into it.
             #
             # So the button is here, beside the dropdown, in the panel somebody
-            # opens when JARVIS cannot hear them. It replaces a loose
+            # opens when the assistant cannot hear them. It replaces a loose
             # `ses_testi.py` in the project root that nobody would ever find.
             btn_row = QHBoxLayout(); btn_row.setSpacing(6)
             btn_row.addWidget(box, 1)
@@ -823,10 +823,10 @@ class AudioDeviceOverlay(_HudOverlay):
         self._level_seen.connect(self._on_level)
         self._test_result.connect(self._on_result)
 
-        self._in_box  = _row("MICROPHONE — what JARVIS hears you with",
+        self._in_box  = _row("MICROPHONE — what the assistant hears you with",
                              "input", get_input_device())
         lay.addSpacing(4)
-        self._out_box = _row("SPEAKERS — what JARVIS talks through",
+        self._out_box = _row("SPEAKERS — what the assistant talks through",
                              "output", get_output_device())
 
         # ── Output volume, beside the output device ──────────────────────────
@@ -962,7 +962,7 @@ class AudioDeviceOverlay(_HudOverlay):
 
         Both calls block for seconds — recording waits for the user to speak,
         the tone waits for itself — and doing that on the Qt thread freezes the
-        HUD, which is the mistake Mark LV already paid for once with a 2.1
+        HUD, which is the mistake an earlier chassis already paid for once with a 2.1
         second wake-word import in the settings drawer.
 
         Results come back by signal, not by timer. See the note on
@@ -1033,7 +1033,7 @@ class AudioDeviceOverlay(_HudOverlay):
 
 
 class MemoryOverlay(_HudOverlay):
-    """Everything JARVIS has stored about you, and when it learned it.
+    """Everything the assistant has stored about you, and when it learned it.
 
     Memory used to be a 2200-character store that deleted its oldest entries
     when full and mentioned it only on stdout. The cap is gone; this panel is
@@ -1127,7 +1127,7 @@ class MemoryOverlay(_HudOverlay):
 
         from memory.memory_manager import all_entries_for_ui
 
-        hdr = QLabel("🧠  WHAT JARVIS REMEMBERS")
+        hdr = QLabel("🧠  WHAT THE ASSISTANT REMEMBERS")
         hdr.setFont(hud_font(12, QFont.Weight.Bold))
         hdr.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         self._lay.addWidget(hdr)
@@ -1258,7 +1258,7 @@ class _ScrollSafeCombo(QComboBox):
 
 
 class ClipboardPanel(QWidget):
-    """Floating panel shown when text is copied — offers quick Jarvis actions."""
+    """Floating panel shown when text is copied — offers quick assistant actions."""
 
     action_requested = pyqtSignal(str)
     _W, _H = 326, 112
@@ -1686,7 +1686,7 @@ class RemoteKeyOverlay(QWidget):
         if _blocked:
             warn = _lbl(
                 "⚠  Windows is blocking incoming connections to this copy of "
-                "Python, so your phone cannot reach this page. Restart JARVIS "
+                "Python, so your phone cannot reach this page. Restart the assistant "
                 "and accept the Windows prompt, or remove the rules named "
                 + ", ".join(sorted({n for n, _ in _blocked}))
                 + " under Windows Defender Firewall → Inbound Rules.",
@@ -1825,7 +1825,7 @@ class RemoteKeyOverlay(QWidget):
         self._qr_label.setStyleSheet(
             "color: #00ff88; background: #001a0d; border-radius: 10px;"
         )
-        self._timer_lbl.setText("Phone connected — JARVIS ready")
+        self._timer_lbl.setText("Phone connected — assistant ready")
         self._timer_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
 
     def _refresh_key(self):

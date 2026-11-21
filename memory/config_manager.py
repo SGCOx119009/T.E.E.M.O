@@ -481,7 +481,7 @@ def save_voice(voice_name: str) -> None:
 
 
 def get_wake_word_enabled() -> bool:
-    """Whether local wake-word gating is on (assistant sleeps until 'Hey Jarvis')."""
+    """Whether local wake-word gating is on (the assistant sleeps until called)."""
     return load_api_keys().get("wake_word_enabled", False)
 
 
@@ -490,6 +490,65 @@ def save_wake_word_enabled(enabled: bool) -> None:
     ensure_config_dir()
     data = _read_for_write()
     data["wake_word_enabled"] = bool(enabled)
+    _write_config(data)
+
+
+# ── Wake phrase ─────────────────────────────────────────────────────────────
+# The words the assistant answers to. It is ours, and it is configurable: the
+# default lives in core.wake_word.DEFAULT_WAKE_PHRASE and is imported rather
+# than repeated, so there is exactly one place that says what the phrase is.
+DEFAULT_WAKE_PHRASE = "Hey T.E.E.M.O"
+
+
+def get_wake_phrase() -> str:
+    """The configured wake phrase, or the default when it is unset.
+
+    An empty or whitespace-only value falls back to the default: a wake
+    phrase made of spaces would silently disable the feature while leaving
+    the button looking enabled, which is the kind of silence nobody can
+    debug.
+    """
+    try:
+        from core.wake_word import DEFAULT_WAKE_PHRASE as _default
+    except Exception:
+        _default = DEFAULT_WAKE_PHRASE
+    value = str(load_api_keys().get("wake_phrase") or "").strip()
+    return value or _default
+
+
+@_locked
+def save_wake_phrase(phrase: str) -> None:
+    """Persist the wake phrase. An empty value restores the default."""
+    ensure_config_dir()
+    data = _read_for_write()
+    value = (phrase or "").strip()
+    if value:
+        data["wake_phrase"] = value
+    else:
+        data.pop("wake_phrase", None)
+    _write_config(data)
+
+
+def get_wake_model() -> str:
+    """Path of a custom wake model file, or "" to use the pretrained default.
+
+    The pretrained model was trained for a phrase that is no longer this
+    product's name; a model trained for the configured phrase can be dropped
+    in here and is loaded exactly as the default one is.
+    """
+    return str(load_api_keys().get("wake_model") or "").strip()
+
+
+@_locked
+def save_wake_model(path: str) -> None:
+    """Persist (or clear) the path of a custom wake model."""
+    ensure_config_dir()
+    data = _read_for_write()
+    value = (path or "").strip()
+    if value:
+        data["wake_model"] = value
+    else:
+        data.pop("wake_model", None)
     _write_config(data)
 
 
@@ -509,7 +568,7 @@ def get_hud_style() -> str:
     """Which centrepiece the HUD draws: the animated head, or the reactor core.
 
     Taste, not capability — both render in the same software painter and cost
-    about the same. Defaults to the head because that is what MARK LIV shipped
+    about the same. Defaults to the head because that is what the earlier chassis shipped
     with; anyone who preferred the older look can switch back in ⚙ and the
     choice survives a restart.
     """

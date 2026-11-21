@@ -1,5 +1,11 @@
 # T.E.E.M.O. — análisis estático de Torvis
 
+> **Nota sobre los nombres propios de este documento.** "Torvis" es el producto
+> ajeno que este análisis describe; "MARK LVII" es la carpeta de referencia
+> que hay en disco (`Mark-LVII-main`), no el nombre de este producto, que es
+> **T.E.E.M.O.** Ninguna de las dos menciones es una marca de identidad de
+> T.E.E.M.O., y por eso sobreviven a la auditoría de nomenclatura.
+
 ## Alcance
 
 Este documento registra observaciones hechas sobre la instalación local de

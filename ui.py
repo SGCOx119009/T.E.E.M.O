@@ -1,7 +1,7 @@
 """ui.py — the entry point to the HUD.
 
-Mark LVII moved the implementation into the gui/ package. This file keeps
-JarvisUI — the object main.py builds and every plugin receives as `player` —
+The previous chassis moved the implementation into the gui/ package. This file keeps
+TeemoUI — the object main.py builds and every plugin receives as `player` —
 and re-exports every name ui.py has ever defined, so `from ui import X`
 written against an older Mark still finds X here.
 """
@@ -96,7 +96,7 @@ def _apply_ui_scale() -> None:
         os.environ["QT_SCALE_FACTOR"] = f"{scale:.2f}"
 
 
-class JarvisUI:
+class TeemoUI:
     def __init__(self, face_path: str, size=None):
         _apply_ui_scale()
         self._app = QApplication.instance() or QApplication(sys.argv)
@@ -241,7 +241,7 @@ class JarvisUI:
 
     def push_visemes(self, frames, hop: float, at: float) -> None:
         """Thread-safe: post a schedule of (level, openness, width) mouth frames
-        for JARVIS's own speech. `at` is the wall-clock time the batch begins to
+        for the assistant's own speech. `at` is the wall-clock time the batch begins to
         sound, not the time of the call. See HudCanvas.push_visemes()."""
         try:
             self._win.hud.push_visemes(frames, hop, at)
@@ -274,7 +274,7 @@ class JarvisUI:
 
         `grade(question, given)` decides each answer — the plugin supplies it so
         the marking rules live with the questions rather than being duplicated
-        here. Returning None from it means "JARVIS should judge this one", which
+        here. Returning None from it means "the assistant should judge this one", which
         is how open answers and near-miss gap-fills are handled.
 
         Returns immediately: the user answers at their own pace and the finished
@@ -315,7 +315,7 @@ class JarvisUI:
         together and kept in step.
 
         Muted by default, and that is a decision rather than a default: a
-        soundtrack talking over JARVIS is the one way this could make the
+        soundtrack talking over the assistant is the one way this could make the
         assistant worse. The user turns sound on from the header button or by
         asking, and closes it the same two ways.
         """
@@ -331,7 +331,7 @@ class JarvisUI:
 
         `generate_image` has been calling this method by name since it was
         written, against the possibility that it would one day exist. It does
-        now, so a picture JARVIS draws appears on the HUD instead of only in a
+        now, so a picture the assistant draws appears on the HUD instead of only in a
         folder.
         """
         self._win._image_open_sig.emit(str(path or ""), str(title or ""))

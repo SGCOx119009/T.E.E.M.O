@@ -16,7 +16,7 @@ class BrowserProfileSafetyTests(unittest.TestCase):
                 profile = Path(browser_control._automation_profile_dir("chrome"))
 
             self.assertEqual(
-                profile, home_path / ".jarvis_profiles" / "chrome"
+                profile, home_path / ".teemo_profiles" / "chrome"
             )
             self.assertTrue(profile.is_dir())
             self.assertNotEqual(profile, home_path / "AppData" / "Local")

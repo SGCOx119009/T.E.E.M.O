@@ -1,7 +1,7 @@
-"""The HUD, split out of ui.py in Mark LVII.
+"""The HUD, split out of ui.py in the previous chassis.
 
 ui.py is still the entry point and still exports every name it always did,
-so main.py, plugins and anything written against Mark LVI keep working.
+so main.py, plugins and anything written against earlier versions keep working.
 """
 import os
 

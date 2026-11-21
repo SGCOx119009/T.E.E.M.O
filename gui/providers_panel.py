@@ -1,6 +1,6 @@
 """gui/providers_panel.py — ENGINE & PROVIDERS — the panel that chooses what holds the conversation.
 
-Split out of ui.py in Mark LVII; behaviour unchanged."""
+Split out of ui.py in the previous chassis; behaviour unchanged."""
 from __future__ import annotations
 
 import inspect
@@ -938,7 +938,7 @@ class ProvidersOverlay(_HudOverlay):
         w, lay = self._box([head])
         lay.addWidget(self._label(
             "The model that plans, writes and fixes projects when you ask the "
-            "assistant to build something. Saved to Desktop/JarvisProjects.",
+            "assistant to build something. Saved to Desktop/TEEMO Projects.",
             7, C.TEXT_DIM))
 
         sid = self._coding

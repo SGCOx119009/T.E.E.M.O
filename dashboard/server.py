@@ -1,5 +1,5 @@
 """
-dashboard/server.py — JARVIS Local HTTP Dashboard
+dashboard/server.py — T.E.E.M.O. Local HTTP Dashboard
 
 HTTPS on port 8000 with a self-signed certificate generated on first run, plus
 a second layer inside it: commands are encrypted with AES-256-GCM under a key
@@ -104,8 +104,8 @@ class _CommandThrottle:
 def _make_uploads_dir() -> Path:
     """Return (and create) the cross-platform uploads folder."""
     for candidate in [
-        Path.home() / "Downloads" / "JARVIS Uploads",
-        Path.home() / "Documents" / "JARVIS Uploads",
+        Path.home() / "Downloads" / "T.E.E.M.O. Uploads",
+        Path.home() / "Documents" / "T.E.E.M.O. Uploads",
         BASE_DIR / "uploads",
     ]:
         try:
@@ -130,7 +130,7 @@ _KEY_CHARS = [c for c in (string.ascii_uppercase + string.digits)
               if c not in ('O', 'I', 'L', '0', '1')]
 
 # ── AES-256-CBC ───────────────────────────────────────────────────────────────
-_AES_SALT = b'JARVIS-DASHBOARD-v1'
+_AES_SALT = b'T.E.E.M.O.-DASHBOARD-v1'
 
 
 # Rounds for the pairing key -> AES key derivation.
@@ -307,8 +307,8 @@ def _ensure_network_access(*ports: int) -> None:
         # elevation once per port — two UAC dialogs for one dashboard, and two
         # racing .bat files whose output interleaved into contradictory
         # messages on the console.
-        port_rules = {pt: f"JARVIS Dashboard Port {pt}" for pt in ports}
-        prog_rule  = "JARVIS Dashboard Python"
+        port_rules = {pt: f"T.E.E.M.O. Dashboard Port {pt}" for pt in ports}
+        prog_rule  = "T.E.E.M.O. Dashboard Python"
 
         # BOTH interpreters, because the app runs under either one.
         #
@@ -359,7 +359,7 @@ def _ensure_network_access(*ports: int) -> None:
         if _network_is_public():
             print("[Dashboard] This network is set to Public in Windows, which "
                   "blocks phones on it. If it is your own network, set it to "
-                  "Private in Settings > Network & internet. JARVIS will not "
+                  "Private in Settings > Network & internet. T.E.E.M.O. will not "
                   "change that for you — on public Wi-Fi it would expose this "
                   "computer.")
         need_private = False
@@ -415,12 +415,12 @@ def _ensure_network_access(*ports: int) -> None:
         # Say what will be attempted, so a UAC prompt nobody expected has a
         # reason attached to it in the terminal.
         if blocked:
-            print("[Dashboard] The Windows prompt about to appear is JARVIS "
+            print("[Dashboard] The Windows prompt about to appear is T.E.E.M.O. "
                   "removing those block rules. Declining it leaves the phone "
                   "dashboard unreachable, and nothing else is affected.")
 
         bat_body = "\r\n".join(bat_lines) + "\r\n"
-        fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="jarvis_fw_")
+        fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="teemo_fw_")
         try:
             os.write(fd, bat_body.encode("mbcs"))   # Windows cmd.exe expects ANSI
             os.close(fd)
@@ -486,11 +486,11 @@ def _ensure_network_access(*ports: int) -> None:
                           "until this is done: Windows has block rules for "
                           + ", ".join(sorted({n for n, _ in blocked}))
                           + " which override every allow rule.")
-                    print("[Dashboard] Either restart JARVIS and accept the "
+                    print("[Dashboard] Either restart T.E.E.M.O. and accept the "
                           "prompt, or delete those rules in Windows Defender "
                           "Firewall > Inbound Rules.")
                 else:
-                    print("[Dashboard] Phone connections may fail until JARVIS "
+                    print("[Dashboard] Phone connections may fail until T.E.E.M.O. "
                           "is run as Administrator.")
         except Exception as e:
             print(f"[Dashboard] Firewall setup error: {e}")
@@ -557,8 +557,8 @@ def _ensure_certs() -> bool:
     plain HTTP, which still works — the QR code simply encodes http:// instead.
     """
     certs = BASE_DIR / "config" / "certs"
-    key_p = certs / "jarvis.key"
-    crt_p = certs / "jarvis.crt"
+    key_p = certs / "teemo.key"
+    crt_p = certs / "teemo.crt"
     if key_p.exists() and crt_p.exists():
         return True
 
@@ -579,8 +579,8 @@ def _ensure_certs() -> bool:
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
         who = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, "JARVIS Dashboard"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "JARVIS"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "T.E.E.M.O. Dashboard"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "T.E.E.M.O."),
         ])
 
         # The SAN has to cover every address the phone might use: the LAN IP the
@@ -772,7 +772,7 @@ class DashboardServer:
         except Exception:
             return False
         certs = BASE_DIR / "config" / "certs"
-        return (certs / "jarvis.key").exists() and (certs / "jarvis.crt").exists()
+        return (certs / "teemo.key").exists() and (certs / "teemo.crt").exists()
 
     def get_url(self) -> str:
         """The full URL the QR code carries — always with its scheme, so a
@@ -966,7 +966,7 @@ class DashboardServer:
   h2{color:#f87171;margin-bottom:12px}p{color:#5e6a7e;font-size:14px}
 </style></head>
 <body><div><h2>Link Expired</h2>
-<p>Press <strong style="color:#dde3ed">Remote Control</strong> in JARVIS to get a new QR code.</p>
+<p>Press <strong style="color:#dde3ed">Remote Control</strong> in T.E.E.M.O. to get a new QR code.</p>
 </div></body></html>""")
 
             del self._pending_keys[key]
@@ -992,12 +992,12 @@ class DashboardServer:
 </style></head>
 <body>
 <script>
-  sessionStorage.setItem('jarvis_token','{tok}');
-  sessionStorage.setItem('jarvis_key','{key}');
-  localStorage.setItem('jarvis_device_token','{dev_tok}');
+  sessionStorage.setItem('teemo_token','{tok}');
+  sessionStorage.setItem('teemo_key','{key}');
+  localStorage.setItem('teemo_device_token','{dev_tok}');
   setTimeout(function(){{location.replace('/')}},400);
 </script>
-<p>Connecting to JARVIS…</p>
+<p>Connecting to T.E.E.M.O.…</p>
 </body></html>""")
 
         @app.post("/api/device-login")
@@ -1336,8 +1336,8 @@ class DashboardServer:
             return
 
         use_ssl  = self._ssl_enabled()
-        ssl_key  = BASE_DIR / "config" / "certs" / "jarvis.key"
-        ssl_cert = BASE_DIR / "config" / "certs" / "jarvis.crt"
+        ssl_key  = BASE_DIR / "config" / "certs" / "teemo.key"
+        ssl_cert = BASE_DIR / "config" / "certs" / "teemo.crt"
 
         # TLS IS WANTED, BUT NOT AT THE COST OF NOT STARTING.
         #
@@ -1371,7 +1371,7 @@ class DashboardServer:
         # CAN THIS PORT ACTUALLY BE TAKEN?
         #
         # uvicorn raises when the port is busy, and under pythonw.exe there is
-        # no console for that to be seen in — so a second JARVIS, or anything
+        # no console for that to be seen in — so a second instance, or anything
         # else already on 8000, produced a dashboard that was silently dead
         # while the HUD went on showing a QR code pointing at it. The phone
         # then reports ERR_CONNECTION_REFUSED, which is true and impossible to
@@ -1389,7 +1389,7 @@ class DashboardServer:
             _probe.close()
             self._bind_error = (
                 f"port {SECURE_PORT if use_ssl else PORT} is already in use — "
-                f"another copy of JARVIS is probably running. Close it and "
+                f"another copy of the assistant is probably running. Close it and "
                 f"restart, or the phone dashboard will stay unreachable "
                 f"({exc.__class__.__name__})")
             print(f"[Dashboard] {self._bind_error}")
@@ -1397,5 +1397,5 @@ class DashboardServer:
         _probe.close()
 
         print(f"[Dashboard] {self.get_url()}")
-        print("[Dashboard] Press 'Remote Control' in JARVIS UI to get the QR code.")
+        print("[Dashboard] Press 'Remote Control' in the T.E.E.M.O. UI to get the QR code.")
         await uvicorn.Server(cfg).serve()

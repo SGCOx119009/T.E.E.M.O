@@ -134,7 +134,7 @@
 </head>
 <body>
   <div class="card" id="card">
-    <div class="logo"><em>J</em>ARVIS</div>
+    <div class="logo"><em>T</em>E.E.M.O.</div>
     <div class="sub">Remote Access</div>
     <p id="reconnecting">Reconnecting…</p>
     <p class="hint">Press <strong style="color:var(--text)">Remote Control</strong> in the T.E.E.M.O. desktop app to get a QR code or session key.</p>
@@ -155,7 +155,7 @@
   <script>
     // Try auto-reconnect with stored device token (set on first QR login)
     (async function() {
-      const devTok = localStorage.getItem('jarvis_device_token');
+      const devTok = localStorage.getItem('teemo_device_token');
       if (!devTok) return;
       document.getElementById('reconnecting').style.display = 'block';
       try {
@@ -166,14 +166,14 @@
         });
         const d = await r.json();
         if (d.ok && d.token) {
-          sessionStorage.setItem('jarvis_key', d.key);
-          sessionStorage.setItem('jarvis_token', d.token);
+          sessionStorage.setItem('teemo_key', d.key);
+          sessionStorage.setItem('teemo_token', d.token);
           location.replace('/');
           return;
         }
       } catch (_) {}
       // Device token rejected (server restarted) — clear it and show normal form
-      localStorage.removeItem('jarvis_device_token');
+      localStorage.removeItem('teemo_device_token');
       document.getElementById('reconnecting').style.display = 'none';
     })();
 
@@ -202,8 +202,8 @@
         shake(); return;
       }
       if (data.ok && data.token) {
-        sessionStorage.setItem('jarvis_key', key);
-        sessionStorage.setItem('jarvis_token', data.token);
+        sessionStorage.setItem('teemo_key', key);
+        sessionStorage.setItem('teemo_token', data.token);
         location.href = '/';
       } else {
         inp.value = '';

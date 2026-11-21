@@ -1,6 +1,6 @@
 """gui/window.py — MainWindow — lays the HUD out and owns every signal the rest of the app talks to.
 
-Split out of ui.py in Mark LVII; behaviour unchanged."""
+Split out of ui.py in the previous chassis; behaviour unchanged."""
 from __future__ import annotations
 
 import json
@@ -143,13 +143,13 @@ class MainWindow(QMainWindow):
 
         self.on_text_command   = None
         self.on_remote_clicked = None   # callable: () -> (url, key) | None
-        self.on_interrupt      = None   # callable: () -> None — stop JARVIS mid-speech
+        self.on_interrupt      = None   # callable: () -> None — stop the assistant mid-speech
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
-        self.get_plugins       = None   # callable: () -> list[dict], set by JarvisLive
-        self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by JarvisLive
-        self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by JarvisLive
+        self.get_plugins       = None   # callable: () -> list[dict], set by TeemoLive
+        self.get_plugin_settings = None # callable: () -> list[dict] settings schemas, set by TeemoLive
+        self.on_wake_toggle    = None   # callable: (enable: bool) -> str, set by TeemoLive
         self.on_wake_manual    = None   # callable: () -> None — manual sleep/wake
         self.on_push_to_talk   = None   # callable: (enable: bool) -> str scope
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
@@ -222,7 +222,7 @@ class MainWindow(QMainWindow):
         # inventing a second mechanism means the avatar, the camera and a video
         # can never be on screen at once.
         self._video_split = False        # is the sound a separate stream?
-        self._video_auto_muted = False   # did JARVIS close the mic, or the user?
+        self._video_auto_muted = False   # did the assistant close the mic, or the user?
         # A plain flag rather than reading the widget. video_is_playing() is
         # called from plugin threads, and reading a widget's state from one is
         # not something to rely on; an attribute is.
@@ -254,7 +254,7 @@ class MainWindow(QMainWindow):
             return b
 
         # Muted is the default and the button says so, because a soundtrack
-        # talking over JARVIS is the one way this feature could make the
+        # talking over the assistant is the one way this feature could make the
         # assistant worse rather than better.
         self._video_mute_btn = _vid_btn("🔇  SOUND OFF")
         self._video_mute_btn.clicked.connect(self._toggle_video_mute)
@@ -279,7 +279,7 @@ class MainWindow(QMainWindow):
         # STILL PICTURE needs a scene and a view and nothing else. A Qt
         # install without the multimedia plugins can still put a photo where
         # the avatar sits, and `generate_image` has been looking for somewhere
-        # to show its own output since Mark LV.
+        # to show its own output since the earlier chassis.
         self._video_scene = QGraphicsScene(self)
         self._image_item = QGraphicsPixmapItem()
         self._image_item.setTransformationMode(
@@ -391,6 +391,13 @@ class MainWindow(QMainWindow):
         self._metric_tmr.timeout.connect(self._update_metrics)
         self._metric_tmr.start(2000)
         self._update_metrics()
+
+        # A rename made straight in the config file has to reach the screen
+        # without a restart. The timer only does work when the file changed.
+        self._identity_mtime = None
+        self._identity_tmr = QTimer(self)
+        self._identity_tmr.timeout.connect(self._watch_identity)
+        self._identity_tmr.start(2000)
 
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
@@ -662,7 +669,7 @@ class MainWindow(QMainWindow):
     def _sync_mic_for_video(self) -> None:
         """Close the microphone while the video is making sound.
 
-        JARVIS subtracts its OWN output from the microphone — that is what
+        The assistant subtracts its OWN output from the microphone — that is what
         core/echo.py does — but a video plays through a different output
         entirely, so the guard has never heard of it and the assistant answers
         the film. There is no arrangement in which an open microphone and a
@@ -670,7 +677,7 @@ class MainWindow(QMainWindow):
 
         So the microphone closes for exactly as long as the sound is on, and
         opens again by itself the moment it goes off or the video is closed.
-        Only if JARVIS closed it: a microphone the user muted themselves stays
+        Only if the assistant closed it: a microphone the user muted themselves stays
         muted, and pressing the mute key during a video hands the decision back
         to them for good.
         """
@@ -783,9 +790,9 @@ class MainWindow(QMainWindow):
     # Icon generation — arc-reactor style, rendered with Pillow
     # ------------------------------------------------------------------
     @staticmethod
-    def _build_jarvis_icon(out_path: Path) -> bool:
+    def _build_teemo_icon(out_path: Path) -> bool:
         """
-        Render a JARVIS arc-reactor icon at 4× resolution and downsample
+        Render a T.E.E.M.O. arc-reactor icon at 4× resolution and downsample
         for crisp results at all sizes. Saves a multi-res .ico to out_path.
         Returns True on success.
         """
@@ -898,7 +905,7 @@ class MainWindow(QMainWindow):
             sc.TargetPath       = target
             sc.Arguments        = f'"{args}"'
             sc.WorkingDirectory = work_dir
-            sc.Description      = "J.A.R.V.I.S AI Assistant"
+            sc.Description      = "T.E.E.M.O. AI Assistant"
             sc.IconLocation     = icon_loc
             sc.save()
             return
@@ -913,7 +920,7 @@ class MainWindow(QMainWindow):
             f'sc.TargetPath = "{target}"',
             f'sc.Arguments = Chr(34) & "{args}" & Chr(34)',
             f'sc.WorkingDirectory = "{work_dir}"',
-            'sc.Description = "J.A.R.V.I.S AI Assistant"',
+            'sc.Description = "T.E.E.M.O. AI Assistant"',
             f'sc.IconLocation = "{icon_loc}"',
             'sc.Save',
         ])
@@ -996,14 +1003,14 @@ class MainWindow(QMainWindow):
         desktop = self._get_desktop_dir()
 
         # Arc-reactor icon (.ico)
-        ico_path = Path(__file__).resolve().parent.parent / "config" / "jarvis.ico"
+        ico_path = Path(__file__).resolve().parent.parent / "config" / "teemo.ico"
         if not ico_path.exists():
-            self._build_jarvis_icon(ico_path)
+            self._build_teemo_icon(ico_path)
 
         try:
             pythonw  = python.parent / "pythonw.exe"
             target   = str(pythonw if pythonw.exists() else python)
-            lnk      = str(desktop / "J.A.R.V.I.S.lnk")
+            lnk      = str(desktop / "T.E.E.M.O.lnk")
             icon_loc = str(ico_path) if ico_path.exists() else f"{target},0"
             self._create_lnk_windows(lnk, target, str(script),
                                      str(script.parent), icon_loc)
@@ -1171,7 +1178,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _subtitle(display: str) -> str:
         return ("Just A Rather Very Intelligent System"
-                if display.replace(".", "") == "JARVIS" else "Personal AI Assistant")
+                if display.replace(".", "") == "TEEMO" else "Personal AI Assistant")
 
     def _fit_side_columns(self) -> None:
         """Side columns grow with the window, within limits, so the centre keeps
@@ -1579,6 +1586,26 @@ class MainWindow(QMainWindow):
         self._wake_btn.setStyleSheet(self._BTN_DIM)
         self._wake_sleep_btn.hide()
 
+        # The phrase the assistant answers to. It is a setting, not a constant:
+        # renaming the assistant should not leave the wake word behind, and a
+        # user who wants to call it something else must be able to. It is
+        # stored with the rest of the config and read afresh wherever it is
+        # shown, so a change is visible immediately.
+        self._wake_phrase_edit = QLineEdit()
+        self._wake_phrase_edit.setFixedHeight(30)
+        self._wake_phrase_edit.setFont(px_font(11))
+        self._wake_phrase_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
+            }}
+            QLineEdit:focus {{ border-color: {C.PRI_DIM}; }}
+        """)
+        self._wake_phrase_edit.setToolTip(
+            "The words that wake the assistant up. Say them out loud while it sleeps.")
+        self._wake_phrase_edit.editingFinished.connect(self._save_wake_phrase)
+        lay.addWidget(self._wake_phrase_edit)
+
         self._ptt_btn = _row(QPushButton())
         self._ptt_btn.clicked.connect(self._toggle_ptt)
         self._refresh_talk_btns()
@@ -1861,7 +1888,7 @@ class MainWindow(QMainWindow):
     # while translating the tag would mean a table per language, which is worse.
     # A shape carries it in every language, and shape plus colour still reads
     # for someone who cannot separate red from amber. What the marks mean
-    # arrives the way everything else does: JARVIS says it out loud.
+    # arrives the way everything else does: the assistant says it out loud.
     _REVIEW_MARKS = {"serious": ("RED", "▲"), "caution": ("ACC2", "●"), "note": ("PRI_DIM", "·")}
 
     @staticmethod
@@ -1932,7 +1959,7 @@ class MainWindow(QMainWindow):
     # An interactive twin of the content panel. The plugin only ever hands over
     # questions; everything about asking, marking and reporting happens here,
     # and the finished result is pushed back into the conversation the same way
-    # a dropped file is — as a message JARVIS reads and responds to. That keeps
+    # a dropped file is — as a message the assistant reads and responds to. That keeps
     # the tool call short (it returns the moment the board is up) and leaves the
     # talking to the assistant, in the user's own language.
 
@@ -2089,7 +2116,7 @@ class MainWindow(QMainWindow):
         elif verdict is False:
             mark, colour = "✕  " + str(q.get("answer", "")), C.RED
         else:
-            # Open answers and near-miss gap-fills are JARVIS's to judge. Saying
+            # Open answers and near-miss gap-fills are the assistant's to judge. Saying
             # so is honest; marking it wrong here would be a guess.
             mark, colour = "…  noted — I'll go over this one with you", C.ACC2
         note = q.get("note") or ""
@@ -2124,7 +2151,7 @@ class MainWindow(QMainWindow):
 
         self._log.append_log(f"QUIZ: {topic or 'quiz'} — {right}/{total} correct")
 
-        # Hand it back to JARVIS as a message, not as a tool return: the tool
+        # Hand it back to the assistant as a message, not as a tool return: the tool
         # call ended minutes ago. This is the same channel a dropped file uses.
         lines = [f"[QUIZ_DONE] topic={topic or 'general'} | "
                  f"auto-marked {right}/{total} correct"
@@ -2234,7 +2261,7 @@ class MainWindow(QMainWindow):
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
             try:
-                winreg.QueryValueEx(key, "JARVIS_AI")
+                winreg.QueryValueEx(key, "TEEMO_AI")
                 return True
             except FileNotFoundError:
                 return False
@@ -2251,11 +2278,11 @@ class MainWindow(QMainWindow):
             reg = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_ALL_ACCESS)
             if currently_on:
-                winreg.DeleteValue(reg, "JARVIS_AI")
+                winreg.DeleteValue(reg, "TEEMO_AI")
             else:
                 pythonw = Path(sys.executable).parent / "pythonw.exe"
                 exe = str(pythonw if pythonw.exists() else sys.executable)
-                winreg.SetValueEx(reg, "JARVIS_AI", 0, winreg.REG_SZ,
+                winreg.SetValueEx(reg, "TEEMO_AI", 0, winreg.REG_SZ,
                                   f'"{exe}" "{script}"')
             winreg.CloseKey(reg)
             enabled = not currently_on
@@ -2297,7 +2324,7 @@ class MainWindow(QMainWindow):
                         "awake": bool(s.get("awake"))}
             except Exception:
                 pass
-        # Before JarvisLive has wired its callback (drawer built at startup).
+        # Before TeemoLive has wired its callback (drawer built at startup).
         ready, enabled = False, False
         try:
             from core.wake_word import is_ready
@@ -2327,6 +2354,48 @@ class MainWindow(QMainWindow):
             self._wake_btn.setText("🎙  WAKE WORD: OFF")
             self._wake_btn.setStyleSheet(_off)
             self._wake_sleep_btn.hide()
+        self._refresh_wake_phrase_field()
+
+    def _refresh_wake_phrase_field(self):
+        """Show the stored wake phrase in the field — but never over what the
+        user is typing. A refresh that lands mid-edit would eat a keystroke."""
+        field = getattr(self, "_wake_phrase_edit", None)
+        if field is None:
+            return
+        try:
+            from core.wake_word import wake_phrase
+            current = wake_phrase()
+        except Exception:
+            current = ""
+        if field.hasFocus():
+            return
+        if field.text() != current:
+            field.setText(current)
+        field.setPlaceholderText(current or "Hey T.E.E.M.O")
+
+    def _save_wake_phrase(self):
+        """Persist the wake phrase typed into the CONTROLS drawer.
+
+        An empty field restores the default rather than saving an empty
+        phrase: a wake word made of nothing would leave the button looking
+        enabled and the assistant asleep forever, with nothing to point at.
+        """
+        field = getattr(self, "_wake_phrase_edit", None)
+        if field is None:
+            return
+        typed = field.text().strip()
+        try:
+            from core.wake_word import wake_phrase
+            from memory.config_manager import save_wake_phrase
+            before = wake_phrase()
+            save_wake_phrase(typed)
+            after = wake_phrase()
+        except Exception as e:
+            print(f"[Wake] phrase not saved: {e}")
+            return
+        if after != before:
+            self._log_sig.emit(f"SYS: Wake phrase is now '{after}'.")
+        self._refresh_wake_phrase_field()
 
     def _refresh_talk_btns(self):
         """Repaint the push-to-talk row from the saved setting."""
@@ -2353,7 +2422,7 @@ class MainWindow(QMainWindow):
                               else "◉  HUD: REACTOR CORE")
         self._hud_btn.setStyleSheet(btn_css("choice"))
         self._hud_btn.setToolTip(
-            "An animated head that speaks your words and shows what JARVIS is "
+            "An animated head that speaks your words and shows what the assistant is "
             "doing. Tap to switch to the reactor core."
             if face else
             "A 3-D reactor core that turns with the state and moves with your "
@@ -2457,7 +2526,7 @@ class MainWindow(QMainWindow):
                 self._wake_dl_sig.emit(ok, msg)
             threading.Thread(target=_work, daemon=True).start()
             return
-        # Already downloaded → just flip enabled/disabled through JarvisLive.
+        # Already downloaded → just flip enabled/disabled through TeemoLive.
         if self.on_wake_toggle:
             try:
                 self.on_wake_toggle(not st["enabled"])
@@ -2513,16 +2582,60 @@ class MainWindow(QMainWindow):
         if apply_ui_accent(hex_color):
             retheme_all_widgets(old, current_palette())
 
-    def _apply_name_update(self, name: str, user_name: str, ui_color: str = "",
-                           voice: str = ""):
-        """Update all name/theme-dependent UI elements and persist to config."""
-        self._assistant_name = name.strip() or "T.E.E.M.O."
+    def _apply_name_to_ui(self, name: str) -> str:
+        """Put a name on screen. Returns the display form actually used.
+
+        Split out of `_apply_name_update` because a rename can arrive from two
+        directions: the CUSTOMISE overlay (which also persists it) and the
+        config file being edited behind the app's back (which must NOT be
+        written back — it is already the truth).
+        """
+        self._assistant_name = (name or "").strip() or "T.E.E.M.O."
         display = self._assistant_name.upper()
         self.setWindowTitle(f"{display} — {APP_VERSION}")
         self._title_lbl.setText(display)
         self._title_lbl.setToolTip(self._subtitle(display))
         self._log._ai_name_lc = self._assistant_name.lower()
         self.hud._assistant_name = display
+        return display
+
+    def _watch_identity(self) -> None:
+        """A rename made straight in config/api_keys.json has to show up live.
+
+        The CUSTOMISE overlay is the usual way to rename the assistant, but the
+        config file is a plain file and a user may well edit it with a text
+        editor while the app is running. The window title and the header must
+        follow it without a restart — and without the app writing the file
+        back over the change it has just read.
+
+        The file is only re-read when its timestamp moved, so this costs a
+        stat() every couple of seconds and nothing at all the rest of the time.
+        """
+        try:
+            mtime = Path(API_FILE).stat().st_mtime
+        except Exception:
+            return
+        if mtime == getattr(self, "_identity_mtime", None):
+            return
+        self._identity_mtime = mtime
+        try:
+            cfg = _read_full_config()
+        except Exception:
+            return
+        name = (cfg.get("assistant_name") or "T.E.E.M.O.").strip()
+        if not name or name == self._assistant_name:
+            return
+        display = self._apply_name_to_ui(name)
+        self._refresh_identity_rows()
+        try:
+            self._log.append_log(f"SYS: Identity updated from the config file — {display}")
+        except Exception:
+            pass
+
+    def _apply_name_update(self, name: str, user_name: str, ui_color: str = "",
+                           voice: str = ""):
+        """Update all name/theme-dependent UI elements and persist to config."""
+        display = self._apply_name_to_ui(name)
 
         color_changed = False
         if ui_color:

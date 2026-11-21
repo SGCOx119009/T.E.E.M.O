@@ -1,6 +1,6 @@
 """gui/hud.py — The centre of the HUD: the avatar or the reactor core, the state line and the waveform.
 
-Split out of ui.py in Mark LVII; behaviour unchanged."""
+Split out of ui.py in the previous chassis; behaviour unchanged."""
 from __future__ import annotations
 
 import json
@@ -331,7 +331,7 @@ class HudCanvas(QWidget):
         dt = now - self._step_t
         self._step_t = now
         # Integrated, not derived from absolute time: multiplying wall-clock by
-        # a rate that changes with state jumps the rings the instant JARVIS
+        # a rate that changes with state jumps the rings the instant the assistant
         # starts talking. Same lesson the head's sway taught.
         self._core_phase += min(0.10, max(0.0, dt))
 
@@ -571,7 +571,7 @@ class HudCanvas(QWidget):
         p.drawEllipse(QRectF(cx - inner, cy - inner, inner * 2, inner * 2))
 
         # 9. The name, sized from the string rather than from the radius alone:
-        #    "J.A.R.V.I.S" and a name someone renamed to "MAX" are very
+        #    "T.E.E.M.O." and a name someone renamed to "MAX" are very
         #    different widths, and a fixed fraction of r spills one of them past
         #    the ring it is supposed to sit inside.
         name = self._assistant_name or ""

@@ -1,4 +1,4 @@
-# ── MARK LVII — Python dependencies ────────────────────────────────────────────
+# ── T.E.E.M.O. — Python dependencies ────────────────────────────────────────────
 # T.E.E.M.O. is a Windows desktop assistant. This file is the whole dependency
 # list for Windows: `python setup.py` installs it for you.
 

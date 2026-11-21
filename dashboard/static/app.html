@@ -135,7 +135,7 @@
 <body>
   <div id="toast"></div>
   <header>
-    <div class="logo"><em>J</em>ARVIS</div>
+    <div class="logo"><em>T</em>E.E.M.O.</div>
     <div class="pill" id="pill"><span class="dot"></span><span id="st">Connecting</span></div>
     <div class="enc-badge" id="enc">AES-GCM</div>
     <div class="spacer"></div>
@@ -153,8 +153,8 @@
 
   <script>
     // ── Auth — bearer token ───────────────────────────────────────────────────
-    const _authToken  = sessionStorage.getItem('jarvis_token');
-    const _sessionKey = sessionStorage.getItem('jarvis_key');
+    const _authToken  = sessionStorage.getItem('teemo_token');
+    const _sessionKey = sessionStorage.getItem('teemo_key');
 
     if (!_authToken) {
       location.replace('/login');
@@ -184,7 +184,7 @@
     //   Both are native in Web Crypto, so the 60 KB CryptoJS bundle is no
     //   longer needed. crypto.subtle exists only in a secure context, which is
     //   why the server now insists on HTTPS instead of quietly falling back.
-    const _AES_SALT   = 'JARVIS-DASHBOARD-v1';
+    const _AES_SALT   = 'T.E.E.M.O.-DASHBOARD-v1';
     const _KDF_ROUNDS = 200000;
     let _aesKey = null;
 
@@ -269,7 +269,7 @@
 
     function append(speaker, text) {
       const d = document.createElement('div');
-      if (speaker === 'jarvis') {
+      if (speaker === 'teemo') {
         d.className = 'msg msg-j';
         d.innerHTML = `<div class="lbl">T.E.E.M.O.</div>${esc(text)}`;
       } else {

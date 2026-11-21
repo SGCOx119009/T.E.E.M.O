@@ -1,6 +1,6 @@
 """gui/theme.py — Palette, typography and the configuration values every part of the HUD reads.
 
-Split out of ui.py in Mark LVII; behaviour unchanged."""
+Split out of ui.py in the previous chassis; behaviour unchanged."""
 from __future__ import annotations
 
 import json
@@ -39,7 +39,7 @@ from PyQt6.QtGui import (
 # Video playback for the HUD. Part of PyQt6, so it costs no new dependency —
 # but the multimedia plugins are a separate piece of the Qt install and can be
 # absent on a stripped-down system, so a failure here disables one feature
-# rather than stopping JARVIS from starting.
+# rather than stopping the assistant from starting.
 try:
     from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
     from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -83,7 +83,11 @@ def _read_full_config() -> dict:
 # Single source of truth for the release name — the window title, the header
 # badge and the readme must never disagree again.
 APP_VERSION  = "T.E.E.M.O."
-APP_PROTOCOL = APP_VERSION.split()[-1]
+# The protocol badge shows the name WITHOUT its final period: the product is
+# written "T.E.E.M.O." everywhere else, but a badge that ends in a period
+# reads as a sentence that stopped rather than as a name. It must also never
+# be empty — an empty protocol would put a bare label on the HUD.
+APP_PROTOCOL = APP_VERSION.rstrip(".") or APP_VERSION
 
 _DEFAULT_W, _DEFAULT_H = 980, 700
 _MIN_W,     _MIN_H     = 820, 580
