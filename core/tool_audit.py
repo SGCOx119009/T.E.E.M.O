@@ -86,7 +86,7 @@ _STANDARD_TOOLS = {
     "undo",
 }
 _READ_ONLY_VERIFICATION_ACTIONS = {
-    "browser_control": {"get_text", "get_url"},
+    "browser_control": {"get_text", "get_url", "read_page"},
     "computer_control": {
         "inspect_windows", "inspect_controls", "read_control",
     },
@@ -100,6 +100,9 @@ _ACTION_RISK = {
         "list_browsers": "read_or_navigate",
         "get_text": "read_or_navigate",
         "get_url": "read_or_navigate",
+        # Reading the page's STRUCTURE instead of a picture of it. It looks
+        # at the page and changes nothing, exactly like get_text.
+        "read_page": "read_or_navigate",
         "screenshot": "read_or_navigate",
         "scroll": "read_or_navigate",
         "go_to": "read_or_navigate",

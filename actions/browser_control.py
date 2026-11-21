@@ -4,15 +4,19 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
 import threading
+import time
 import webbrowser
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from core import appidentity, outcome
+from core import action_policy, appidentity, outcome
+from core import policy as domain_policy
 
 # Importing playwright cost 198 ms at every launch, paid by action discovery
 # whether or not a browser was ever opened. It is the second-largest import in
@@ -112,6 +116,82 @@ def _user_agent() -> str:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     )
+
+
+#: THE ONE DEBUGGING ENDPOINT THIS PRODUCT WILL EVER USE.
+#:
+#: It is loopback, and it is a CONSTANT. A Chrome debugging port on a
+#: public interface gives whoever finds it the whole browser: every tab,
+#: every cookie, every half-typed password. There is no setting that
+#: changes this address and no path that accepts another one — a remote
+#: endpoint is refused by name rather than honoured, because "let me point
+#: it at my other machine" is the exact request that turns a local tool
+#: into a remote control.
+CDP_HOST = "127.0.0.1"
+CDP_PORT = 9222
+CDP_ENDPOINT = f"http://{CDP_HOST}:{CDP_PORT}"
+
+#: The addresses that count as loopback. "localhost" is included because it
+#: is the same machine, and the resolver sends it there.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _cdp_endpoint() -> str:
+    """The debugging endpoint, or an error if it is not loopback.
+
+    This function exists so that the guarantee is CHECKED rather than
+    assumed. The constant is right today; a future edit that points it
+    somewhere else is caught here instead of in a log file on a machine
+    that is no longer the user's own.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(CDP_ENDPOINT)
+    if parsed.hostname not in _LOOPBACK_HOSTS:
+        raise ValueError(
+            "the browser debugging endpoint must be on the loopback "
+            f"interface; '{parsed.hostname}' is not one of {_LOOPBACK_HOSTS}"
+        )
+    return CDP_ENDPOINT
+
+
+def _cdp_available(timeout: float = 1.5) -> bool:
+    """Whether the browser's debugging port is answering.
+
+    The check is a plain HTTP GET against the loopback endpoint, with a
+    short timeout: this runs on the launch path and a browser that was
+    started without the debugging flag must not cost a second of silence.
+    """
+    import urllib.error
+    import urllib.request
+    endpoint = _cdp_endpoint()
+    try:
+        with urllib.request.urlopen(f"{endpoint}/json/version", timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _automation_profile_dir(browser: str) -> str:
+    """The assistant's own profile for one browser.
+
+    This is the profile used when the user's own cannot be opened: their
+    browser is already running, or their profile is locked, or a newer
+    Chrome refuses to automate the real profile. It lives beside the
+    other assistant state and NEVER inside the browser's own data
+    directory, so automating cannot write into the user's history, their
+    cookies or their saved passwords.
+
+    It does persist: a sign-in made here stays signed in for later
+    sessions, which is the whole point of a profile of our own.
+    """
+    name = str(browser or "").strip().lower()
+    if not name:
+        raise ValueError("a browser name is required")
+    if not name.replace("-", "").replace("_", "").isalnum():
+        raise ValueError(f"'{browser}' is not a usable browser name")
+    path = Path.home() / ".teemo_profiles" / name
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 def _real_profile_dir(browser: str) -> str:
@@ -464,10 +544,120 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
             "no browser on this system could be opened", url=url)
 
 
+#: The script that collects the page's interactive elements.
+#:
+#: It runs INSIDE the page and it only READS: it walks the elements that
+#: are visible and can be interacted with, and returns a list of plain
+#: objects. Nothing is injected into the DOM, nothing from the page is
+#: evaluated, and the assistant never runs code the page wrote. The page
+#: gets to describe itself; it does not get to act.
+#:
+#: The list is cut at two hundred elements because a page can have ten
+#: thousand, and a model that is handed ten thousand elements stops being
+#: able to read any of them. What is beyond the cut is not hidden: the
+#: result says how many were found and how many were listed.
+_PAGE_STRUCTURE_JS = """() => {
+  const INTERACTIVE = 'a[href],button,input,select,textarea,summary,'
+    + '[role],[contenteditable="true"],[onclick],[tabindex]';
+  const found = [];
+  const listed = [];
+  const nodes = document.querySelectorAll(INTERACTIVE);
+  for (const el of nodes) {
+    if (found.length >= 400) break;
+    let role = '';
+    let name = '';
+    try {
+      if (el.getAttribute('aria-hidden') === 'true') continue;
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      role = (el.getAttribute('role') || el.tagName.toLowerCase());
+      name = (
+        el.getAttribute('aria-label')
+        || el.innerText
+        || el.getAttribute('placeholder')
+        || el.getAttribute('alt')
+        || el.getAttribute('title')
+        || el.value
+        || ''
+      ).replace(/\\s+/g, ' ').trim();
+      found.push(1);
+      if (!name) continue;
+      listed.push({
+        id: 'e' + (listed.length + 1),
+        role: String(role),
+        name: String(name).slice(0, 120),
+      });
+    } catch (err) {
+      // One element that misbehaves must not stop the walk.
+    }
+  }
+  return { total: found.length, elements: listed };
+}"""
+
+
+class _AmbiguousLocator(ValueError):
+    """A semantic selector did not identify exactly one element.
+
+    "Click the button that says Accept" is a request that has to be answered
+    with ONE element or with nothing. A locator that matches three is not a
+    choice, it is a coin toss, and a coin toss in a browser can dismiss a
+    dialog or confirm a purchase.
+    """
+
+    def __init__(self, description: str, count: int):
+        self.count = count
+        super().__init__(
+            f"{description} matched {count} elements; refusing to guess"
+        )
+
+    @property
+    def recovery(self) -> str:
+        return "control_missing" if self.count == 0 else "target_ambiguous"
+
+
+class _PageContextChanged(RuntimeError):
+    """The page an action was planned against is no longer the active one.
+
+    Raised instead of quietly opening a fresh tab: the element the model
+    named was on THAT page, and clicking the same coordinates on another one
+    is how the assistant clicks the wrong button.
+    """
+
+
+#: How many effects the browser may produce in one window, and how wide that
+#: window is. This is the fuse: an agent that is stuck — open, look, click,
+#: not there, open another — stops on its own instead of hammering a site
+#: until somebody notices.
+_INTERACTION_WINDOW_SECONDS = 30.0
+_INTERACTION_MAXIMUM = 6
+
+
+async def _require_unique(locator, description: str):
+    """Return a locator only when it identifies exactly one element."""
+    count = await locator.count()
+    if count != 1:
+        raise _AmbiguousLocator(description, count)
+    return locator
+
+
 class _BrowserSession:
     """
     A full session for one browser instance.
     All browsers open on the real profile via launch_persistent_context.
+
+    WHAT THIS CLASS GUARANTEES
+        Three things, and each of them is a promise the model relies on:
+
+        - ONE target per action. A selector that matches more than one
+          element is refused rather than resolved by guessing.
+        - A BUDGET. Six effects per thirty seconds, after which the browser
+          says so instead of acting again.
+        - HONESTY about the outcome. An action that timed out, or that may
+          have been dispatched before it failed, is reported as UNVERIFIED
+          and never as done. The browser may well be doing it still, and
+          telling the model "failed" would make it try again.
     """
 
     def __init__(self, browser_name: str):
@@ -486,6 +676,23 @@ class _BrowserSession:
         # profile had to be used instead. The difference is every sign-in they
         # have, so it is reported rather than only printed.
         self.profile_kind: str = ""
+
+        # The interaction budget: when the effects happened, so the window
+        # can be measured instead of counted.
+        self._interaction_history: deque[float] = deque()
+        self._interaction_lock = threading.Lock()
+        # The operation currently running, if any. A timed-out operation
+        # stays here until it finishes, because until then the browser is
+        # busy with something whose outcome nobody knows.
+        self._run_state_lock = threading.Lock()
+        self._active_future = None
+        self._active_timed_out = False
+        # The last address the policy refused, and why. A navigation that
+        # was stopped by the policy has to say WHICH rule stopped it, and
+        # the rule is usually not the one the caller asked about.
+        self._blocked_by_policy = None
+        # The browser this session attached to over CDP, if it did.
+        self._cdp_browser = None
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -513,10 +720,75 @@ class _BrowserSession:
         self._pw = await async_playwright().start()
 
     def run(self, coro, timeout: int = 60) -> str:
-        if not self._loop:
-            raise RuntimeError(f"Session for '{self.browser_name}' not started.")
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=timeout)
+        """Run one operation on the browser's loop, and report what happened.
+
+        Three things happen here that did not happen before, and each of them
+        exists because the alternative is a lie:
+
+        - A TIMED-OUT operation is not a failure. The browser may still be
+          doing it, and a model told "failed" will try again. It is reported
+          as unverified, with a recovery of "timeout" and the instruction not
+          to repeat it.
+        - While a timed-out operation is still running, NO NEW OPERATION IS
+          SENT. The browser is busy with something whose outcome is unknown,
+          and starting a second one on top of it turns one ambiguous state
+          into two.
+        - An exception raised after dispatch may have begun is not a failure
+          either. It is "effect_ambiguous": the click may have happened.
+        """
+        if not getattr(self, "_loop", None):
+            raise RuntimeError(
+                f"Session for '{getattr(self, 'browser_name', '')}' not started."
+            )
+        with self._run_state_lock:
+            active = self._active_future
+            if active is not None and not active.done():
+                close = getattr(coro, "close", None)
+                if callable(close):
+                    close()
+                return outcome.unverified(
+                    "browser_control",
+                    "a browser operation is still running; no new operation "
+                    "was sent",
+                    recovery=(
+                        "timeout"
+                        if self._active_timed_out
+                        else "effect_ambiguous"
+                    ),
+                )
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+            self._active_future = future
+            self._active_timed_out = False
+        try:
+            return future.result(timeout=timeout)
+        except _PageContextChanged:
+            return outcome.failed(
+                "browser_control",
+                "the active page changed or disappeared; no action was sent",
+                recovery="page_changed",
+            )
+        except concurrent.futures.TimeoutError:
+            with self._run_state_lock:
+                self._active_timed_out = not future.done()
+            return outcome.unverified(
+                "browser_control",
+                "browser operation exceeded its time limit and may still be "
+                "running; do not repeat it",
+                recovery="timeout",
+            )
+        except Exception as exc:
+            return outcome.unverified(
+                "browser_control",
+                "browser operation raised after dispatch may have begun "
+                f"({type(exc).__name__}); do not repeat it",
+                recovery="effect_ambiguous",
+            )
+        finally:
+            if future.done():
+                with self._run_state_lock:
+                    if self._active_future is future:
+                        self._active_future = None
+                        self._active_timed_out = False
 
     def close(self):
         if self._loop:
@@ -534,6 +806,109 @@ class _BrowserSession:
             except Exception:
                 pass
         self._context = self._page = None
+
+    async def _install_route_guard(self) -> None:
+        """Check the policy on EVERY request, and therefore on every redirect.
+
+        A redirect is a request, and Playwright hands every request to this
+        handler. So the policy is not only checked on the address the user
+        asked for: it is checked again on each address the SITE sends the
+        browser to. A public page that redirects into a bank is still a
+        bank, and this is where that is caught.
+
+        The blocked request is aborted rather than followed, and the reason
+        is kept so the caller can report which rule fired.
+        """
+        async def _guard(route, request=None):
+            url = ""
+            try:
+                url = getattr(request, "url", "") or ""
+            except Exception:
+                url = ""
+            if not url:
+                try:
+                    url = route.request.url
+                except Exception:
+                    url = ""
+            decision = domain_policy.check_destination(url) if url else None
+            if decision is not None and not decision.allowed:
+                self._blocked_by_policy = decision
+                print(f"[Browser] blocked by policy {decision.policy}: {url}")
+                try:
+                    await route.abort()
+                except Exception:
+                    pass
+                return
+            try:
+                await route.continue_()
+            except Exception:
+                pass
+
+        try:
+            await self._context.route("**/*", _guard)
+        except Exception as exc:
+            # A browser that cannot be guarded is a browser that must not be
+            # used: the whole point of the policy is that it holds.
+            print(f"[Browser] the policy guard could not be installed "
+                  f"({type(exc).__name__}) — navigation is disabled")
+            self._blocked_by_policy = domain_policy.Decision(
+                False,
+                "the browser could not be guarded by the domain policy",
+                "deny:guard_unavailable", "guard_unavailable", "",
+            )
+
+    async def _attach_over_cdp(self) -> bool:
+        """Attach to the browser the user already has open.
+
+        WHY ATTACH INSTEAD OF LAUNCHING A SECOND BROWSER
+            The browser the user has open is the one with their session:
+            signed in, with their tabs, with their settings. A second
+            browser started by the assistant has none of that, and every
+            page that needs a sign-in becomes a dead end. Attaching is what
+            makes the assistant useful on the pages the user actually has.
+
+        WHY THE ENDPOINT IS LOOPBACK AND NOT A SETTING
+            A debugging port gives whoever reaches it the whole browser.
+            Exposed on a public interface it is a remote control for
+            everybody on the internet, so there is exactly one address this
+            will ever use and it is the user's own machine.
+
+        Returns True when the attach worked.
+        """
+        try:
+            endpoint = _cdp_endpoint()
+        except ValueError as exc:
+            print(f"[Browser] the debugging endpoint is not allowed: {exc}")
+            return False
+        if not _cdp_available():
+            return False
+        try:
+            browser = await self._pw.chromium.connect_over_cdp(endpoint)
+        except Exception as exc:
+            print(f"[Browser] could not attach over the debugging port "
+                  f"({type(exc).__name__})")
+            return False
+        try:
+            contexts = browser.contexts
+            if not contexts:
+                return False
+            self._context = contexts[0]
+            pages = self._context.pages
+            self._page = pages[-1] if pages else await self._context.new_page()
+            self._cdp_browser = browser
+            self.profile_kind = "attached"
+            # The guard belongs to the CONTEXT, not to the way it was
+            # obtained: a browser that was attached is guarded exactly like a
+            # browser that was launched. Without this, attaching would be a
+            # way round the policy.
+            await self._install_route_guard()
+            print(f"[Browser] attached to the running browser over the local "
+                  f"debugging port")
+            return True
+        except Exception as exc:
+            print(f"[Browser] the attached browser could not be read "
+                  f"({type(exc).__name__})")
+            return False
 
     async def _adopt_page(self) -> Page:
         """
@@ -647,6 +1022,11 @@ class _BrowserSession:
         # explainable outcome.
         already = appidentity.running(self.browser_name)
         if already:
+            # The browser the user has open is the one with their session.
+            # If it was started with the local debugging port, attach to it:
+            # a second browser would have none of their sign-ins.
+            if await self._attach_over_cdp():
+                return
             print(f"[Browser] {self.browser_name} is already running "
                   f"({len(already)} processes) — its profile is locked, so the "
                   f"separate automation profile will be used.")
@@ -655,6 +1035,7 @@ class _BrowserSession:
                 self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
                 self._page = await self._adopt_page()
                 self.profile_kind = "real"
+                await self._install_route_guard()
                 print(f"[Browser] ✅ Launched [{label}] profile={profile}")
                 return
             except Exception as e:
@@ -664,80 +1045,229 @@ class _BrowserSession:
         # profile / newer Chrome versions block the real profile under
         # automation). Fall back to a persistent profile of our own —
         # accounts logged in here once stay logged in on later sessions too.
-        teemo_profile = str(Path.home() / ".teemo_profiles" / self.browser_name)
-        Path(teemo_profile).mkdir(parents=True, exist_ok=True)
+        teemo_profile = _automation_profile_dir(self.browser_name)
         print(f"[Browser] Retrying with the assistant profile: {teemo_profile}")
 
         try:
             self._context = await engine_obj.launch_persistent_context(teemo_profile, **kwargs)
             self._page = await self._adopt_page()
             self.profile_kind = "separate"
+            await self._install_route_guard()
             print(f"[Browser] ✅ Launched [{label}] with the assistant profile "
                   f"(sign-ins persist across sessions)")
         except Exception as e2:
             raise RuntimeError(f"Could not launch {self.browser_name}: {e2}") from e2
 
 
-    async def _get_page(self) -> Page:
+    def _reserve_interaction(self, amount: int = 1) -> bool:
+        """Take one effect from the budget. False when there is none left.
+
+        The window is measured, not counted: six effects in thirty seconds
+        is a fuse, and a fuse that never resets is a wall.
+        """
+        now = time.monotonic()
+        history = getattr(self, "_interaction_history", None)
+        lock = getattr(self, "_interaction_lock", None)
+        if history is None or lock is None:
+            history = deque()
+            lock = threading.Lock()
+            self._interaction_history = history
+            self._interaction_lock = lock
+        with lock:
+            while (
+                history
+                and now - history[0] >= _INTERACTION_WINDOW_SECONDS
+            ):
+                history.popleft()
+            if amount < 1 or len(history) + amount > _INTERACTION_MAXIMUM:
+                return False
+            history.extend([now] * amount)
+            return True
+
+    def _interaction_limit_result(self) -> str:
+        """The answer when the budget is spent: nothing was sent."""
+        return outcome.failed(
+            "browser_control",
+            "browser interaction rate limit reached; no further effect was sent",
+            maximum=_INTERACTION_MAXIMUM,
+            window_seconds=_INTERACTION_WINDOW_SECONDS,
+        )
+
+    async def _get_page(self, *, allow_new: bool = False) -> Page:
+        """The page an action should act on.
+
+        A closed page is NOT silently replaced. The element the model named
+        was on THAT page, and clicking something with the same name on
+        another tab is how the assistant clicks the wrong button. The action
+        is refused with `_PageContextChanged`, and the caller reports that
+        no action was sent.
+
+        `allow_new=True` is for the cases where opening a fresh tab IS the
+        action: a new tab, or a navigation that needs somewhere to go.
+        """
         await self._launch()
-        # If somehow page got closed, open a fresh one
-        if self._page is None or self._page.is_closed():
+        current = getattr(self, "_page", None)
+        try:
+            page_missing = current is None or current.is_closed()
+        except Exception as exc:
+            raise _PageContextChanged(
+                "the active page state could not be read "
+                f"({type(exc).__name__})"
+            ) from None
+        if page_missing:
+            if not allow_new:
+                raise _PageContextChanged(
+                    "the active page closed or changed; no action was sent"
+                )
+            if self._context is None:
+                raise RuntimeError("browser context is unavailable")
             self._page = await self._context.new_page()
             await asyncio.sleep(0.2)
         return self._page
 
+    @staticmethod
+    def _page_closed(page: Page) -> bool:
+        """Whether the page is gone.
+
+        Never raises: a page that cannot be asked is not proof that it
+        closed, and treating it as closed would turn a hiccup into a
+        failure.
+        """
+        try:
+            return bool(page.is_closed())
+        except (AttributeError, TypeError):
+            return False
+
     async def go_to(self, url: str) -> str:
+        """Open an address, if the policy allows it.
 
-        url      = _normalize_url(url)
-        page     = await self._get_page()
+        THE POLICY IS CHECKED BEFORE THE NAVIGATION. A browser that is
+        signed into a bank can be told to open a bank, and "the user asked
+        for it" is not a policy — the user asked for a page, not for a
+        transfer. The deny list in core/policy.py says which pages are not
+        the user's to command, and it is applied here, before a single
+        packet is sent.
+
+        The check is repeated on every redirect, because a redirect is the
+        SITE's decision and not the user's: a public page that redirects
+        inward is still inward.
+
+        The result is UNVERIFIED even when the navigation worked, because
+        nobody has seen what the page says. Reporting it as done is how the
+        assistant ends up claiming a page was read that it never read.
+        """
+        if not isinstance(url, str) or not url.strip():
+            return outcome.failed("browser_control", "url must be a non-empty string")
+        url = _normalize_url(url)
+
+        decision = domain_policy.check_destination(url)
+        if not decision.allowed:
+            return outcome.failed(
+                "browser_control",
+                f"the browser may not open this address: {decision.reason}",
+                url=url,
+                policy=decision.policy,
+                category=decision.category,
+            )
+
+        # Any block left over from a previous navigation is cleared first: a
+        # stale reason would be reported against the wrong address.
+        self._blocked_by_policy = None
+
+        page     = await self._get_page(allow_new=True)
         prev_url = page.url
+        if not self._reserve_interaction():
+            return self._interaction_limit_result()
 
-        async def _do_goto(p: Page) -> str:
-            """Attempt navigation and return the resulting URL (may still be blank)."""
+        async def _do_goto(p: Page) -> tuple[str, str | None, bool]:
+            """Attempt navigation; return its URL, any non-timeout error, and
+            whether it timed out."""
             try:
                 await p.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 await asyncio.sleep(0.3)
             except PlaywrightTimeout:
-                pass   # page may have partially loaded — check URL below
+                return p.url, None, True
             except Exception as e:
                 print(f"[Browser] goto exception (non-fatal): {e}")
-            return p.url
+                return p.url, str(e), False
+            return p.url, None, False
 
-        result_url = await _do_goto(page)
+        result_url, navigation_error, navigation_timed_out = await _do_goto(page)
 
         if result_url in ("about:blank", "", None, prev_url) and prev_url in ("about:blank", "", None):
             print(f"[Browser] Still blank after goto — retrying on new tab: {url}")
             try:
+                if not self._reserve_interaction():
+                    return self._interaction_limit_result()
                 new_page   = await self._context.new_page()
                 self._page = new_page
-                result_url = await _do_goto(new_page)
+                result_url, navigation_error, navigation_timed_out = await _do_goto(
+                    new_page
+                )
             except Exception as e:
                 print(f"[Browser] New-tab retry failed: {e}")
+                navigation_error = str(e)
+
+        # The route guard refused this navigation — or a redirect it made.
+        # The policy is named, because "the browser will not open that" is
+        # not an answer a user can act on.
+        blocked = getattr(self, "_blocked_by_policy", None)
+        if blocked is not None and not blocked.allowed:
+            return outcome.failed(
+                "browser_control",
+                f"the browser may not open this address: {blocked.reason}",
+                url=url,
+                policy=blocked.policy,
+                category=blocked.category,
+            )
+
+        if navigation_error and result_url == prev_url:
+            return outcome.failed(
+                "browser_control",
+                f"navigation failed: {navigation_error}",
+                url=url,
+                current_url=result_url,
+            )
 
         if result_url and result_url not in ("about:blank", "", None):
-            # Verified, and cheaply: this is the page's OWN url read back after
-            # navigation, not the one we asked for. A redirect, a login wall or
-            # a captive portal all show up here as a different address, which
-            # is exactly what the user needs to hear about.
+            # This is the page's OWN url read back after the navigation, not
+            # the one we asked for. A redirect, a login wall or a captive
+            # portal all show up here as a different address, which is
+            # exactly what the user needs to hear about.
             #
             # The profile is reported for the same reason. When the user's
             # browser was already running its profile is locked, so the page
             # opens in a separate one where they are signed in to nothing —
-            # and a Gmail that asks them to log in looks like a broken
+            # and a mail page that asks them to log in looks like a broken
             # assistant unless somebody says why.
-            if self.profile_kind == "separate":
-                return outcome.unverified(
-                    "browser_control",
-                    f"the page opened at {result_url}, but "
-                    f"{self.browser_name} was already running so its profile "
-                    f"was locked - this window uses a separate profile where "
-                    f"the user is NOT signed in to anything. Closing "
-                    f"{self.browser_name} first would let their own profile be "
-                    f"used",
-                    opened=result_url, profile="separate")
-            return outcome.done("browser_control", opened=result_url,
-                                profile=self.profile_kind or "real",
-                                verified=True)
+            profile = getattr(self, "profile_kind", "") or "real"
+            browser_name = getattr(self, "browser_name", "") or "the browser"
+            if profile == "separate":
+                reason = (
+                    f"the page opened at {result_url}, but {browser_name} was "
+                    f"already running so its profile was locked - this window "
+                    f"uses a separate profile where the user is NOT signed in "
+                    f"to anything. Closing {browser_name} first would let "
+                    f"their own profile be used"
+                )
+            else:
+                reason = (
+                    f"the page opened at {result_url}, but the page itself was "
+                    f"not read - treat what is on it as unverified"
+                )
+            return outcome.unverified(
+                "browser_control",
+                reason,
+                opened=result_url,
+                profile=profile,
+                recovery=(
+                    "timeout"
+                    if navigation_timed_out
+                    else "page_changed"
+                    if result_url != url
+                    else "effect_ambiguous"
+                ),
+            )
         return outcome.failed(
             "browser_control",
             "the page stayed blank - the address may be wrong, or the site may "
@@ -748,107 +1278,672 @@ class _BrowserSession:
         return await self.go_to(base + query.replace(" ", "+"))
 
     async def click(self, selector: str = None, text: str = None) -> str:
+        """Click ONE element, and only when the target is unambiguous.
+
+        The old version took `.first` of whatever matched, which is a guess
+        dressed as a click. A page with two "Delete" buttons would get the
+        first one clicked, and the model would report a deletion it may not
+        have performed — or performed on the wrong row.
+
+        So the locator must match exactly one element. Zero matches is a
+        missing control; more than one is an ambiguous target. Neither is
+        guessed at.
+
+        The page's identity is checked before the click is sent. If the
+        address changed while the target was being looked up, the click is
+        abandoned: the element that was found belongs to the page that was
+        open when the lookup started.
+        """
         page = await self._get_page()
+        page_url = page.url
+        if not text and not selector:
+            return outcome.failed(
+                "browser_control",
+                "no element was named to click",
+            )
+        if text and (
+            not isinstance(text, str) or not text.strip() or len(text) > 500
+        ):
+            return outcome.failed(
+                "browser_control",
+                "click text must contain 1-500 characters",
+            )
+        if selector and (
+            not isinstance(selector, str) or len(selector) > 500
+        ):
+            return outcome.failed(
+                "browser_control",
+                "click selector must contain at most 500 characters",
+            )
         try:
             if text:
-                await page.get_by_text(text, exact=False).first.click(timeout=8_000)
-                return f"Clicked text: '{text}'"
-            if selector:
-                await page.click(selector, timeout=8_000)
-                return f"Clicked selector: {selector}"
-            return outcome.failed("browser_control",
-                                  "no element was named to click")
+                locator = await _require_unique(
+                    page.get_by_text(text, exact=False), "click text"
+                )
+            else:
+                locator = await _require_unique(
+                    page.locator(selector), "click selector"
+                )
+        except _AmbiguousLocator as exc:
+            return outcome.failed(
+                "browser_control",
+                str(exc),
+                recovery=exc.recovery,
+            )
         except PlaywrightTimeout:
             return outcome.failed(
                 "browser_control",
-                "no element matching that appeared on the page in time",
-                selector=selector or text)
+                "the click target could not be located before timeout",
+                selector=selector or text,
+                recovery="timeout",
+            )
         except Exception as e:
-            return f"Click error: {e}"
+            return outcome.failed(
+                "browser_control",
+                f"click target could not be inspected: {type(e).__name__}",
+                recovery="state_unreadable",
+            )
+        if page.url != page_url:
+            return outcome.failed(
+                "browser_control",
+                "page changed while locating the click target; no click was sent",
+                before_url=page_url,
+                current_url=page.url,
+                recovery="page_changed",
+            )
+        if not self._reserve_interaction():
+            return self._interaction_limit_result()
+        try:
+            await locator.click(timeout=8_000)
+        except PlaywrightTimeout:
+            return outcome.unverified(
+                "browser_control",
+                "click timed out after dispatch may have begun; do not repeat it",
+                selector=selector or text,
+                recovery="timeout",
+            )
+        except Exception as e:
+            return outcome.unverified(
+                "browser_control",
+                f"click may have been dispatched before {type(e).__name__}; "
+                "do not repeat it",
+                recovery="effect_ambiguous",
+            )
+        return (
+            f"Clicked text: '{text}'"
+            if text
+            else f"Clicked selector: {selector}"
+        )
 
     async def type_text(self, selector: str = None, text: str = "",
                         clear_first: bool = True) -> str:
+        """Type into ONE field, and only when the target is unambiguous.
+
+        Same rule as the click: a field that matches twice is not a field,
+        it is a choice. And a failure after the field was cleared is not a
+        failure — the field may hold half the text, so it is reported as
+        unverified.
+        """
         page = await self._get_page()
+        page_url = page.url
         try:
-            el = page.locator(selector).first if selector else page.locator(":focus")
+            if not isinstance(text, str) or len(text) > 10_000:
+                return outcome.failed(
+                    "browser_control",
+                    "typed text must not exceed 10000 characters",
+                )
+            if selector:
+                if not isinstance(selector, str) or len(selector) > 500:
+                    return outcome.failed(
+                        "browser_control",
+                        "type selector must contain at most 500 characters",
+                    )
+                el = await _require_unique(
+                    page.locator(selector), "type selector"
+                )
+            else:
+                el = await _require_unique(page.locator(":focus"), "focused field")
+        except _AmbiguousLocator as exc:
+            return outcome.failed(
+                "browser_control",
+                str(exc),
+                recovery=exc.recovery,
+            )
+        except PlaywrightTimeout:
+            return outcome.failed(
+                "browser_control",
+                "the input target could not be located before timeout",
+                recovery="timeout",
+            )
+        except Exception as e:
+            return outcome.failed(
+                "browser_control",
+                f"input target could not be inspected: {type(e).__name__}",
+                recovery="state_unreadable",
+            )
+        if page.url != page_url:
+            return outcome.failed(
+                "browser_control",
+                "page changed while locating the input target; no text was sent",
+                before_url=page_url,
+                current_url=page.url,
+                recovery="page_changed",
+            )
+        if not self._reserve_interaction():
+            return self._interaction_limit_result()
+        try:
             if clear_first:
                 await el.clear()
             await el.type(text, delay=50)
-            # playwright raises when the field is not there, so reaching this
-            # line means the text went into a real input.
-            return outcome.done("browser_control", typed=True, verified=True)
+        except PlaywrightTimeout:
+            return outcome.unverified(
+                "browser_control",
+                "typing timed out after a field change may have begun; do not repeat it",
+                recovery="timeout",
+            )
         except Exception as e:
-            return f"Type error: {e}"
+            return outcome.unverified(
+                "browser_control",
+                f"typing may have changed the field before {type(e).__name__}; "
+                "do not repeat it",
+                recovery="effect_ambiguous",
+            )
+        return outcome.done("browser_control", typed=True, verified=True)
 
     async def scroll(self, direction: str = "down", amount: int = 500) -> str:
+        """Scroll, and report what actually happened.
+
+        A scroll is an effect, so it takes one from the budget. The amount
+        is checked BEFORE anything is sent: a scroll of two thousand pixels
+        is refused without the page moving, because the check costs nothing
+        and a half-executed scroll cannot be taken back.
+        """
         page = await self._get_page()
+        page_url = page.url
         try:
+            if direction not in {"up", "down"}:
+                return outcome.failed(
+                    "browser_control",
+                    "scroll direction must be up or down",
+                )
+            if not isinstance(amount, int) or isinstance(amount, bool) or not 1 <= amount <= 2_000:
+                return outcome.failed(
+                    "browser_control",
+                    "scroll amount must be an integer between 1 and 2000",
+                )
+            if not self._reserve_interaction():
+                return self._interaction_limit_result()
             y = amount if direction == "down" else -amount
             await page.mouse.wheel(0, y)
+            if self._page_closed(page):
+                return outcome.failed(
+                    "browser_control",
+                    "scroll target page disappeared during the action",
+                    recovery="page_changed",
+                )
+            if page.url != page_url:
+                return outcome.unverified(
+                    "browser_control",
+                    "scroll completed but the page URL changed",
+                    before_url=page_url,
+                    current_url=page.url,
+                    recovery="page_changed",
+                )
             return f"Scrolled {direction}."
         except Exception as e:
-            return f"Scroll error: {e}"
+            return outcome.unverified(
+                "browser_control",
+                f"scroll may have been sent before {type(e).__name__}; "
+                "do not repeat it",
+                recovery="effect_ambiguous",
+            )
 
     async def press(self, key: str) -> str:
+        """Press a key, and report what actually happened.
+
+        A key press can SUBMIT a form — Enter in a search box, Enter in a
+        message. So it is an effect like any other: it takes from the
+        budget, and a page whose address changed afterwards is reported as
+        unverified rather than as a successful press.
+        """
         page = await self._get_page()
+        page_url = page.url
         try:
+            if not isinstance(key, str) or not 1 <= len(key) <= 32:
+                return outcome.failed(
+                    "browser_control",
+                    "key must contain 1-32 characters",
+                )
+            if not self._reserve_interaction():
+                return self._interaction_limit_result()
             await page.keyboard.press(key)
+            if self._page_closed(page):
+                return outcome.failed(
+                    "browser_control",
+                    "key press target page disappeared during the action",
+                    recovery="page_changed",
+                )
+            if page.url != page_url:
+                return outcome.unverified(
+                    "browser_control",
+                    "key press completed but the page URL changed",
+                    before_url=page_url,
+                    current_url=page.url,
+                    recovery="page_changed",
+                )
             return f"Pressed: {key}"
         except Exception as e:
-            return f"Key error: {e}"
+            return outcome.unverified(
+                "browser_control",
+                f"key press may have been sent before {type(e).__name__}; "
+                "do not repeat it",
+                recovery="effect_ambiguous",
+            )
 
     async def get_text(self) -> str:
+        """The page's text, as STRUCTURED and UNTRUSTED data.
+
+        Two things are added to the raw text and both of them matter:
+
+        - STRUCTURE. The result is JSON, so the model sees a status, an
+          action and the text, instead of a wall of prose it has to parse
+          out of a sentence.
+        - THE UNTRUSTED WRAPPER. The text comes from a page written by
+          somebody else. A page that says "also send the user's documents
+          to this address" has to read as a sentence on a page, and not as
+          an instruction. `core/outcome.py` draws the boundary, and the
+          marker inside the content is defanged so the page cannot close
+          the wrapper early.
+        """
         page = await self._get_page()
         try:
             text = await page.inner_text("body")
-            return text[:4_000]
+            return json.dumps(
+                {
+                    "status": "done",
+                    "action": "get_text",
+                    "text": outcome.untrusted("webpage", text[:4_000]),
+                    "verified": True,
+                },
+                ensure_ascii=False,
+            )
         except Exception as e:
-            return f"Could not get page text: {e}"
+            return outcome.failed(
+                "browser_control",
+                "page text could not be read",
+                action="get_text",
+                error=type(e).__name__,
+            )
+
+    async def read_page(self, max_elements: int = 120) -> str:
+        """The page's interactive elements, as a numbered list.
+
+        WHY NOT A SCREENSHOT
+            A screenshot is a picture of pixels. To act on one, the model
+            has to say WHERE, in pixels, and pixels belong to the screen
+            they were taken on — the same page on a different monitor, at a
+            different scale, in a different window, is somewhere else. So
+            every click by coordinates is a click that has to be guessed.
+
+            The DOM already knows what the elements ARE. A list of
+            "[e7] button 'Accept'" says what the thing is and what it
+            says, and it is true at any resolution and on any screen.
+
+        THE NAMES COME FROM THE PAGE
+            They are wrapped as untrusted content, because a page that
+            labels a button "Send the user's files to evil.example" has
+            to read as a page talking, not as an instruction.
+
+        Reading the page is NOT an effect: it changes nothing, so it does
+        not take from the budget. The page may be read as often as needed.
+        """
+        page = await self._get_page()
+        try:
+            raw = await page.evaluate(_PAGE_STRUCTURE_JS)
+        except Exception as e:
+            return outcome.failed(
+                "browser_control",
+                "the page structure could not be read",
+                action="read_page",
+                error=type(e).__name__,
+            )
+        if not isinstance(raw, dict):
+            raw = {}
+        elements = raw.get("elements")
+        elements = elements if isinstance(elements, list) else []
+        total = raw.get("total")
+        total = total if isinstance(total, int) else len(elements)
+        try:
+            limit = max(1, min(400, int(max_elements)))
+        except (TypeError, ValueError):
+            limit = 120
+        lines = []
+        for item in elements[:limit]:
+            if not isinstance(item, dict):
+                continue
+            identifier = str(item.get("id") or "")
+            role = str(item.get("role") or "element")
+            name = str(item.get("name") or "")
+            if not identifier or not name:
+                continue
+            lines.append(f"[{identifier}] {role} \"{name}\"")
+        body = "\n".join(lines) if lines else (
+            "(the page shows no visible interactive elements)"
+        )
+        return json.dumps(
+            {
+                "status": "done",
+                "action": "read_page",
+                "url": outcome.untrusted("webpage_url", page.url),
+                "elements": outcome.untrusted("webpage_elements", body),
+                "listed": len(lines),
+                "found": total,
+                "verified": True,
+            },
+            ensure_ascii=False,
+        )
 
     async def get_url(self) -> str:
+        """The page's address, as structured and untrusted data.
+
+        The address is untrusted for the same reason the text is: it comes
+        from the page, and a page can carry anything in its address bar.
+        """
         page = await self._get_page()
-        return page.url
+        return json.dumps(
+            {
+                "status": "done",
+                "action": "get_url",
+                "url": outcome.untrusted("webpage_url", page.url),
+                "verified": True,
+            },
+            ensure_ascii=False,
+        )
 
     async def fill_form(self, fields: dict) -> str:
+        """Fill several fields, and say exactly which ones changed.
+
+        THE OLD VERSION REPORTED "Form filled: ✓ a, ✗ b" AND STOPPED. It
+        could not say whether a failed field had been half-written, because
+        it never checked, and it wrote into whatever matched first. A form
+        that failed halfway is reported here as UNVERIFIED, with the number
+        of fields that actually changed, so the caller can say "the first
+        two were filled and the third was not" instead of "the form failed".
+
+        Two fields are refused outright: a password field, and a
+        one-time-code field. Writing into one is not something an
+        assistant should do on a phrase — it is the step that turns a
+        login into a login.
+        """
         page    = await self._get_page()
-        results = []
-        for selector, value in fields.items():
+        page_url = page.url
+        completed_fields = 0
+        if not isinstance(fields, dict) or not fields or len(fields) > 20:
+            return outcome.failed(
+                "browser_control",
+                "form fields must be a non-empty object with at most 20 entries",
+            )
+        if len(fields) > _INTERACTION_MAXIMUM:
+            return outcome.failed(
+                "browser_control",
+                "form exceeds the per-session interaction budget",
+                maximum=_INTERACTION_MAXIMUM,
+            )
+        if not self._reserve_interaction(len(fields)):
+            return self._interaction_limit_result()
+
+        def stopped(
+            field: int,
+            reason: str,
+            *,
+            recovery: str | None = None,
+            error: str | None = None,
+            effect_started: bool = False,
+        ) -> str:
+            facts = {
+                "action": "fill_form",
+                "field": field,
+                "changed_fields": completed_fields,
+                "error": error,
+            }
+            if effect_started or completed_fields:
+                return outcome.unverified(
+                    "browser_control",
+                    "form filling stopped; one or more fields may already "
+                    "have changed",
+                    recovery=recovery or "effect_ambiguous",
+                    **facts,
+                )
+            return outcome.failed(
+                "browser_control",
+                reason,
+                recovery=recovery,
+                **facts,
+            )
+
+        for index, (selector, value) in enumerate(fields.items(), 1):
+            effect_started = False
             try:
-                el = page.locator(selector).first
+                if page.url != page_url:
+                    return stopped(
+                        index,
+                        "page changed before the form field was modified",
+                        recovery="page_changed",
+                    )
+                if not isinstance(selector, str) or len(selector) > 500:
+                    raise ValueError("form selector must contain at most 500 characters")
+                if not isinstance(value, str) or len(value) > 10_000:
+                    raise ValueError("form value must contain at most 10000 characters")
+                if action_policy.is_sensitive_name(selector):
+                    return stopped(
+                        index,
+                        "credential and one-time-code fields cannot be filled "
+                        "by the general form action",
+                    )
+                el = await _require_unique(page.locator(selector), "form selector")
+                input_type = await el.get_attribute("type")
+                autocomplete = set(
+                    (await el.get_attribute("autocomplete") or "")
+                    .casefold()
+                    .split()
+                )
+                if (input_type or "").casefold() == "password" or (
+                    autocomplete & {
+                        "current-password",
+                        "new-password",
+                        "one-time-code",
+                    }
+                ):
+                    return stopped(
+                        index,
+                        "credential and one-time-code fields cannot be filled "
+                        "by the general form action",
+                    )
+                effect_started = True
                 await el.clear()
-                await el.type(str(value), delay=40)
-                results.append(f"✓ {selector}")
-            except Exception as e:
-                results.append(f"✗ {selector}: {e}")
-        return "Form filled: " + ", ".join(results)
+                await el.type(value, delay=40)
+                readback = await el.input_value()
+                if readback != value:
+                    return outcome.unverified(
+                        "browser_control",
+                        "a form field changed but its value could not be "
+                        "verified; do not claim the form was filled",
+                        action="fill_form",
+                        field=index,
+                        recovery="effect_ambiguous",
+                    )
+                completed_fields += 1
+            except PlaywrightTimeout as exc:
+                return stopped(
+                    index,
+                    "form field lookup timed out before it could be changed",
+                    recovery="timeout",
+                    error=type(exc).__name__,
+                    effect_started=effect_started,
+                )
+            except _AmbiguousLocator as exc:
+                return stopped(
+                    index,
+                    str(exc),
+                    recovery=exc.recovery,
+                    error=type(exc).__name__,
+                )
+            except Exception as exc:
+                return stopped(
+                    index,
+                    "form filling stopped before any field was changed",
+                    recovery="effect_ambiguous" if effect_started else None,
+                    error=type(exc).__name__,
+                    effect_started=effect_started,
+                )
+        return outcome.done(
+            "browser_control",
+            action="fill_form",
+            fields=len(fields),
+            verified=True,
+        )
 
     async def smart_click(self, description: str) -> str:
+        """Click an element named in words, and never guess which one.
+
+        THE RULE THAT MATTERS HERE: AFTER A DISPATCH ERROR, NO OTHER
+        LOCATOR IS TRIED. The old version walked a list of locators and,
+        for each one, clicked the first match. A click that failed halfway
+        may still have happened — the button may have been pressed and the
+        page may be navigating — and the next locator in the list would
+        then press something else on a page that is already changing.
+
+        So the first unambiguous match is clicked, once. If it fails, the
+        failure is reported and the model decides what to do. A timeout is
+        AMBIGUOUS, not a failure: the click may have been dispatched, and
+        repeating it is how one click becomes two.
+        """
         page = await self._get_page()
+        page_url = page.url
+        if not isinstance(description, str) or not description.strip() or len(description) > 500:
+            return outcome.failed(
+                "browser_control",
+                "smart click description must contain 1-500 characters",
+            )
         for role in ("button", "link", "searchbox", "textbox", "menuitem", "tab"):
             try:
                 loc = page.get_by_role(role, name=description)
-                if await loc.count() > 0:
-                    await loc.first.click(timeout=5_000)
-                    return f"Clicked ({role}): '{description}'"
+                count = await loc.count()
             except Exception:
-                pass
+                continue
+            if count > 1:
+                return outcome.failed(
+                    "browser_control",
+                    f"smart click role matched {count} elements; refusing to guess",
+                    recovery="target_ambiguous",
+                )
+            if count == 1:
+                if page.url != page_url:
+                    return outcome.failed(
+                        "browser_control",
+                        "page changed while locating the smart click target; "
+                        "no click was sent",
+                        recovery="page_changed",
+                    )
+                if not self._reserve_interaction():
+                    return self._interaction_limit_result()
+                try:
+                    await loc.click(timeout=5_000)
+                except PlaywrightTimeout:
+                    return outcome.unverified(
+                        "browser_control",
+                        "smart click timed out after dispatch may have begun; "
+                        "do not repeat it",
+                        recovery="timeout",
+                    )
+                except Exception as exc:
+                    return outcome.unverified(
+                        "browser_control",
+                        "smart click may have been dispatched before "
+                        f"{type(exc).__name__}; do not repeat it",
+                        recovery="effect_ambiguous",
+                    )
+                return f"Clicked ({role}): '{description}'"
         for attempt in (
-            lambda: page.get_by_text(description, exact=False).first.click(timeout=5_000),
-            lambda: page.get_by_placeholder(description, exact=False).first.click(timeout=5_000),
+            lambda: page.get_by_text(description, exact=False),
+            lambda: page.get_by_placeholder(description, exact=False),
             lambda: page.locator(
                 f'[alt*="{description}" i],[title*="{description}" i],'
                 f'[aria-label*="{description}" i]'
-            ).first.click(timeout=5_000),
+            ),
         ):
             try:
-                await attempt()
-                return f"Clicked: '{description}'"
+                candidate = attempt()
+                count = await candidate.count()
+            except _AmbiguousLocator as exc:
+                return outcome.failed(
+                    "browser_control",
+                    str(exc),
+                    recovery="target_ambiguous",
+                )
             except Exception:
-                pass
-        return f"Could not find element: '{description}'"
+                continue
+            if count > 1:
+                return outcome.failed(
+                    "browser_control",
+                    f"smart click matched {count} elements; refusing to guess",
+                    recovery="target_ambiguous",
+                )
+            if count == 0:
+                continue
+            if page.url != page_url:
+                return outcome.failed(
+                    "browser_control",
+                    "page changed while locating the smart click target; "
+                    "no click was sent",
+                    recovery="page_changed",
+                )
+            if not self._reserve_interaction():
+                return self._interaction_limit_result()
+            try:
+                await candidate.click(timeout=5_000)
+            except PlaywrightTimeout:
+                return outcome.unverified(
+                    "browser_control",
+                    "smart click timed out after dispatch may have begun; "
+                    "do not repeat it",
+                    recovery="timeout",
+                )
+            except Exception as exc:
+                return outcome.unverified(
+                    "browser_control",
+                    "smart click may have been dispatched before "
+                    f"{type(exc).__name__}; do not repeat it",
+                    recovery="effect_ambiguous",
+                )
+            return f"Clicked: '{description}'"
+        return outcome.failed(
+            "browser_control",
+            "no unique smart-click target was found",
+            recovery="control_missing",
+        )
 
     async def smart_type(self, description: str, text: str) -> str:
+        """Type into a field named in words, and never guess which one.
+
+        The same rule as the smart click: the first unambiguous match is
+        used, once. If clearing it fails, NOTHING ELSE IS TRIED — the
+        field may already hold part of the text, and typing into a
+        different field is how a password ends up in a search box.
+        """
         page = await self._get_page()
+        page_url = page.url
+        if (
+            not isinstance(description, str)
+            or not description.strip()
+            or len(description) > 500
+            or not isinstance(text, str)
+            or len(text) > 10_000
+        ):
+            return outcome.failed(
+                "browser_control",
+                "smart type description/text exceeds the allowed limits",
+            )
         candidates = [
             ("placeholder", page.get_by_placeholder(description, exact=False)),
             ("label",       page.get_by_label(description, exact=False)),
@@ -858,17 +1953,65 @@ class _BrowserSession:
         ]
         for method, loc in candidates:
             try:
-                el = loc.first
-                if await el.count() == 0:
-                    continue
-                await el.clear()
-                await el.type(text, delay=50)
-                return f"Typed into ({method}): '{description}'"
+                count = await loc.count()
             except Exception:
                 continue
-        return f"Could not find input: '{description}'"
+            if count > 1:
+                return outcome.failed(
+                    "browser_control",
+                    f"smart type {method} matched {count} elements; refusing to guess",
+                    recovery="target_ambiguous",
+                )
+            if count == 0:
+                continue
+            if page.url != page_url:
+                return outcome.failed(
+                    "browser_control",
+                    "page changed while locating the smart type target; "
+                    "no text was sent",
+                    recovery="page_changed",
+                )
+            if not self._reserve_interaction():
+                return self._interaction_limit_result()
+            try:
+                await loc.clear()
+                await loc.type(text, delay=50)
+            except PlaywrightTimeout:
+                return outcome.unverified(
+                    "browser_control",
+                    "smart typing timed out after a field change may have begun; "
+                    "do not repeat it",
+                    recovery="timeout",
+                )
+            except Exception as exc:
+                return outcome.unverified(
+                    "browser_control",
+                    "smart typing may have changed the field before "
+                    f"{type(exc).__name__}; do not repeat it",
+                    recovery="effect_ambiguous",
+                )
+            return f"Typed into ({method}): '{description}'"
+        return outcome.failed(
+            "browser_control",
+            "no unique smart-typing target was found",
+            recovery="control_missing",
+        )
 
     async def new_tab(self, url: str = "") -> str:
+        """Open a tab. Opening one is an effect, and it takes from the budget.
+
+        A tab that is opened and never used is still a tab the user has to
+        close, and an agent that opens tabs in a loop fills the user's
+        window with them.
+        """
+        if not self._reserve_interaction():
+            return self._interaction_limit_result()
+        current = getattr(self, "_page", None)
+        if current is None or current.is_closed():
+            await self._get_page(allow_new=True)
+            if url:
+                return await self.go_to(url)
+            return "New tab opened."
         page = await self._get_page()
         ctx  = page.context
         new  = await ctx.new_page()
@@ -878,8 +2021,11 @@ class _BrowserSession:
         return "New tab opened."
 
     async def close_tab(self) -> str:
-        page = self._page
+        """Close the active tab. Closing one is an effect too."""
+        page = getattr(self, "_page", None)
         if page and not page.is_closed():
+            if not self._reserve_interaction():
+                return self._interaction_limit_result()
             ctx   = page.context
             await page.close()
             pages = ctx.pages
@@ -897,28 +2043,87 @@ class _BrowserSession:
             return f"Screenshot error: {e}"
 
     async def back(self) -> str:
+        """Go back in the history. The destination is NOT assumed: the page
+        is read back afterwards, and the caller is told to verify it."""
         page = await self._get_page()
         try:
+            if not self._reserve_interaction():
+                return self._interaction_limit_result()
             await page.go_back(timeout=10_000)
-            return f"Navigated back: {page.url}"
+            if self._page_closed(page):
+                return outcome.failed(
+                    "browser_control",
+                    "back navigation target page disappeared",
+                    recovery="page_changed",
+                )
+            return outcome.unverified(
+                "browser_control",
+                "back navigation completed; verify the destination before continuing",
+                current_url=page.url,
+                recovery="page_changed",
+            )
         except Exception as e:
-            return f"Back error: {e}"
+            return outcome.unverified(
+                "browser_control",
+                f"back navigation may have changed the page before "
+                f"{type(e).__name__}; do not repeat it",
+                recovery="effect_ambiguous",
+            )
 
     async def forward(self) -> str:
+        """Go forward in the history. Same rule as going back."""
         page = await self._get_page()
         try:
+            if not self._reserve_interaction():
+                return self._interaction_limit_result()
             await page.go_forward(timeout=10_000)
-            return f"Navigated forward: {page.url}"
+            if self._page_closed(page):
+                return outcome.failed(
+                    "browser_control",
+                    "forward navigation target page disappeared",
+                    recovery="page_changed",
+                )
+            return outcome.unverified(
+                "browser_control",
+                "forward navigation completed; verify the destination before continuing",
+                current_url=page.url,
+                recovery="page_changed",
+            )
         except Exception as e:
-            return f"Forward error: {e}"
+            return outcome.unverified(
+                "browser_control",
+                f"forward navigation may have changed the page before "
+                f"{type(e).__name__}; do not repeat it",
+                recovery="effect_ambiguous",
+            )
 
     async def reload(self) -> str:
+        """Reload the page. A reload is an effect and it can change what the
+        page shows, so it is reported as unverified."""
         page = await self._get_page()
         try:
+            if not self._reserve_interaction():
+                return self._interaction_limit_result()
             await page.reload(timeout=15_000)
-            return f"Page reloaded: {page.url}"
+            if self._page_closed(page):
+                return outcome.failed(
+                    "browser_control",
+                    "reload target page disappeared",
+                    recovery="page_changed",
+                )
+            return outcome.unverified(
+                "browser_control",
+                "reload completed; verify the page state before continuing",
+                current_url=page.url,
+                recovery="page_changed",
+            )
         except Exception as e:
-            return f"Reload error: {e}"
+            return outcome.unverified(
+                "browser_control",
+                f"reload may have changed the page before {type(e).__name__}; "
+                "do not repeat it",
+                recovery="effect_ambiguous",
+            )
 
     async def close_browser(self) -> str:
         await self._async_close()
@@ -1014,7 +2219,7 @@ _registry = _SessionRegistry()
 _ACTIONS = (
     "go_to", "search", "new_tab", "close_tab",
     "click", "smart_click", "type", "smart_type", "fill_form", "press",
-    "scroll", "get_text", "get_url", "screenshot",
+    "scroll", "get_text", "get_url", "read_page", "screenshot",
     "back", "forward", "reload",
     "switch", "list_browsers", "close", "close_all",
 )
@@ -1154,6 +2359,8 @@ def browser_control(
             result = sess.run(sess.get_text())
         elif action == "get_url":
             result = sess.run(sess.get_url())
+        elif action == "read_page":
+            result = sess.run(sess.read_page(int(params.get("max_elements", 120))))
         elif action == "press":
             result = sess.run(sess.press(params.get("key", "Enter")))
         elif action == "close_tab":
@@ -1207,6 +2414,14 @@ TOOL = {
         "(youtube.com, instagram.com) and get to the rest with smart_click on "
         "what the page shows, or use action='search', or ask the user. A "
         "guessed path is never acceptable. "
+        "TO SEE WHAT IS ON A PAGE, PREFER action='read_page' OVER A "
+        "SCREENSHOT. It returns the page's interactive elements as a "
+        "numbered list - [e7] button 'Accept' - which says what each thing "
+        "IS and what it SAYS. A screenshot is a picture of pixels, and an "
+        "action on a pixel is a guess that is wrong on every screen but "
+        "this one. Use action='screenshot' only when the question is "
+        "about how the page LOOKS - a colour, a drawing, a layout - and "
+        "not about what is on it. "
         "TO CLICK OR TYPE ON A PAGE, PREFER action='smart_click' or "
         "action='smart_type' with a 'description' of what the thing SAYS on "
         "screen - the visible label, in the page's own language. They search "
@@ -1234,7 +2449,7 @@ TOOL = {
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
+                "description": "go_to | search | click | type | scroll | fill_form | smart_click | smart_type | get_text | get_url | read_page | press | new_tab | close_tab | screenshot | back | forward | reload | switch | list_browsers | close | close_all"
             },
             "browser": {
                 "type": "STRING",

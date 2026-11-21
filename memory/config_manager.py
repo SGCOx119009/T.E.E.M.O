@@ -901,6 +901,38 @@ def get_plugin_setting(namespace: str, key: str, default=None):
     return get_plugin_config(namespace).get(key, default)
 
 
+# ── Browser allow list ───────────────────────────────────────────────────────
+# The domains the browser operator is allowed to reach. Empty means the user
+# has not restricted anything — which is NOT the same as "nothing is
+# allowed": the deny list in core/policy.py is in force either way. The
+# allow list is an opt-in TIGHTENING, never a way to reach a blocked domain.
+def get_browser_allowlist() -> list[str]:
+    """The domains the user has authorised the browser to reach."""
+    raw = load_api_keys().get("browser_allowlist", [])
+    if isinstance(raw, str):
+        raw = [part for part in re.split(r"[,\s;]+", raw) if part]
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        domain = str(item or "").strip().lower().rstrip(".")
+        if domain and domain not in out:
+            out.append(domain)
+    return out
+
+
+def save_browser_allowlist(domains: list[str] | str) -> None:
+    """Store the authorised domains. An empty list clears the restriction."""
+    if isinstance(domains, str):
+        domains = [part for part in re.split(r"[,\s;]+", domains) if part]
+    cleaned: list[str] = []
+    for item in (domains or []):
+        domain = str(item or "").strip().lower().rstrip(".")
+        if domain and domain not in cleaned:
+            cleaned.append(domain)
+    _patch_config(browser_allowlist=cleaned)
+
+
 def save_plugin_config(namespace: str, values: dict, secret_keys=()) -> None:
     """Merge `values` into a namespace's stored config (read-modify-write, like
     every other helper here). Only the provided keys are touched."""
