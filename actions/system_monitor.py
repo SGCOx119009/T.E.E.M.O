@@ -28,6 +28,7 @@ READING THE MACHINE
 import ctypes
 import os
 import subprocess
+import threading
 import sys
 import time
 
@@ -47,6 +48,9 @@ _CPU_STREAK = 3
 
 # Windows: do not flash a console window at the user for a background read.
 _CREATE_NO_WINDOW = 0x08000000
+
+# COM: one apartment per thread.
+_com_state = threading.local()
 
 # The temperature sensors psutil may expose, in the order they are trusted.
 _SENSOR_NAMES = ("coretemp", "cpu", "k10temp", "cpu_thermal", "acpitz",
@@ -121,27 +125,47 @@ def _get_gpu_usage() -> float:
 
 # ── Running a command without showing it to the user ────────────────────────
 
+# Commands this computer does not have, and failures already said out loud.
+#
+# WINDOWS 11 HAS NO `wmic` ANY MORE, and the command was asked for every few
+# seconds: the terminal filled with a line the user never asked for, over and
+# over, while the program went on. A command that is not here is remembered,
+# and a failure that has already been said is not said again.
+_dead_commands: set[str] = set()
+_reported: set[str] = set()
+
+
 def _run_hidden(command: list[str], timeout: float = 12.0) -> str:
     """Run a command, return its output. "" when it could not be run.
 
     The output is CAPTURED, never sent to DEVNULL: a command that fails has
-    to say so somewhere, and AGENTS.md is explicit about it.
+    to say so somewhere, and AGENTS.md is explicit about it. It is said ONCE.
     """
+    name = str(command[0] or "")
+    if name in _dead_commands:
+        return ""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         completed = subprocess.run(
             command, capture_output=True, timeout=timeout, creationflags=flags,
         )
     except FileNotFoundError:
-        print(f"[SystemMonitor] '{command[0]}' is not available on this computer.")
+        _dead_commands.add(name)
+        if name not in _reported:
+            _reported.add(name)
+            print(f"[SystemMonitor] '{name}' is not available on this computer.")
         return ""
     except Exception as exc:
-        print(f"[SystemMonitor] '{command[0]}' could not be run "
-              f"({type(exc).__name__}).")
+        if name not in _reported:
+            _reported.add(name)
+            print(f"[SystemMonitor] '{name}' could not be run "
+                  f"({type(exc).__name__}).")
         return ""
     if completed.returncode != 0:
-        print(f"[SystemMonitor] '{command[0]}' finished with code "
-              f"{completed.returncode}.")
+        if name not in _reported:
+            _reported.add(name)
+            print(f"[SystemMonitor] '{name}' finished with code "
+                  f"{completed.returncode}.")
     return (completed.stdout or b"").decode("utf-8", "replace")
 
 
@@ -219,11 +243,72 @@ def _sensor_value(entry) -> float | None:
     return round(current, 1)
 
 
+def _com_ready() -> bool:
+    """Prepares the calling thread to talk to WMI.
+
+    WMI is COM, and COM belongs to a thread: a query sent from a thread that
+    has not opened its apartment comes back as a syntax error. It is opened
+    once per thread, and never from a daemon thread that is shutting down.
+    """
+    if getattr(_com_state, "ready", False):
+        return True
+    try:
+        import pythoncom
+    except Exception:
+        return False
+    try:
+        pythoncom.CoInitialize()
+        _com_state.ready = True
+        return True
+    except Exception as exc:
+        # RPC_E_CHANGED_MODE: COM is already open on this thread in another
+        # model. That is not a problem — it is already ready.
+        if getattr(exc, "args", [None])[0] == -2147417850:
+            _com_state.ready = True
+            return True
+        try:
+            pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+            _com_state.ready = True
+            return True
+        except Exception:
+            return False
+
+
+def _temp_from_cimv2() -> tuple[float | None, str]:
+    """The thermal zone, read through the performance counters of cimv2.
+
+    `root/wmi` asks for the same number the old way and is denied on a lot of
+    machines, and `wmic` — which asked for it that way — is not in Windows 11
+    any more. The performance counters of `root/cimv2` carry the same reading
+    and are allowed everywhere: that is where the panel on screen gets its
+    number, and this is the same door.
+    """
+    try:
+        import wmi  # type: ignore
+    except Exception as exc:
+        return None, f"the WMI package is not available ({type(exc).__name__})"
+    try:
+        _com_ready()
+        conn = wmi.WMI(namespace="root/cimv2")
+        for zone in conn.Win32_PerfFormattedData_Counters_ThermalZoneInformation():
+            try:
+                kelvin = float(zone.Temperature)
+            except Exception:
+                continue
+            if kelvin > 0:
+                return kelvin - 273.15, ""
+    except Exception as exc:
+        return None, f"the cimv2 thermal zone query failed ({type(exc).__name__})"
+    return None, "the thermal zone reported no usable reading"
+
+
 def _temp_from_wmi() -> tuple[float | None, str]:
     """The ACPI thermal zone, read through WMI.
 
     Three ways in, because Windows does not always give one: the `wmi`
-    module (no subprocess), then wmic, then PowerShell. The first that
+    module on root/wmi, the same module on root/cimv2 (the counters, which
+    are allowed where the old namespace is denied), then wmic and
+    PowerShell for the machines where neither is there. The first that
     produces a real value wins.
     """
     reasons: list[str] = []
@@ -238,6 +323,11 @@ def _temp_from_wmi() -> tuple[float | None, str]:
         reasons.append("the thermal zone reported no usable reading")
     except Exception as exc:
         reasons.append(f"the WMI thermal zone query failed ({type(exc).__name__})")
+
+    value, cimv2_reason = _temp_from_cimv2()
+    if value is not None:
+        return value, ""
+    reasons.append(cimv2_reason)
 
     for command in (_WMIC_TEMP, _POWERSHELL_TEMP):
         raw = _last_number(_run_hidden(command))

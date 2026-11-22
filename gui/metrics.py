@@ -229,6 +229,28 @@ def _gpu_windows_counters(conn) -> float:
     return min(100.0, float(total))
 
 
+def _warm_gpu_provider() -> None:
+    """Ask Windows to enumerate the adapters of this machine, once.
+
+    The GPU counters are slow the FIRST time and fast after that, because
+    the provider enumerates every adapter and every engine when it is first
+    asked. Doing that enumeration here — in the background, while the
+    program is still coming up — is the difference between a panel that
+    shows the GPU load within seconds and one that says "..." for a quarter
+    of a minute.
+    """
+    if _OS != "Windows":
+        return
+    try:
+        wmi = _load_wmi()
+        if wmi is None:
+            return
+        conn = wmi.WMI(namespace="root/cimv2")
+        conn.Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory()
+    except Exception:
+        pass
+
+
 def _temp_windows(conn) -> float:
     """The temperature of the machine, in degrees Celsius.
 
@@ -340,6 +362,17 @@ class _SysMetrics:
         # thread. Without this the queries come back as a syntax error and
         # both meters say N/A for ever.
         _com_ready()
+        # THE GPU PROVIDER IS WARMED UP FIRST, BEFORE THE WAIT.
+        #
+        # Windows enumerates every adapter and every engine of this machine
+        # the first time it is asked about the GPU, and that enumeration
+        # costs eleven seconds — measured: 11 s the first time and 2,5 s
+        # after. Asking about the adapters instead of the engines does the
+        # enumeration, and it is asked for HERE, while the program is still
+        # loading and nobody is waiting for a number. The panel asked its
+        # question at the same moment the ignition did, and the answer was
+        # already on the way.
+        _warm_gpu_provider()
         # THE FIRST READING WAITS A MOMENT.
         #
         # This thread starts while the program is still loading its
