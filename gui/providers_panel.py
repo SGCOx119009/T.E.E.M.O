@@ -21,6 +21,7 @@ from PyQt6.QtCore import (
     QPoint, QPropertyAnimation, QRect, QRectF, QSize, QSizeF, Qt, QTimer,
     QUrl, pyqtSignal,
 )
+from PyQt6 import sip
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
@@ -172,7 +173,7 @@ class ProvidersOverlay(_HudOverlay):
                                       fromlist=["prefetch"])
                     _pf = getattr(_mod, "prefetch", None)
                     if _pf:
-                        _pf(self._live_ready.emit)
+                        _pf(self._safe_live_ready)
                 except Exception:
                     pass
         self._edits: dict[str, dict] = {}       # provider id -> {key: (widget, Field)}
@@ -330,6 +331,23 @@ class ProvidersOverlay(_HudOverlay):
                 }}
                 QPushButton:hover {{ border-color: {C.BORDER_B}; }}
             """)
+
+    def _safe_live_ready(self) -> None:
+        """The worker says the list has landed. The panel may be gone.
+
+        THE PANEL IS NOT ALWAYS THERE WHEN THE ANSWER ARRIVES. The user
+        closed it, or the test that opened it finished, and the widget was
+        destroyed — and a signal of a destroyed widget is an ACCESS
+        VIOLATION, not an exception: the interpreter goes down with it and
+        the whole test run is lost with it. So the panel is asked whether
+        it is still alive before it is touched.
+        """
+        try:
+            if sip.isdeleted(self):
+                return
+            self._live_ready.emit()
+        except RuntimeError:
+            pass
 
     def _on_live_ready(self) -> None:
         """A machine-supplied list has arrived — redraw once so it appears."""
