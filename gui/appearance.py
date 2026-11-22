@@ -54,6 +54,11 @@ _DASHBOARD_WIDGETS = (
     "_quiz_panel", "_footer", "_cam_preview", "_clipboard_panel",
 )
 
+# The floating overlays — the setup one, the remote one, the customisation
+# one. They are only HIDDEN by the core mode, never shown again: a modal
+# that was closed must not come back.
+_OVERLAYS = ("_overlay", "_remote_overlay", "_customize_overlay")
+
 
 def _flag(widget, flag, on: bool) -> None:
     """Set a window flag, quietly.
@@ -190,8 +195,18 @@ class Appearance:
             window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         except Exception:
             pass
-        self._central_background(f"background: {C.BG};")
+        self._central_background(transparent=False)
         self._show_dashboard_widgets(True)
+        # The deck comes back if the user had it open before going to the
+        # corner: the cards were never thrown away.
+        deck = getattr(window, "_blades", None)
+        if deck is not None:
+            try:
+                if deck.is_open():
+                    deck.show()
+                    deck.raise_()
+            except Exception:
+                pass
         hud = getattr(window, "hud", None)
         if hud is not None and hasattr(hud, "set_core_only"):
             hud.set_core_only(False)
@@ -199,6 +214,12 @@ class Appearance:
         if stack is not None:
             try:
                 stack.setCurrentIndex(0)
+            except Exception:
+                pass
+        hud = getattr(window, "hud", None)
+        if hud is not None:
+            try:
+                hud.setMinimumSize(300, 300)
             except Exception:
                 pass
         try:
@@ -220,8 +241,10 @@ class Appearance:
             window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         except Exception:
             pass
-        self._central_background("background: transparent;")
+        self._central_background(transparent=True)
         self._show_dashboard_widgets(False)
+        self._hide_overlays()
+        self._hide_deck()
         hud = getattr(window, "hud", None)
         if hud is not None and hasattr(hud, "set_core_only"):
             hud.set_core_only(True)
@@ -235,6 +258,16 @@ class Appearance:
             window.setFixedSize(*CORE_SIZE)
         except Exception:
             pass
+        # The HUD asks for 300×300 of its own, and a fixed window cannot be
+        # smaller than the thing inside it: without this the corner window
+        # comes out at the HUD's minimum plus the margins, and the face ends
+        # up off-centre in a rectangle it does not fill.
+        hud = getattr(window, "hud", None)
+        if hud is not None:
+            try:
+                hud.setMinimumSize(40, 40)
+            except Exception:
+                pass
         self._place_core()
         try:
             window.show()
@@ -248,6 +281,7 @@ class Appearance:
         no button for it — the tray icon is the whole of its presence."""
         if self._mode and self._mode != "tray":
             self._previous_mode = self._mode
+        self._hide_deck()
         try:
             self._window.hide()
         except Exception:
@@ -266,13 +300,60 @@ class Appearance:
             except Exception:
                 pass
 
-    def _central_background(self, style: str) -> None:
+    def _hide_overlays(self) -> None:
+        """The floating overlays go away in the corner and in the tray.
+
+        They are only hidden, never shown again: a modal that the user
+        closed must not come back on its own.
+        """
+        window = self._window
+        for name in _OVERLAYS:
+            widget = getattr(window, name, None)
+            if widget is None:
+                continue
+            try:
+                widget.hide()
+            except Exception:
+                pass
+
+    def _hide_deck(self) -> None:
+        """The deck of cards goes away in the corner and in the tray.
+
+        The deck is part of the dashboard — a column of cards down the
+        right of the interface — and in the corner there is no right side
+        to put it in. It is only hidden: the cards stay in the deck, and
+        the deck comes back with them.
+        """
+        window = self._window
+        deck = getattr(window, "_blades", None)
+        if deck is None:
+            return
+        try:
+            deck.hide()
+        except Exception:
+            pass
+
+    def _central_background(self, transparent: bool) -> None:
+        """The background of the central widget.
+
+        In the dashboard mode the SCENE paints the background — a deep
+        field with rings and dust — so the widget must not paint a flat
+        colour over it. In the corner mode the scene is switched off and
+        the widget is told to be transparent, so the DESKTOP is the
+        background and the face floats on the wallpaper.
+        """
         window = self._window
         central = window.centralWidget()
+        scene = getattr(window, "_scene", None)
+        if scene is not None:
+            try:
+                scene.set_scene_enabled(not transparent)
+            except Exception:
+                pass
         if central is None:
             return
         try:
-            central.setStyleSheet(style)
+            central.setStyleSheet("background: transparent;" if transparent else "")
         except Exception:
             pass
 

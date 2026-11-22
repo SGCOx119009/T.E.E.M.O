@@ -44,6 +44,7 @@ from collections import deque
 from PyQt6.QtGui import QPolygonF, QTextBlockFormat, QTextCharFormat
 
 from gui.style import (blend, chamfer, hud_font, px_font, scroll_css, with_alpha)
+from gui import fx
 
 
 class MetricBar(QWidget):
@@ -665,6 +666,14 @@ class HoloPanel(QWidget):
             lg.setColorAt(1.0, with_alpha(C.PRI, 0.0))
             p.setPen(QPen(QBrush(lg), 1))
             p.drawLine(QLineF(12, self.HEADER, W - 12, self.HEADER))
+        # THE GRAIN, THE BRACKETS AND THE SCALE.
+        #
+        # Three more strokes, all of them quiet: the grain that says glass,
+        # the brackets that say the panel is aimed at something, and the
+        # ticks along the bottom that say the panel is an instrument.
+        fx.scanlines(p, QRectF(0, 0, W, H), C.PRI, pitch=3, alpha=5)
+        fx.brackets(p, QRectF(3, 3, W - 6, H - 6), C.PRI, size=13, alpha=110)
+        fx.ruler(p, QRectF(16, H - 7, W - 32, 7), C.PRI, count=14, alpha=55)
         p.end()
 
 
@@ -913,6 +922,14 @@ def paint_icon(p: QPainter, kind: str, r: QRectF, col: QColor) -> None:
                                  QPointF(cx, cy - s * 0.7), QPointF(cx, cy + s * 0.7),
                                  QPointF(cx - s * 0.4, cy + s * 0.3), QPointF(cx - s * 0.8, cy + s * 0.3)]))
         p.drawArc(QRectF(cx - s * 0.3, cy - s * 0.5, s * 0.8, s * 1.0), -60 * 16, 120 * 16)
+    elif kind == "deck":
+        # A stack of cards seen from the side: three lines, each one
+        # shorter and further to the right than the one below it.
+        for i in range(3):
+            y = cy - s * 0.55 + i * s * 0.55
+            x0 = cx - s * 0.75 + i * s * 0.16
+            x1 = cx + s * 0.75 - i * s * 0.10
+            p.drawLine(QLineF(x0, y, x1, y))
 
 
 class IconButton(QPushButton):

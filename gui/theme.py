@@ -144,6 +144,14 @@ class C:
     FILE_PPTX      = "#ff6622"   # the powerpoint file-type icon
     FILE_DATA      = "#88ddff"   # the data file-type icon
 
+    # ── The deep field ──────────────────────────────────────────────────────
+    # The background the interface is projected on. Almost black, but not
+    # black: flat black reads as a page, and a face on flat black reads as
+    # a sticker. These two are NOT re-derived when the accent changes — the
+    # field is the room, and the room does not change colour.
+    DEEP_TOP       = "#020a14"
+    DEEP_BOT       = "#000306"
+
 
 # Keys tied to the accent colour — status colours (ACC, GREEN, RED…) stay fixed
 _HUE_LINKED = (

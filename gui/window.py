@@ -16,9 +16,9 @@ from pathlib import Path
 import psutil
 
 from PyQt6.QtCore import (
-    QEasingCurve, QLineF, QMimeData, QObject, QParallelAnimationGroup, QPointF,
-    QPoint, QPropertyAnimation, QRect, QRectF, QSize, QSizeF, Qt, QTimer,
-    QUrl, pyqtSignal,
+    QEasingCurve, QEvent, QLineF, QMimeData, QObject, QParallelAnimationGroup,
+    QPointF, QPoint, QPropertyAnimation, QRect, QRectF, QSize, QSizeF, Qt,
+    QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
@@ -64,6 +64,22 @@ from gui.hud import (
 )
 from gui.appearance import (
     Appearance,
+)
+from gui.scene import (
+    SceneCanvas,
+)
+from gui.gesture import (
+    GestureOverlay,
+    GestureService,
+)
+from gui.blades import (
+    BladeStack,
+)
+from gui.boot import (
+    BootOverlay,
+)
+from gui.floating import (
+    FloatingPanel,
 )
 from gui.widgets import (
     FileDropZone,
@@ -168,8 +184,15 @@ class MainWindow(QMainWindow):
         self._remote_overlay: RemoteKeyOverlay | None = None
         self._customize_overlay: CustomizeOverlay | None = None
 
-        central = QWidget()
-        central.setStyleSheet(f"background: {C.BG};")
+        # THE SCENE.
+        #
+        # The central widget is not a blank plate: it is the world the
+        # assistant is projected into — a deep field with a grid on it,
+        # three rings turning at different speeds, dust in the air, and the
+        # corner brackets. It replaces the flat background, and in the
+        # corner mode it is switched off so the DESKTOP shows through.
+        central = SceneCanvas()
+        self._scene = central
         self.setCentralWidget(central)
 
         root = QVBoxLayout(central)
@@ -191,6 +214,19 @@ class MainWindow(QMainWindow):
         # Center column: HUD + resizable content panel via QSplitter
         self.hud = HudCanvas(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        # THE HANDS, DRAWN ON THE GLASS.
+        #
+        # The overlay is a child of the HUD, so it is drawn on top of the
+        # face and follows the HUD's size; and the service that watches the
+        # camera lives on its own thread, because the camera and the
+        # tracking are both slow.
+        self._gesture_overlay = GestureOverlay(self.hud)
+        self._gesture_overlay.setGeometry(self.hud.rect())
+        self.hud.installEventFilter(self)
+        self._gesture = GestureService(self)
+        self._gesture.hands_sig.connect(self._gesture_overlay.set_hands)
+        self._gesture.state_sig.connect(self._log_sig.emit)
         self._content_panel = self._build_content_panel()
         self._quiz_panel = self._build_quiz_panel()
 
@@ -454,6 +490,34 @@ class MainWindow(QMainWindow):
         self._clipboard_panel.action_requested.connect(self._on_clipboard_action)
         QApplication.clipboard().dataChanged.connect(self._on_clipboard_changed)
 
+        # THE DECK.
+        #
+        # A column of cards on the right of the interface: everything the
+        # assistant has produced this session, one card each. It is a
+        # child of the central widget and not part of the layout, so it
+        # floats over the panels instead of pushing them around.
+        self._blades = BladeStack(self.centralWidget())
+        self._blades.hide()
+        self._blades.raise_()
+        self._deck_seen = False        # has the deck ever been opened by itself?
+
+        # THE IGNITION.
+        #
+        # The screen that comes up before the assistant is ready. It runs
+        # once, on top of everything, and it says the truth about what it
+        # found — the rows it could not check say so instead of ticking.
+        self._boot = BootOverlay(self.centralWidget(), brand=_display)
+        self._boot.hide()
+        self._boot.finished.connect(self._on_boot_finished)
+
+        # THE THING THAT STAYS ON TOP.
+        #
+        # A panel of glass over every other window on the machine, with
+        # the state and the last thing the assistant said. It can be
+        # dragged by the mouse and by the hand.
+        self._floating = FloatingPanel()
+        self._floating.hide()
+
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
         if not self._ready:
@@ -465,6 +529,15 @@ class MainWindow(QMainWindow):
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
+
+        # The deck. `Ctrl+Alt+E` opens and closes it; the letters on their
+        # own only work while it is open, and only when the user is not
+        # typing — see `keyPressEvent`.
+        sc_blades = QShortcut(QKeySequence("Ctrl+Alt+E"), self)
+        sc_blades.activated.connect(self._toggle_blades)
+
+        # THE IGNITION, a moment after the window is up.
+        QTimer.singleShot(350, self._start_boot)
 
         # THE ICON IN THE TRAY.
         #
@@ -1134,6 +1207,21 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def eventFilter(self, obj, event):
+        """The hands are drawn exactly over the face they belong to.
+
+        The overlay is a child of the HUD, and the HUD changes size when
+        the splitter moves — so the overlay is resized with it. Doing it
+        here rather than in the window's resizeEvent is the difference
+        between the overlay being right and being nearly right: the window
+        is not resized when the HUD is.
+        """
+        if obj is getattr(self, "hud", None) and event.type() == QEvent.Type.Resize:
+            overlay = getattr(self, "_gesture_overlay", None)
+            if overlay is not None:
+                overlay.setGeometry(self.hud.rect())
+        return super().eventFilter(obj, event)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_side_columns()
@@ -1170,6 +1258,16 @@ class MainWindow(QMainWindow):
         # Clipboard panel — bottom-center
         if hasattr(self, '_clipboard_panel') and self._clipboard_panel.isVisible():
             self._position_clipboard_panel()
+        # The ignition covers the whole interface, so it has to be given the
+        # whole interface: a child widget that is not in a layout keeps the
+        # size it was born with, which is nothing at all.
+        boot = getattr(self, "_boot", None)
+        if boot is not None and boot.isVisible():
+            boot.setGeometry(cw.rect())
+        # The deck sits under the header and over the footer.
+        deck = getattr(self, "_blades", None)
+        if deck is not None and deck.isVisible():
+            deck._ensure_visible()
         # Quick drawer — reposition if open
         if hasattr(self, '_quick_drawer') and self._quick_drawer.isVisible():
             self._position_quick_drawer()
@@ -1254,6 +1352,12 @@ class MainWindow(QMainWindow):
         self._ctrl_btn.setToolTip(_t("window.controls_drawer_tip"))
         self._ctrl_btn.clicked.connect(self._toggle_controls)
         lay.addWidget(self._ctrl_btn)
+        # The deck: everything the assistant has said this session, one
+        # card each, one key away.
+        self._deck_btn = IconButton("deck", 32)
+        self._deck_btn.setToolTip(_t("window.deck_tip"))
+        self._deck_btn.clicked.connect(self._toggle_blades)
+        lay.addWidget(self._deck_btn)
         lay.addStretch()
 
         self._state_chip = StateChip()
@@ -1901,6 +2005,53 @@ class MainWindow(QMainWindow):
         self._corner_combo.currentIndexChanged.connect(self._save_corner)
         lay.addWidget(self._corner_combo)
 
+        # ── THE HANDS ───────────────────────────────────────────────────────
+        #
+        # The cursor you steer with: the camera watches, the skeleton of
+        # each hand is drawn on the glass, the fingertip is the cursor and
+        # the pinch is a click.
+        self._gesture_btn = _row(QPushButton(_t("controls.gesture")), self._BTN_DIM)
+        self._gesture_btn.setToolTip(_t("controls.gesture_tip"))
+        self._gesture_btn.clicked.connect(self._toggle_gesture)
+
+        self._gesture_pointer_btn = _row(
+            QPushButton(_t("controls.gesture_pointer")), self._BTN_DIM)
+        self._gesture_pointer_btn.setToolTip(_t("controls.gesture_pointer_tip"))
+        self._gesture_pointer_btn.clicked.connect(self._toggle_gesture_pointer)
+
+        # ── THE DECK AND THE PANEL THAT STAYS ON TOP ────────────────────────
+        #
+        # The deck is the session on one screen: every answer the
+        # assistant gave, one card each. The floating panel is the same
+        # idea over somebody else's window: it follows the assistant and
+        # can be dragged anywhere with the mouse or with the hand.
+        self._deck_btn_ctrl = _row(QPushButton(_t("controls.deck")), self._BTN_DIM)
+        self._deck_btn_ctrl.setToolTip(_t("controls.deck_tip"))
+        self._deck_btn_ctrl.clicked.connect(self._toggle_blades)
+
+        self._floating_btn = _row(QPushButton(_t("controls.floating")), self._BTN_DIM)
+        self._floating_btn.setToolTip(_t("controls.floating_tip"))
+        self._floating_btn.clicked.connect(self._toggle_floating)
+
+        # The ignition can be watched again. It is a show, and the user is
+        # allowed to watch a show twice.
+        self._boot_btn = _row(QPushButton(_t("controls.replay_boot")), self._BTN_DIM)
+        self._boot_btn.setToolTip(_t("controls.replay_boot_tip"))
+        self._boot_btn.clicked.connect(self._replay_boot_clicked)
+
+        # THE LEGEND OF THE STAR.
+        #
+        # A control marked with a star is there and works as far as it
+        # goes, but the rest of it is not written yet. Saying so in the
+        # panel is better than a control that quietly does nothing.
+        self._pending_note = QLabel(_t("controls.pending"))
+        self._pending_note.setFont(px_font(9))
+        self._pending_note.setWordWrap(True)
+        self._pending_note.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        self._pending_note.setToolTip(_t("controls.pending_tip"))
+        lay.addWidget(self._pending_note)
+
         # One sentence, two lines at most: what the region is for, and what
         # the language changes.
         self._selector_note = QLabel(_t("selector.explain"))
@@ -2122,6 +2273,17 @@ class MainWindow(QMainWindow):
             self._content_display.textCursor().MoveOperation.Start
         )
         self._reveal_below_hud(self._content_panel, 220)
+        # The same thing goes into the deck and onto the floating panel: the
+        # card is the answer, and the little panel over the browser is the
+        # answer too.
+        self._push_blade(label or _t("panel.briefing"), text,
+                         _time.strftime("%H:%M:%S"))
+        try:
+            if getattr(self, "_floating", None) is not None:
+                self._floating.set_line(text.strip().splitlines()[0] if text.strip() else "",
+                                        label)
+        except Exception:
+            pass
 
     # ── the coding agent, live ───────────────────────────────────────────────
     # The panel under the head shows a coding job while it runs: what was asked,
@@ -2905,6 +3067,36 @@ class MainWindow(QMainWindow):
         if caption is not None:
             caption.setVisible(mode == "core")
 
+    def _toggle_gesture(self):
+        """Start or stop watching the hands."""
+        service = getattr(self, "_gesture", None)
+        if service is None:
+            return
+        message = service.toggle()
+        self._log_sig.emit(f"SYS: {message}")
+        self._refresh_gesture_btn()
+
+    def _toggle_gesture_pointer(self):
+        """Whether the hand takes the real pointer."""
+        service = getattr(self, "_gesture", None)
+        if service is None:
+            return
+        service.set_drives_pointer(not service.drives_pointer)
+        self._refresh_gesture_btn()
+
+    def _refresh_gesture_btn(self):
+        """Say what the hands are doing, in the button itself."""
+        service = getattr(self, "_gesture", None)
+        button = getattr(self, "_gesture_btn", None)
+        if service is None or button is None:
+            return
+        button.setText(_t("controls.gesture")
+                       + (" · ON" if service.enabled else ""))
+        pointer = getattr(self, "_gesture_pointer_btn", None)
+        if pointer is not None:
+            pointer.setText(_t("controls.gesture_pointer")
+                            + (" · ON" if service.drives_pointer else ""))
+
     def _refresh_language_combo(self):
         """Show the language that is actually stored."""
         combo = getattr(self, "_language_combo", None)
@@ -3601,6 +3793,22 @@ class MainWindow(QMainWindow):
         self.hud.speaking = (state == "SPEAKING")
         if hasattr(self, "_state_chip"):
             self._state_chip.set_state(state)
+        # THE ACCENT FOLLOWS THE STATE.
+        #
+        # One colour for the whole interface: the scene, the rings around
+        # the head, the brackets, the hands. It changes with what the
+        # assistant is doing, and everything else inherits it.
+        try:
+            from gui import fx
+            accent = fx.accent_for(state)
+            if getattr(self, "_scene", None) is not None:
+                self._scene.state = state
+            if getattr(self, "_gesture_overlay", None) is not None:
+                self._gesture_overlay.set_accent(accent)
+            if getattr(self, "_blades", None) is not None:
+                self._blades.set_accent(accent)
+        except Exception:
+            pass
         # The tray icon carries the state too, because in the tray mode the
         # icon is the only thing the user can see of the assistant.
         if getattr(self, "_tray", None) is not None:
@@ -3608,6 +3816,134 @@ class MainWindow(QMainWindow):
                 self._tray.set_state(_state_text(state))
             except Exception:
                 pass
+        # And so does the floating panel: it is over somebody else's
+        # window, so it is the only part of the interface that is visible
+        # while the user is doing something else.
+        if getattr(self, "_floating", None) is not None:
+            try:
+                self._floating.set_state(state)
+            except Exception:
+                pass
+
+    # ── the ignition ────────────────────────────────────────────────────────
+
+    def _start_boot(self) -> None:
+        """Put the ignition up.
+
+        It does not run in the corner mode: a checklist of subsystems is
+        for the moment the assistant comes up in front of you, and in the
+        corner there is nothing to come up in front of.
+        """
+        if self._appearance.mode() != "dashboard":
+            return
+        try:
+            central = self.centralWidget()
+            if central is not None:
+                self._boot.setGeometry(central.rect())
+            self._boot.start()
+        except Exception as exc:                               # noqa: BLE001
+            print(f"[window] the ignition did not start: {type(exc).__name__}")
+
+    def _on_boot_finished(self) -> None:
+        """The ignition is over: the interface is ready."""
+        try:
+            self._log.append_log(_t("window.boot_done"))
+        except Exception:
+            pass
+
+    def replay_boot(self) -> str:
+        """Show the ignition again — for the user who wants to see it."""
+        self._start_boot()
+        return _t("window.boot_replayed")
+
+    def _replay_boot_clicked(self) -> None:
+        """The button in the controls panel."""
+        try:
+            self._log.append_log(self.replay_boot())
+        except Exception:
+            pass
+
+    # ── the deck ────────────────────────────────────────────────────────────
+
+    def _toggle_blades(self) -> None:
+        """Open or close the deck."""
+        if not self._blades.count:
+            return
+        if self._blades.is_open():
+            self._blades.close_deck()
+        else:
+            self._blades.open_deck()
+            self._blades.show()
+            self._blades.raise_()
+        self._deck_seen = True
+
+    def _push_blade(self, title: str, text: str, code: str = "") -> None:
+        """Put a card in the deck, and open the deck the first time.
+
+        The first time only: after that the deck follows whatever the
+        user did with it, because a panel that opens itself every time
+        something happens is a panel the user learns to close.
+        """
+        if not getattr(self, "_blades", None):
+            return
+        try:
+            self._blades.push(title, text, code)
+            if not self._deck_seen:
+                self._deck_seen = True
+                self._blades.open_deck()
+                self._blades.show()
+                self._blades.raise_()
+        except Exception:
+            pass
+
+    # ── the thing that stays on top ─────────────────────────────────────────
+
+    def _toggle_floating(self) -> None:
+        """Show or hide the floating panel."""
+        panel = getattr(self, "_floating", None)
+        if panel is None:
+            return
+        if panel.isVisible():
+            panel.hide()
+        else:
+            panel.move_to_default()
+            panel.show()
+            panel.raise_()
+
+    # ── the keys ────────────────────────────────────────────────────────────
+
+    def keyPressEvent(self, event):
+        """The letters of the deck.
+
+        They only work while the deck is open, and a key event only
+        reaches the window when no text field has the focus — a QLineEdit
+        swallows the letters it needs for writing. So the shortcut cannot
+        eat what the user is typing, and the user does not have to think
+        about which of the two is happening.
+        """
+        try:
+            deck = getattr(self, "_blades", None)
+            if deck is not None and deck.is_open() and deck.count:
+                key = event.key()
+                if key == Qt.Key.Key_E:
+                    deck.fold()
+                    event.accept()
+                    return
+                if key == Qt.Key.Key_X:
+                    deck.close_deck()
+                    event.accept()
+                    return
+                if key == Qt.Key.Key_BracketLeft:
+                    deck.prev_blade()
+                    event.accept()
+                    return
+                if key == Qt.Key.Key_BracketRight:
+                    deck.next_blade()
+                    event.accept()
+                    return
+        except Exception:
+            pass
+        super().keyPressEvent(event)
 
     def _check_config(self) -> bool:
         d = _read_full_config()

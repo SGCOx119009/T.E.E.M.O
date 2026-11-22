@@ -1,0 +1,436 @@
+"""
+gui/blades.py — the deck.
+
+WHAT IT IS
+    A column of cards down the right-hand side of the interface. Every
+    time the assistant produces something — a search, a briefing, a review,
+    a finished task — a card goes into the deck. The deck is always there,
+    one key away, and it is the answer to the question a chat interface
+    never quite answers: what did it say to me, and what did it say before
+    that?
+
+WHY A DECK AND NOT A LOG
+    A log is a wall of text you scroll. A deck is a stack of cards: only
+    one is open, the rest are folded down to their titles, and the whole
+    history of the session fits on one screen. The interface stops being a
+    conversation you have to remember and becomes an instrument you can
+    look at.
+
+THE KEYS
+    `Ctrl+Alt+E` opens and closes the deck. With it open, `E` folds and
+    unfolds the card in front, `X` closes it, and `[` and `]` walk through
+    the cards.
+
+    The letters on their own are NOT bound while the deck is closed, and
+    they are not bound while the user is typing in a field. A shortcut that
+    fires while somebody is writing a message is a shortcut that eats
+    letters, and a shortcut that eats letters is a bug the user blames on
+    the assistant.
+
+THE COST
+    One widget that paints its own cards. No child widgets per card, so
+    there is nothing to keep in sync when the deck grows: the cards are
+    data, and the data is drawn.
+"""
+from __future__ import annotations
+
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer
+from PyQt6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
+from PyQt6.QtWidgets import QWidget
+
+from gui import fx
+from gui.style import mono_font, px_font
+from gui.theme import C
+
+STRIP_H = 26        # the height of a folded card
+GAP = 5             # the space between two cards
+PAD = 10            # the padding inside an open card
+ANIM_MS = 180       # how long a card takes to open or close
+
+
+class Blade:
+    """One card of the deck."""
+
+    __slots__ = ("title", "text", "code", "kind")
+
+    def __init__(self, title: str, text: str = "", code: str = "", kind: str = "info"):
+        self.title = str(title or "")
+        self.text = str(text or "")
+        self.code = str(code or "")
+        self.kind = str(kind or "info")
+
+
+class BladeStack(QWidget):
+    """The deck of cards."""
+
+    def __init__(self, parent=None, width: int = 380):
+        super().__init__(parent)
+        self._blades: list[Blade] = []
+        self._active = -1
+        self._anim = 0.0            # 0 = folded, 1 = open
+        self._anim_target = 0.0
+        self._accent = C.PRI
+        self._width = int(width)
+        self._lines_cache: dict[int, list[str]] = {}
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setMouseTracking(True)
+        self.hide()
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    # ── the deck ────────────────────────────────────────────────────────────
+
+    @property
+    def count(self) -> int:
+        return len(self._blades)
+
+    @property
+    def active(self) -> int:
+        """The index of the open card, or -1 when the deck is closed."""
+        return self._active
+
+    def is_open(self) -> bool:
+        return self._active >= 0
+
+    def push(self, title: str, text: str = "", code: str = "", kind: str = "info") -> int:
+        """Put a card into the deck and open it."""
+        self._blades.append(Blade(title, text, code, kind))
+        index = len(self._blades) - 1
+        self._active = index
+        self._anim = 0.0
+        self._anim_target = 1.0
+        self._lines_cache.clear()
+        self._timer.start(16)
+        self._ensure_visible()
+        self.raise_()
+        self.update()
+        return index
+
+    def clear(self) -> None:
+        """Empty the deck."""
+        self._blades.clear()
+        self._active = -1
+        self._anim = 0.0
+        self._anim_target = 0.0
+        self._timer.stop()
+        self.update()
+
+    # ── the keys ────────────────────────────────────────────────────────────
+
+    def open_deck(self) -> None:
+        """Open the deck on the last card."""
+        if not self._blades:
+            return
+        self._active = len(self._blades) - 1
+        self._anim_target = 1.0
+        self._timer.start(16)
+        self._ensure_visible()
+        self.show()
+        self.raise_()
+        self.update()
+
+    def close_deck(self) -> None:
+        """Fold the deck away."""
+        self._active = -1
+        self._anim_target = 0.0
+        self._timer.start(16)
+        self.update()
+
+    def toggle(self) -> None:
+        """Open it or close it."""
+        if self.is_open():
+            self.close_deck()
+        else:
+            self.open_deck()
+
+    def fold(self) -> None:
+        """Fold or unfold the card in front."""
+        self._anim_target = 0.0 if self._anim_target > 0.5 else 1.0
+        self._timer.start(16)
+
+    def next_blade(self) -> None:
+        """The card after this one."""
+        if not self._blades:
+            return
+        self._active = (self._active + 1) % len(self._blades)
+        self._anim = 0.0
+        self._anim_target = 1.0
+        self._lines_cache.clear()
+        self._timer.start(16)
+        self._ensure_visible()
+        self.update()
+
+    def prev_blade(self) -> None:
+        """The card before this one."""
+        if not self._blades:
+            return
+        self._active = (self._active - 1) % len(self._blades)
+        self._anim = 0.0
+        self._anim_target = 1.0
+        self._lines_cache.clear()
+        self._timer.start(16)
+        self._ensure_visible()
+        self.update()
+
+    def set_accent(self, colour: str) -> None:
+        """The colour of the deck follows the state of the assistant."""
+        self._accent = colour or C.PRI
+        self.update()
+
+    # ── the geometry ────────────────────────────────────────────────────────
+
+    def _deck_width(self) -> int:
+        parent = self.parentWidget()
+        available = parent.width() if parent is not None else self._width
+        return max(220, min(self._width, available - 30))
+
+    def _content_height(self, width: int) -> float:
+        """How tall the deck has to be for the cards it holds.
+
+        Exactly as tall as the cards and not one pixel more: a deck that
+        reaches the bottom of the window covers the panel where the user
+        types, and a panel you cannot type in is a panel you cannot use
+        while the deck is open.
+        """
+        total = 0.0
+        for index, blade in enumerate(self._blades):
+            if index == self._active:
+                total += STRIP_H + PAD + self._body_height(blade, index, width)
+            else:
+                total += STRIP_H
+            total += GAP
+        return total
+
+    def _ensure_visible(self) -> None:
+        """Put the deck where it belongs.
+
+        Under the header and over the footer: the deck is a column of
+        cards and not a part of the frame, so it must not sit on top of
+        the bar that has the clock and the buttons.
+        """
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        top = 70
+        bottom = 44
+        width = self._deck_width()
+        available = max(STRIP_H * 2, parent.height() - top - bottom)
+        height = max(STRIP_H * 2, min(self._content_height(width), available))
+        self.setGeometry(parent.width() - width - 12, top, int(width), int(height))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._ensure_visible()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._ensure_visible()
+
+    # ── the clock ───────────────────────────────────────────────────────────
+
+    def _tick(self) -> None:
+        step = 16.0 / ANIM_MS
+        if self._anim < self._anim_target:
+            self._anim = min(self._anim_target, self._anim + step)
+        elif self._anim > self._anim_target:
+            self._anim = max(self._anim_target, self._anim - step)
+        else:
+            self._timer.stop()
+            if self._anim_target == 0.0 and self._active < 0:
+                self.hide()
+        self.update()
+
+    # ── the painting ────────────────────────────────────────────────────────
+
+    def _wrap(self, text: str, width: int, index: int) -> list[str]:
+        """The lines of a text, wrapped to a width and remembered."""
+        cached = self._lines_cache.get(index)
+        if cached is not None:
+            return cached
+        from PyQt6.QtGui import QFontMetrics
+        metrics = QFontMetrics(px_font(11))
+        lines: list[str] = []
+        for paragraph in str(text or "").splitlines() or [""]:
+            if not paragraph:
+                lines.append("")
+                continue
+            current = ""
+            for word in paragraph.split(" "):
+                probe = word if not current else current + " " + word
+                if metrics.horizontalAdvance(probe) <= width:
+                    current = probe
+                    continue
+                if current:
+                    lines.append(current)
+                # A word longer than the line is cut: nothing else can be
+                # done with it without a word-wrap algorithm.
+                while metrics.horizontalAdvance(word) > width and len(word) > 1:
+                    cut = len(word)
+                    while cut > 1 and metrics.horizontalAdvance(word[:cut]) > width:
+                        cut -= 1
+                    lines.append(word[:cut])
+                    word = word[cut:]
+                current = word
+            lines.append(current)
+        self._lines_cache[index] = lines
+        return lines
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H = self.width(), self.height()
+
+        if not self._blades:
+            p.end()
+            return
+
+        # THE BACKDROP.
+        #
+        # The deck floats over the right-hand panel, and a card that lets
+        # the panel show through is two cards on top of each other: the
+        # text behind bleeds into the text in front and both become
+        # unreadable. So the column has its own darkness, with a soft
+        # edge on the left so it does not look like a box.
+        shade = QLinearGradient(0, 0, W, 0)
+        shade.setColorAt(0.0, fx.qcol(C.DEEP_TOP, 0))
+        shade.setColorAt(0.12, fx.qcol(C.DEEP_TOP, 225))
+        shade.setColorAt(1.0, fx.qcol(C.DEEP_TOP, 245))
+        p.fillRect(QRectF(0, 0, W, H), QBrush(shade))
+        p.setPen(QPen(fx.qcol(self._accent, 70), 1))
+        p.drawLine(0, 0, 0, H)
+
+        # Where each card starts. The open one is tall; the folded ones are
+        # a strip each, and they stack downwards from the top.
+        y = 0.0
+        positions: list[tuple[int, float, float]] = []   # (index, y, height)
+        for index, blade in enumerate(self._blades):
+            if index == self._active:
+                body = self._body_height(blade, index)
+                height = STRIP_H + PAD + body * self._anim
+            else:
+                height = STRIP_H
+            positions.append((index, y, height))
+            y += height + GAP
+
+        # The cards behind, so the open one draws over them.
+        for index, top, height in positions:
+            if index == self._active:
+                continue
+            self._draw_strip(p, index, top, height)
+        for index, top, height in positions:
+            if index != self._active:
+                continue
+            self._draw_card(p, index, top, height)
+
+        p.end()
+
+    def _body_height(self, blade: Blade, index: int, width: int | None = None) -> float:
+        """How tall the body of a card would be if it were fully open."""
+        if width is None:
+            width = self._deck_width()
+        lines = self._wrap(blade.text, width - 2 * PAD - 4, index)
+        return max(0.0, len(lines) * 16.0)
+
+    def _draw_strip(self, p: QPainter, index: int, top: float, height: float) -> None:
+        blade = self._blades[index]
+        rect = QRectF(0, top, self._deck_width(), height)
+        path = fx.chamfer(rect, 9)
+        p.fillPath(path, fx.qcol(C.PANEL, 248))
+        p.setPen(QPen(fx.qcol(self._accent, 90), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        # A tick at the left: the card is there, it is just folded.
+        p.setPen(QPen(fx.qcol(self._accent, 150), 2))
+        p.drawLine(int(rect.left() + 5), int(rect.top() + 6),
+                   int(rect.left() + 5), int(rect.bottom() - 6))
+        p.setFont(px_font(10, spacing=1.4))
+        p.setPen(QPen(QColor(C.TEXT_MED)))
+        p.drawText(QRectF(rect.left() + 14, rect.top(), rect.width() - 20, height),
+                   Qt.AlignmentFlag.AlignVCenter,
+                   p.fontMetrics().elidedText(blade.title, Qt.TextElideMode.ElideRight,
+                                              int(rect.width() - 30)))
+        if blade.code:
+            p.setFont(mono_font(9))
+            p.setPen(QPen(QColor(C.TEXT_DIM)))
+            p.drawText(QRectF(rect.left(), rect.top(), rect.width() - 10, height),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       blade.code)
+
+    def _draw_card(self, p: QPainter, index: int, top: float, height: float) -> None:
+        blade = self._blades[index]
+        rect = QRectF(0, top, self._deck_width(), max(STRIP_H, height))
+        path = fx.chamfer(rect, 12)
+        p.fillPath(path, fx.qcol(C.PANEL, 252))
+        p.setPen(QPen(fx.qcol(self._accent, 190), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        # The lit edge along the top, the way a bevel catches the light.
+        p.setPen(QPen(fx.qcol(self._accent, 220), 1.6))
+        p.drawLine(int(rect.left() + 12), int(rect.top()),
+                   int(rect.right() - 12), int(rect.top()))
+
+        # The header.
+        p.setFont(px_font(11, spacing=1.8))
+        p.setPen(QPen(QColor(C.PRI)))
+        p.drawText(QRectF(rect.left() + PAD, rect.top(), rect.width() - 2 * PAD, STRIP_H),
+                   Qt.AlignmentFlag.AlignVCenter,
+                   p.fontMetrics().elidedText(blade.title, Qt.TextElideMode.ElideRight,
+                                              int(rect.width() - 2 * PAD - 60)))
+        if blade.code:
+            p.setFont(mono_font(9))
+            p.setPen(QPen(QColor(C.TEXT_DIM)))
+            p.drawText(QRectF(rect.left(), rect.top(), rect.width() - PAD, STRIP_H),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       blade.code)
+
+        # The body, clipped to what the card is actually showing.
+        if self._anim > 0.02 and blade.text:
+            body_top = rect.top() + STRIP_H + PAD - 4
+            body_h = rect.bottom() - PAD - body_top
+            if body_h > 4:
+                p.save()
+                p.setClipRect(QRectF(rect.left() + 2, body_top, rect.width() - 4, body_h))
+                width = self._deck_width() - 2 * PAD - 4
+                lines = self._wrap(blade.text, width, index)
+                p.setFont(px_font(11))
+                p.setPen(QPen(QColor(C.TEXT)))
+                y = body_top + 12
+                for line in lines:
+                    if y > rect.bottom() - PAD:
+                        p.setPen(QPen(QColor(C.TEXT_DIM)))
+                        p.drawText(int(rect.left() + PAD), int(y), "…")
+                        break
+                    p.drawText(int(rect.left() + PAD), int(y), line)
+                    y += 16
+                p.restore()
+
+        # The scale along the bottom of the card: it is an instrument.
+        fx.ruler(p, QRectF(rect.left() + PAD, rect.bottom() - 6,
+                           rect.width() - 2 * PAD, 6), self._accent, count=10, alpha=45)
+
+    # ── the mouse ───────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        """Clicking a folded card opens it."""
+        pos = event.position().y()
+        y = 0.0
+        for index, blade in enumerate(self._blades):
+            height = STRIP_H if index != self._active else STRIP_H + PAD
+            if y <= pos <= y + height:
+                if index != self._active:
+                    self._active = index
+                    self._anim = 0.0
+                    self._anim_target = 1.0
+                    self._lines_cache.clear()
+                    self._timer.start(16)
+                    self._ensure_visible()
+                    self.update()
+                return
+            y += height + GAP
+        super().mousePressEvent(event)
+
+    def sizeHint(self) -> QSize:
+        return QSize(self._deck_width(), 320)

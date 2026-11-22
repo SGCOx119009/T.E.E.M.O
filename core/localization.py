@@ -893,6 +893,90 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "Contrôles — les interrupteurs de tous les jours",
         "zh": "控制——日常用的开关",
     },
+    "window.deck_tip": {
+        "en": "The deck — everything the assistant said this session  [Ctrl+Alt+E]",
+        "es": "El mazo — todo lo que dijo el asistente en esta sesión  [Ctrl+Alt+E]",
+        "pt": "O baralho — tudo o que o assistente disse nesta sessão  [Ctrl+Alt+E]",
+        "fr": "La pioche — tout ce que l'assistant a dit cette session  [Ctrl+Alt+E]",
+        "zh": "牌堆——本次会话助手说过的一切  [Ctrl+Alt+E]",
+    },
+    "window.boot_done": {
+        "en": "the ignition is over — everything is up",
+        "es": "el arranque ha terminado — todo está en pie",
+        "pt": "a ignição acabou — tudo está de pé",
+        "fr": "le démarrage est terminé — tout est en place",
+        "zh": "启动完成——一切就绪",
+    },
+    "window.boot_replayed": {
+        "en": "the ignition is playing again",
+        "es": "el arranque se reproduce otra vez",
+        "pt": "a ignição está a ser reproduzida outra vez",
+        "fr": "le démarrage se rejoue",
+        "zh": "启动再次播放",
+    },
+    "window.boot_starting": {
+        "en": "STARTING",
+        "es": "ARRANCANDO",
+        "pt": "A INICIAR",
+        "fr": "DÉMARRAGE",
+        "zh": "启动中",
+    },
+    "controls.deck": {
+        "en": "DECK — the session on one screen",
+        "es": "MAZO — la sesión en una pantalla",
+        "pt": "BARALHO — a sessão num ecrã",
+        "fr": "PIOCHE — la session sur un écran",
+        "zh": "牌堆——会话尽在一屏",
+    },
+    "controls.deck_tip": {
+        "en": "Every answer the assistant gave, one card each. "
+              "E folds the card, X closes the deck, [ and ] walk through it.",
+        "es": "Cada respuesta del asistente, una tarjeta. "
+              "E pliega la tarjeta, X cierra el mazo, [ y ] recorren el mazo.",
+        "pt": "Cada resposta do assistente, um cartão. "
+              "E dobra o cartão, X fecha o baralho, [ e ] percorrem o baralho.",
+        "fr": "Chaque réponse de l'assistant, une carte. "
+              "E plie la carte, X ferme la pioche, [ et ] parcourent la pioche.",
+        "zh": "助手的每一条回答各占一张卡片。"
+              "E 折叠卡片，X 收起牌堆，[ 和 ] 翻阅牌堆。",
+    },
+    "controls.floating": {
+        "en": "FLOATING PANEL — always on top",
+        "es": "PANEL FLOTANTE — siempre encima",
+        "pt": "PAINEL FLUTUANTE — sempre por cima",
+        "fr": "PANNEAU FLOTTANT — toujours au-dessus",
+        "zh": "悬浮面板——始终置顶",
+    },
+    "controls.floating_tip": {
+        "en": "A small panel over every other window, with the state and "
+              "the last answer. Drag it with the mouse or with the hand.",
+        "es": "Un panel pequeño sobre cualquier otra ventana, con el estado "
+              "y la última respuesta. Arrástralo con el ratón o con la mano.",
+        "pt": "Um pequeno painel sobre qualquer outra janela, com o estado "
+              "e a última resposta. Arraste-o com o rato ou com a mão.",
+        "fr": "Un petit panneau au-dessus de toute autre fenêtre, avec l'état "
+              "et la dernière réponse. Déplacez-le à la souris ou à la main.",
+        "zh": "一个浮在其他窗口之上的小面板，显示状态和最后一条回答。"
+              "可以用鼠标或用手拖动它。",
+    },
+    "controls.replay_boot": {
+        "en": "IGNITION — watch it again",
+        "es": "ARRANQUE — velo otra vez",
+        "pt": "IGNIÇÃO — veja outra vez",
+        "fr": "DÉMARRAGE — rejouez-le",
+        "zh": "启动——再看一次",
+    },
+    "controls.replay_boot_tip": {
+        "en": "The screen that comes up before the assistant is ready, with "
+              "the real check of every subsystem.",
+        "es": "La pantalla que sale antes de que el asistente esté listo, con "
+              "la comprobación real de cada subsistema.",
+        "pt": "O ecrã que aparece antes de o assistente estar pronto, com a "
+              "verificação real de cada subsistema.",
+        "fr": "L'écran qui s'affiche avant que l'assistant soit prêt, avec la "
+              "vérification réelle de chaque sous-système.",
+        "zh": "助手就绪前出现的画面，对每个子系统做真实检查。",
+    },
     "window.fullscreen_tip": {
         "en": "Fullscreen  [F11]",
         "es": "Pantalla completa  [F11]",
@@ -2496,6 +2580,68 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "L'assistant est dans la zone de notification. Il vous entend "
               "toujours.",
         "zh": "助手在托盘里。它仍然听得见你。",
+    },
+    # -- the hands: the cursor you steer with
+    "controls.gesture": {
+        "en": "HANDS: the gesture cursor",
+        "es": "MANOS: cursor con gestos",
+        "pt": "MÃOS: cursor por gestos",
+        "fr": "MAINS: le curseur gestuel",
+        "zh": "手势光标",
+    },
+    "controls.gesture_tip": {
+        "en": "The camera watches your hands: the skeleton is drawn on the "
+              "glass, the fingertip is the cursor and the pinch is a click.",
+        "es": "La cámara vigila tus manos: el esqueleto se dibuja sobre el "
+              "cristal, la punta del dedo es el cursor y el pinzamiento es un "
+              "clic.",
+        "pt": "A câmara vigia as suas mãos: o esqueleto desenha-se no "
+              "cristal, a ponta do dedo é o cursor e o beliscar é um clique.",
+        "fr": "La caméra surveille vos mains : le squelette est dessiné sur le "
+              "verre, la pointe du doigt est le curseur et le pincement est un "
+              "clic.",
+        "zh": "摄像头注视你的手：骨架画在玻璃上，指尖是光标，捏合就是点击。",
+    },
+    "controls.gesture_pointer": {
+        "en": "HANDS: the hand moves the pointer *",
+        "es": "MANOS: la mano mueve el ratón *",
+        "pt": "MÃOS: a mão move o rato *",
+        "fr": "MAINS : la main bouge le pointeur *",
+        "zh": "手势：手来移动指针 *",
+    },
+    "controls.gesture_pointer_tip": {
+        "en": "The hand takes the real pointer and the pinch clicks it. "
+              "Marked with a star because it should only take the pointer "
+              "while the assistant is listening — that rule is not written "
+              "yet.",
+        "es": "La mano toma el puntero real y el pinzamiento hace clic. "
+              "Marcado con una estrella porque debería tomarlo sólo mientras "
+              "el asistente escucha, y esa regla todavía no está escrita.",
+        "pt": "A mão toma o ponteiro real e o beliscar clica. Marcado com uma "
+              "estrela porque deveria tomá-lo só enquanto o assistente escuta, "
+              "e essa regra ainda não está escrita.",
+        "fr": "La main prend le vrai pointeur et le pincement clique. Marqué "
+              "d'une étoile parce qu'il ne devrait le prendre que pendant que "
+              "l'assistant écoute — cette règle n'est pas encore écrite.",
+        "zh": "手接管真实指针，捏合即点击。标星号是因为它本应只在助手聆听时接管指针——这条规则还没写。",
+    },
+    "controls.pending": {
+        "en": "* = not finished yet",
+        "es": "* = todavía no terminado",
+        "pt": "* = ainda não terminado",
+        "fr": "* = pas encore terminé",
+        "zh": "* = 尚未完成",
+    },
+    "controls.pending_tip": {
+        "en": "A control marked with a star is there and works as far as it "
+              "goes, but the rest of it is not written yet.",
+        "es": "Un control marcado con una estrella está ahí y funciona hasta "
+              "donde llega, pero el resto todavía no está escrito.",
+        "pt": "Um controlo marcado com uma estrela está lá e funciona até onde "
+              "chega, mas o resto ainda não está escrito.",
+        "fr": "Un contrôle marqué d'une étoile est là et fonctionne jusqu'où "
+              "il va, mais le reste n'est pas encore écrit.",
+        "zh": "带星号的控件已经在那儿，也能用到现在这一步，但剩下的部分还没写。",
     },
 }
 

@@ -38,6 +38,7 @@ from gui.theme import (
     qcol,
 )
 
+from gui import fx
 from gui.style import blend, chamfer, px_font, with_alpha
 
 from core.localization import t as _t
@@ -149,6 +150,26 @@ class HudCanvas(QWidget):
         # a see-through glass head instead of the lit one. It is the same
         # picture as a PNG cut out of the dashboard, floating on the desktop.
         self._core_only = False
+
+        # THE GLITCH.
+        #
+        # A short, rare shudder of the whole projection, in red and green
+        # and blue a few pixels apart — the aberration of a camera that
+        # cannot quite keep up. It is punctuation: it fires when something
+        # goes wrong, and it costs three drawings of the head, so it is
+        # never on except for the fraction of a second it lasts.
+        self._glitch_until = 0.0
+
+    def flash_glitch(self, seconds: float = 0.35) -> None:
+        """Shudder the projection, for a moment."""
+        self._glitch_until = max(self._glitch_until, time.time() + float(seconds))
+        self.update()
+
+    def _glitch_amount(self) -> float:
+        remaining = self._glitch_until - time.time()
+        if remaining <= 0:
+            return 0.0
+        return min(1.0, remaining / 0.35) * 7.0
 
     def set_core_only(self, enabled: bool) -> None:
         """Draw only the core, over nothing at all.
@@ -679,9 +700,40 @@ class HudCanvas(QWidget):
             band_t = 30.0
             band_h = max(60.0, sy - 14.0 - band_t)
 
+        # THE ACCENT FOLLOWS THE STATE.
+        #
+        # One colour for the whole interface, and it changes with what the
+        # assistant is doing: cyan while it listens, amber while it thinks,
+        # orange while it speaks. Everything else — the rings, the brackets,
+        # the sweep — inherits it.
+        accent = fx.accent_for(self.state)
+
+        # THE HEAD, SIZED ONCE.
+        #
+        # The rings are drawn around the head, so the head's size has to be
+        # known before the rings are drawn — and the head is bigger than it
+        # used to be, because a face in the middle of a wide window that is
+        # a tenth of its width reads as a detail, not as a face.
+        span = self._avatar.SPAN if self._avatar is not None else 1.6
+        r_head = min(fw * 0.42, band_h / (span + 0.08))
+        head_cy = band_t + (band_h - span * r_head) / 2.0 + r_head
+
+        # THE RINGS.
+        #
+        # Broken arcs turning around the head at different speeds. They say
+        # that something is running, and the gap in each one says how far
+        # through it is.
+        #
+        # They are drawn AROUND THE HEAD, not around the canvas: rings the
+        # size of the window are wallpaper, and rings the size of the head
+        # are part of the machine.
+        ring_radius = r_head * 1.9
+        ring_rect = QRectF(cx - ring_radius, head_cy - ring_radius,
+                           ring_radius * 2, ring_radius * 2)
+        fx.orbit_arcs(p, ring_rect, self._tick * 0.02, accent, alpha=95)
+
+        glitch = self._glitch_amount()
         if self._avatar is not None and self.hud_style == "face":
-            r_head = min(fw * 0.355, band_h / (self._avatar.SPAN + 0.08))
-            head_cy = band_t + (band_h - self._avatar.SPAN * r_head) / 2.0 + r_head
             if self.muted:
                 main = acc = qcol(C.MUTED_C)
             else:
@@ -694,7 +746,18 @@ class HudCanvas(QWidget):
                     acc = qcol(C.GREEN)
                 else:
                     acc = qcol(C.PRI)
+            if glitch > 0.5:
+                # The aberration: the head drawn three times, in red, green
+                # and blue, a few pixels apart. Only while it shudders.
+                self._avatar.paint(p, cx - glitch, head_cy, r_head,
+                                   qcol(C.RED), acc, qcol(C.BG))
+                self._avatar.paint(p, cx + glitch, head_cy, r_head,
+                                   qcol("#2f6bff"), acc, qcol(C.BG))
             self._avatar.paint(p, cx, head_cy, r_head, main, acc, qcol(C.BG))
+            # THE SWEEP: the band of light that travels down the projection.
+            fx.sweep(p, QRectF(cx - r_head * 1.6, head_cy - r_head * 1.6,
+                               r_head * 3.2, r_head * 3.2),
+                     self._tick * 0.016, accent, period=6.0)
         elif self._reactor is not None:
             ext = Reactor3D.TOP + Reactor3D.BOTTOM
             r = min(W * 0.25, band_h / ext)
