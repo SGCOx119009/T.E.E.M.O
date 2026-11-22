@@ -166,6 +166,18 @@ class Appearance:
         if wanted not in MODES:
             wanted = DEFAULT_MODE
         window = self._window
+        # THE FULL SCREEN IS LEFT FIRST.
+        #
+        # A window that is full screen is the size of the screen, and the
+        # window manager ignores every resize until the full screen is
+        # over. So the corner window would keep the size of the wall — a
+        # face as big as the desktop — and the jump would be exactly the
+        # kind of thing the user complains about.
+        try:
+            if window.isFullScreen():
+                window.showNormal()
+        except Exception:
+            pass
         try:
             window.hide()
         except Exception:
@@ -230,6 +242,10 @@ class Appearance:
             pass
         try:
             window.showMaximized()
+            # If the user had the window on the whole screen, the dashboard
+            # is where the whole screen comes back to.
+            if getattr(window, "_was_fullscreen", False):
+                window.showFullScreen()
         except Exception:
             window.show()
 
@@ -245,6 +261,7 @@ class Appearance:
         self._show_dashboard_widgets(False)
         self._hide_overlays()
         self._hide_deck()
+        self._close_drawers()
         hud = getattr(window, "hud", None)
         if hud is not None and hasattr(hud, "set_core_only"):
             hud.set_core_only(True)
@@ -282,6 +299,7 @@ class Appearance:
         if self._mode and self._mode != "tray":
             self._previous_mode = self._mode
         self._hide_deck()
+        self._close_drawers()
         try:
             self._window.hide()
         except Exception:
@@ -332,6 +350,25 @@ class Appearance:
             deck.hide()
         except Exception:
             pass
+
+    def _close_drawers(self) -> None:
+        """The drawers go away with the dashboard.
+
+        A drawer is a panel of glass with a button on it. In the corner
+        there is no button to close it with, and a panel left floating over
+        the desktop is a panel that eats the clicks of whatever is under
+        it. So the drawer is closed here, and the button that opened it is
+        un-pressed, so that the two always tell the same story.
+        """
+        window = self._window
+        for name in ("_close_controls", "_close_setup"):
+            closer = getattr(window, name, None)
+            if closer is None:
+                continue
+            try:
+                closer()
+            except Exception:
+                pass
 
     def _central_background(self, transparent: bool) -> None:
         """The background of the central widget.

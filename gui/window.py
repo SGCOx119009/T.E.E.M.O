@@ -182,6 +182,9 @@ class MainWindow(QMainWindow):
         self.ptt_hold          = None   # callable: (held: bool) -> None — windowed chord
         self.wake_get_state    = None   # callable: () -> dict {enabled, awake, ready}
         self._muted            = False
+        # Was the window on the whole screen when the user last asked for
+        # it? The appearance layer reads this to put the screen back.
+        self._was_fullscreen   = False
         self._current_file: str | None = None
         self._remote_overlay: RemoteKeyOverlay | None = None
         self._customize_overlay: CustomizeOverlay | None = None
@@ -1144,9 +1147,19 @@ class MainWindow(QMainWindow):
             self._log.append_log(f"ERR: Shortcut failed — {e}")
 
     def _toggle_fullscreen(self):
+        """The whole screen, or the window again.
+
+        The wish is remembered: when the user comes back to the dashboard
+        after being in the corner, the window finds itself on the whole
+        screen again if that is how they left it. Without the memory the
+        screen would quietly shrink and the user would think the program
+        had lost its place.
+        """
         if self.isFullScreen():
+            self._was_fullscreen = False
             self.showNormal()
         else:
+            self._was_fullscreen = True
             self.showFullScreen()
 
     # ------------------------------------------------------------------
