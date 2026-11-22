@@ -142,6 +142,37 @@ class HudCanvas(QWidget):
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
 
+        # THE CORE, WITHOUT THE ROOM.
+        #
+        # In the corner mode the window is a small translucent rectangle and
+        # the HUD paints only the head: no grid, no caption, no waveform, and
+        # a see-through glass head instead of the lit one. It is the same
+        # picture as a PNG cut out of the dashboard, floating on the desktop.
+        self._core_only = False
+
+    def set_core_only(self, enabled: bool) -> None:
+        """Draw only the core, over nothing at all.
+
+        WHY THE HEAD CHANGES ITS LOOK
+            The lit head is a solid surface, and a solid surface needs
+            something behind it to be lit against. Over a transparent
+            desktop there is nothing behind it, so the head is drawn as the
+            glass wireframe it also knows how to be: lines over air, which is
+            what a face floating on the desktop actually looks like.
+        """
+        enabled = bool(enabled)
+        if enabled == self._core_only:
+            return
+        self._core_only = enabled
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, not enabled)
+        if self._avatar is not None:
+            try:
+                self._avatar.shaded = not enabled
+            except Exception:
+                pass
+        self._grid_cache = None
+        self.update()
+
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
         """Ask the avatar to look somewhere for a moment (see HoloAvatar.glance)."""
         try:
@@ -617,19 +648,36 @@ class HudCanvas(QWidget):
         # The backdrop is one cached pixmap, rebuilt only when the size or the
         # theme changes — so live re-theming still repaints it. The language is
         # part of the key for the same reason: the caption on it is a word.
-        key = (W, H, C.PRI, C.BG, C.WHITE, _t("hud.voice_interface"))
-        if self._grid_cache is None or self._grid_key != key:
-            self._grid_cache = self._make_grid(W, H)
-            self._grid_key = key
-        p.drawPixmap(0, 0, self._grid_cache)
+        #
+        # In the corner mode there is no backdrop at all: the window is a
+        # translucent rectangle and the desktop shows through it.
+        if not self._core_only:
+            key = (W, H, C.PRI, C.BG, C.WHITE, _t("hud.voice_interface"))
+            if self._grid_cache is None or self._grid_key != key:
+                self._grid_cache = self._make_grid(W, H)
+                self._grid_key = key
+            p.drawPixmap(0, 0, self._grid_cache)
+
+        # "A LITTLE TRANSPARENT": the core floats over the desktop instead of
+        # sitting on a slab of colour.
+        if self._core_only:
+            p.setOpacity(0.92)
 
         cx, cy = W / 2, H / 2
         fw = min(W, H)
         # The state line and the waveform take the bottom of the canvas; the
         # centrepiece gets the band above them, at any window size.
-        sy = min(cy + fw * 0.38, H - 74.0)
-        band_t = 30.0
-        band_h = max(60.0, sy - 14.0 - band_t)
+        #
+        # In the corner mode there is no caption and no waveform: the core
+        # takes the whole rectangle, because the whole rectangle IS the core.
+        if self._core_only:
+            band_t = 0.0
+            band_h = float(H)
+            sy = H
+        else:
+            sy = min(cy + fw * 0.38, H - 74.0)
+            band_t = 30.0
+            band_h = max(60.0, sy - 14.0 - band_t)
 
         if self._avatar is not None and self.hud_style == "face":
             r_head = min(fw * 0.355, band_h / (self._avatar.SPAN + 0.08))
@@ -655,6 +703,11 @@ class HudCanvas(QWidget):
         else:
             r = min(W * 0.46, band_h / 2.0)
             self._paint_core_classic(p, cx, band_t + band_h / 2.0, r, W, band_h)
+
+        # The core mode ends here: no caption, no waveform, no rules.
+        if self._core_only:
+            p.end()
+            return
 
         # state line: spaced capitals between two fading rules that pulse
         if self.muted:

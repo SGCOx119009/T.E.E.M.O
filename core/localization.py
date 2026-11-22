@@ -2383,6 +2383,120 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "{name} ({count} fichiers) chargé",
         "zh": "已加载 {name}（{count} 个文件）",
     },
+    # -- appearance: the three faces of the assistant
+    "appearance.title": {
+        "en": "Appearance",
+        "es": "Apariencia",
+        "pt": "Aparência",
+        "fr": "Apparence",
+        "zh": "外观",
+    },
+    "appearance.dashboard": {
+        "en": "Full dashboard",
+        "es": "Panel completo",
+        "pt": "Painel completo",
+        "fr": "Tableau de bord complet",
+        "zh": "完整面板",
+    },
+    "appearance.core": {
+        "en": "Core only",
+        "es": "Sólo el núcleo",
+        "pt": "Apenas o núcleo",
+        "fr": "Juste le cœur",
+        "zh": "仅核心",
+    },
+    "appearance.tray": {
+        "en": "In the tray",
+        "es": "En la bandeja",
+        "pt": "Na área de notificação",
+        "fr": "Dans la zone de notification",
+        "zh": "在托盘",
+    },
+    "appearance.corner": {
+        "en": "Corner",
+        "es": "Esquina",
+        "pt": "Canto",
+        "fr": "Coin",
+        "zh": "角落",
+    },
+    "appearance.corner.bottom_right": {
+        "en": "Bottom right",
+        "es": "Abajo a la derecha",
+        "pt": "Inferior direito",
+        "fr": "En bas à droite",
+        "zh": "右下",
+    },
+    "appearance.corner.bottom_left": {
+        "en": "Bottom left",
+        "es": "Abajo a la izquierda",
+        "pt": "Inferior esquerdo",
+        "fr": "En bas à gauche",
+        "zh": "左下",
+    },
+    "appearance.corner.top_right": {
+        "en": "Top right",
+        "es": "Arriba a la derecha",
+        "pt": "Superior direito",
+        "fr": "En haut à droite",
+        "zh": "右上",
+    },
+    "appearance.corner.top_left": {
+        "en": "Top left",
+        "es": "Arriba a la izquierda",
+        "pt": "Superior esquerdo",
+        "fr": "En haut à gauche",
+        "zh": "左上",
+    },
+    "appearance.mode_tip": {
+        "en": "How the assistant shows itself: the whole dashboard, only the "
+              "core in a corner, or nothing but the icon in the tray.",
+        "es": "Cómo se muestra el asistente: el panel completo, sólo el "
+              "núcleo en una esquina, o nada más que el icono en la bandeja.",
+        "pt": "Como o assistente se mostra: o painel completo, apenas o "
+              "núcleo num canto, ou nada além do ícone na área de "
+              "notificação.",
+        "fr": "Comment l'assistant se montre : le tableau de bord complet, "
+              "juste le cœur dans un coin, ou rien d'autre que l'icône dans "
+              "la zone de notification.",
+        "zh": "助手如何显示：完整面板、仅角落中的核心，或只有托盘图标。",
+    },
+    "appearance.corner_tip": {
+        "en": "Where the core sits on the screen.",
+        "es": "Dónde se sitúa el núcleo en la pantalla.",
+        "pt": "Onde fica o núcleo no ecrã.",
+        "fr": "Où se trouve le cœur à l'écran.",
+        "zh": "核心在屏幕上的位置。",
+    },
+    # -- the tray icon
+    "tray.window": {
+        "en": "Window",
+        "es": "Ventana",
+        "pt": "Janela",
+        "fr": "Fenêtre",
+        "zh": "窗口",
+    },
+    "tray.maximize": {
+        "en": "Maximize",
+        "es": "Maximizar",
+        "pt": "Maximizar",
+        "fr": "Agrandir",
+        "zh": "最大化",
+    },
+    "tray.exit": {
+        "en": "Exit",
+        "es": "Salir",
+        "pt": "Sair",
+        "fr": "Quitter",
+        "zh": "退出",
+    },
+    "tray.hidden": {
+        "en": "The assistant is in the tray. It still hears you.",
+        "es": "El asistente está en la bandeja. Todavía te oye.",
+        "pt": "O assistente está na área de notificação. Ainda ouve-o.",
+        "fr": "L'assistant est dans la zone de notification. Il vous entend "
+              "toujours.",
+        "zh": "助手在托盘里。它仍然听得见你。",
+    },
 }
 
 CATALOG.update(_GUI_CATALOG)

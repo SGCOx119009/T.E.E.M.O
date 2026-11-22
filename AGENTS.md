@@ -87,7 +87,9 @@ a small built-in fallback — instead of crashing.
 ## Changing the window (`gui/`)
 
 - The window is the `gui/` package: `window.py` (MainWindow — columns, drawers,
-  content panel), `widgets.py`, `overlays.py`, `providers_panel.py`, `hud.py`.
+  content panel), `widgets.py`, `overlays.py`, `providers_panel.py`, `hud.py`,
+  `appearance.py` (the three faces of the assistant: dashboard, core in a
+  corner, tray) and `tray.py` (the icon in the notification area).
   `ui.py` keeps only `TeemoUI` and re-exports every older name.
 - Widgets are created and changed only on the Qt thread.
 - To let other threads trigger a change: add a `pyqtSignal` to `MainWindow` in

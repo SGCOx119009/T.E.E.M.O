@@ -60,6 +60,10 @@ from gui.metrics import (
 )
 from gui.hud import (
     HudCanvas,
+    _state_text,
+)
+from gui.appearance import (
+    Appearance,
 )
 from gui.widgets import (
     FileDropZone,
@@ -171,7 +175,11 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._build_header())
+        # Kept as attributes so the appearance layer can take the dashboard
+        # apart and put it back together: in the corner mode only the core
+        # is left, and these are the parts that go away.
+        self._header = self._build_header()
+        root.addWidget(self._header)
 
         body = QHBoxLayout()
         body.setContentsMargins(10, 10, 10, 10)
@@ -378,7 +386,13 @@ class MainWindow(QMainWindow):
         body.addWidget(self._right_panel, stretch=0)
 
         root.addLayout(body, stretch=1)
-        root.addWidget(self._build_footer())
+        self._footer = self._build_footer()
+        root.addWidget(self._footer)
+
+        # How the window shows itself: the whole dashboard, only the core in
+        # a corner, or nothing but the icon in the tray.
+        self._appearance = Appearance(self)
+        self._quitting = False
 
         # Quick-access drawer (floating overlay, built after central widget layout is done)
         self._quick_drawer = self._build_quick_drawer()
@@ -451,6 +465,26 @@ class MainWindow(QMainWindow):
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
         sc_intr.activated.connect(self._do_interrupt)
+
+        # THE ICON IN THE TRAY.
+        #
+        # It is the way back from the corner, and the way out from
+        # everywhere else: the window, the big window, and the exit. It is
+        # built last, because it needs the appearance to talk to.
+        self._tray = None
+        try:
+            from gui.tray import TrayPresence, available as _tray_available
+            if _tray_available():
+                self._tray = TrayPresence(
+                    self,
+                    on_show=self.restore_window,
+                    on_maximize=lambda: self.apply_appearance("dashboard"),
+                    on_exit=self.quit_application,
+                )
+                self._tray.show()
+        except Exception as exc:                   # noqa: BLE001
+            print(f"[window] the tray icon is not available: {type(exc).__name__}")
+            self._tray = None
 
     def _show_camera_frame(self, img_bytes: bytes):
         """Slot — display camera preview overlay (main thread)."""
@@ -1034,6 +1068,71 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+
+    # ------------------------------------------------------------------
+    # Appearance — the three faces of the assistant
+    # ------------------------------------------------------------------
+    def apply_appearance(self, mode: str) -> str:
+        """Put the window into a mode: 'dashboard', 'core' or 'tray'."""
+        try:
+            applied = self._appearance.set_mode(mode)
+        except Exception as exc:                   # noqa: BLE001
+            print(f"[window] the appearance could not be changed: {type(exc).__name__}")
+            return self._appearance.mode()
+        # The selector has to show what is in force, and the corner box is
+        # only alive in the core mode.
+        self._refresh_appearance_combo()
+        return applied
+
+    def appearance_mode(self) -> str:
+        return self._appearance.mode()
+
+    def set_core_corner(self, corner: str) -> str:
+        """Move the core to another corner of the screen."""
+        return self._appearance.set_corner(corner)
+
+    def load_appearance(self) -> str:
+        """Apply the appearance the user chose last time."""
+        return self._appearance.load()
+
+    def restore_window(self) -> str:
+        """Bring the window back from the tray."""
+        return self._appearance.restore()
+
+    def quit_application(self) -> None:
+        """Leave for real.
+
+        The tray icon goes first: an icon left behind after the app has
+        gone is a dead icon that has to be cleaned by hand.
+        """
+        self._quitting = True
+        if getattr(self, "_tray", None) is not None:
+            try:
+                self._tray.hide()
+            except Exception:
+                pass
+        self.close()
+
+    def closeEvent(self, event):
+        """Closing the window puts the assistant in the tray.
+
+        A window that vanishes takes the assistant with it: the microphone
+        stops, the conversation stops, and the user is left with a taskbar
+        button that no longer does anything. So the close button is read as
+        a request to hide, and only the tray menu's "Exit" really leaves.
+
+        The taskbar button disappears with the window, which is the point:
+        in the tray there is one place to find the assistant, and it is the
+        tray.
+        """
+        if getattr(self, "_quitting", False):
+            event.accept()
+            return
+        event.ignore()
+        try:
+            self.apply_appearance("tray")
+        except Exception:
+            pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1745,6 +1844,63 @@ class MainWindow(QMainWindow):
             _region_edit.editingFinished.connect(self._save_region)
         lay.addWidget(self._region_combo)
 
+        # ── APPEARANCE ──────────────────────────────────────────────────────
+        #
+        # The three faces of the assistant, and the corner the core sits in.
+        # Both are applied the moment they are touched: a face that changes
+        # only on the next restart is a setting the user cannot see.
+        self._appearance_caption = QLabel(_t("appearance.title"))
+        self._appearance_caption.setFont(px_font(9))
+        self._appearance_caption.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(self._appearance_caption)
+
+        self._appearance_combo = QComboBox()
+        self._appearance_combo.setFixedHeight(30)
+        self._appearance_combo.setFont(px_font(11))
+        self._appearance_combo.addItem(_t("appearance.dashboard"), "dashboard")
+        self._appearance_combo.addItem(_t("appearance.core"), "core")
+        self._appearance_combo.addItem(_t("appearance.tray"), "tray")
+        self._appearance_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                selection-background-color: {C.PRI_DIM};
+            }}
+        """)
+        self._appearance_combo.setToolTip(_t("appearance.mode_tip"))
+        self._appearance_combo.currentIndexChanged.connect(self._save_appearance)
+        lay.addWidget(self._appearance_combo)
+
+        self._corner_caption = QLabel(_t("appearance.corner"))
+        self._corner_caption.setFont(px_font(9))
+        self._corner_caption.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(self._corner_caption)
+
+        self._corner_combo = QComboBox()
+        self._corner_combo.setFixedHeight(30)
+        self._corner_combo.setFont(px_font(11))
+        for _corner in ("bottom-right", "bottom-left", "top-right", "top-left"):
+            self._corner_combo.addItem(
+                _t("appearance.corner." + _corner.replace("-", "_")), _corner)
+        self._corner_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                selection-background-color: {C.PRI_DIM};
+            }}
+        """)
+        self._corner_combo.setToolTip(_t("appearance.corner_tip"))
+        self._corner_combo.currentIndexChanged.connect(self._save_corner)
+        lay.addWidget(self._corner_combo)
+
         # One sentence, two lines at most: what the region is for, and what
         # the language changes.
         self._selector_note = QLabel(_t("selector.explain"))
@@ -1756,6 +1912,7 @@ class MainWindow(QMainWindow):
 
         self._refresh_language_combo()
         self._refresh_region_combo()
+        self._refresh_appearance_combo()
 
         # Which operator's tools the model is offered. Forty-five tools is a
         # lot of prompt for a conversation about one of them, and this is the
@@ -2684,6 +2841,70 @@ class MainWindow(QMainWindow):
         self._log_sig.emit(
             f"SYS: {_t('selector.region_changed', region=localization.region_label(region))}")
 
+    def _save_appearance(self, *_args):
+        """Change the face the assistant shows, and apply it at once.
+
+        A face that only changed on the next restart would be a setting the
+        user could not see, and seeing it is the whole point of the three
+        of them.
+        """
+        combo = getattr(self, "_appearance_combo", None)
+        if combo is None:
+            return
+        mode = str(combo.currentData() or "dashboard")
+        if mode == self.appearance_mode():
+            return
+        self.apply_appearance(mode)
+        if mode in ("core", "tray"):
+            # The drawers belong to the dashboard: in the corner there is
+            # nothing to open them from.
+            for drawer in ("_quick_drawer", "_ctrl_drawer"):
+                panel = getattr(self, drawer, None)
+                if panel is not None:
+                    try:
+                        panel.hide()
+                    except Exception:
+                        pass
+        self._refresh_appearance_combo()
+
+    def _save_corner(self, *_args):
+        """Move the core to another corner of the screen."""
+        combo = getattr(self, "_corner_combo", None)
+        if combo is None:
+            return
+        corner = str(combo.currentData() or "")
+        if not corner or corner == self._appearance.corner():
+            return
+        self.set_core_corner(corner)
+
+    def _refresh_appearance_combo(self):
+        """Show the appearance that is actually in force.
+
+        The corner box is only alive in the core mode: in the dashboard
+        there is no corner to speak of, and in the tray nothing is on
+        screen to put in one.
+        """
+        combo = getattr(self, "_appearance_combo", None)
+        if combo is None:
+            return
+        mode = self.appearance_mode()
+        index = combo.findData(mode)
+        if index >= 0 and combo.currentIndex() != index:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+        corner_combo = getattr(self, "_corner_combo", None)
+        if corner_combo is not None:
+            corner_index = corner_combo.findData(self._appearance.corner())
+            if corner_index >= 0 and corner_combo.currentIndex() != corner_index:
+                corner_combo.blockSignals(True)
+                corner_combo.setCurrentIndex(corner_index)
+                corner_combo.blockSignals(False)
+            corner_combo.setEnabled(mode == "core")
+        caption = getattr(self, "_corner_caption", None)
+        if caption is not None:
+            caption.setVisible(mode == "core")
+
     def _refresh_language_combo(self):
         """Show the language that is actually stored."""
         combo = getattr(self, "_language_combo", None)
@@ -3380,6 +3601,13 @@ class MainWindow(QMainWindow):
         self.hud.speaking = (state == "SPEAKING")
         if hasattr(self, "_state_chip"):
             self._state_chip.set_state(state)
+        # The tray icon carries the state too, because in the tray mode the
+        # icon is the only thing the user can see of the assistant.
+        if getattr(self, "_tray", None) is not None:
+            try:
+                self._tray.set_state(_state_text(state))
+            except Exception:
+                pass
 
     def _check_config(self) -> bool:
         d = _read_full_config()

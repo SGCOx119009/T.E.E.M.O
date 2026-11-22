@@ -104,6 +104,12 @@ class TeemoUI:
         self._win = MainWindow(face_path)
         self.root = _RootShim(self._app)
         self._win.show()
+        # The face the user chose last time: the whole dashboard, only the
+        # core in a corner, or nothing but the icon in the tray.
+        try:
+            self._win.load_appearance()
+        except Exception as exc:
+            print(f"[ui] the appearance was not applied: {type(exc).__name__}")
 
     @property
     def muted(self) -> bool:
