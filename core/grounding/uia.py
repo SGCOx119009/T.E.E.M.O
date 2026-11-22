@@ -61,6 +61,7 @@ THE SELF-GUARD
 """
 from __future__ import annotations
 
+import atexit
 import os
 import threading
 import time
@@ -105,6 +106,22 @@ _WARM_EVENT = threading.Event()
 _WARM_LOCK = threading.Lock()
 _WARM_STARTED = False
 
+# The warm-up thread is told to leave when the program is leaving.
+_WARM_STOP = threading.Event()
+
+
+def _release_warm_thread() -> None:
+    """Let the warm-up thread go, before the interpreter starts tearing down.
+
+    A daemon thread is killed when the interpreter finalises, and its COM
+    apartment dies with it: the thread that is asked to leave is the thread
+    that still owns the door, so it is the one that has to close it.
+    """
+    _WARM_STOP.set()
+
+
+atexit.register(_release_warm_thread)
+
 
 def warm(*, wait_s: float = 0.0) -> bool:
     """Load the accessibility machinery, in the background.
@@ -140,6 +157,28 @@ def warm(*, wait_s: float = 0.0) -> bool:
                     pass
                 finally:
                     _WARM_EVENT.set()
+                    # THE THREAD STAYS ALIVE, AND THAT IS THE POINT.
+                    #
+                    #     pywinauto opens a COM apartment in the thread that
+                    #     imports it, and it sets the apartment mode of the
+                    #     WHOLE PROCESS from there. If that thread dies, its
+                    #     apartment dies with it, and every COM object that
+                    #     crossed it is left pointing at a door that no
+                    #     longer exists: RPC_E_INVALID_HANDLE, which is
+                    #     0x80010108, and Windows announces it as a fatal
+                    #     exception even when the program carries on.
+                    #
+                    #     It was measured here: four of those announcements
+                    #     in one run of the suite, always in the middle of
+                    #     something else entirely — a repaint, a file read —
+                    #     which is the signature of an accident that belongs
+                    #     to somebody else.
+                    #
+                    #     So the thread that warms up stays in the house for
+                    #     as long as the program does, and it is the one that
+                    #     closes the door when the program leaves.
+                    if threading.current_thread() is not threading.main_thread():
+                        _WARM_STOP.wait()
 
             try:
                 threading.Thread(target=_run, daemon=True,
