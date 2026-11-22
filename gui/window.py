@@ -104,16 +104,31 @@ from gui.overlays import (
 from gui.providers_panel import (
     ProvidersOverlay,
 )
+from gui.viewer import (
+    ViewerPanel,
+)
 
 from PyQt6.QtWidgets import QGridLayout
 
 from gui.style import DISPLAY_CSS, MONO_CSS, btn_css, hud_font, px_font, scroll_css
-from gui.widgets import (ArcLogo, CommandFrame, DataRow, HeaderBar, HoloPanel, IconButton,
-                         PanelText, RingGauge, RoutineRow, Sparkline, StateChip, StatusStrip,
-                         TaskRow)
+from gui.widgets import (ArcLogo, CommandFrame, CountdownBar, DataRow, GestureReadout,
+                         HeaderBar, HoloPanel, IconButton, ObservationCanvas,
+                         PanelText, RingGauge, RoutineRow, SegmentedRail, Sparkline,
+                         StateChip, StatusStrip, TaskRow)
 
 from core import localization
+from core.failures import install_excepthooks
 from core.localization import t as _t
+
+
+def _vbs_quote(text: str) -> str:
+    """A string for a VBScript literal, with the quotes doubled.
+
+    A path with a quote in it is rare but legal, and a VBScript that
+    does not parse fails in a way that looks like "the shortcut was not
+    created".
+    """
+    return str(text).replace('"', '""')
 
 
 class MainWindow(QMainWindow):
@@ -185,9 +200,20 @@ class MainWindow(QMainWindow):
         # Was the window on the whole screen when the user last asked for
         # it? The appearance layer reads this to put the screen back.
         self._was_fullscreen   = False
+        # Was it maximized before it went full screen? Leaving the full
+        # screen has to return to what it was, not always to a small
+        # window — that was the bug.
+        self._was_maximized    = False
         self._current_file: str | None = None
         self._remote_overlay: RemoteKeyOverlay | None = None
         self._customize_overlay: CustomizeOverlay | None = None
+        # THE MODALS. There is only ever one of them on the screen, and
+        # they are all filed here so that closing one can close the others.
+        self._audio_overlay = None
+        self._providers_overlay = None
+        self._memory_overlay = None
+        self._plugin_manager_overlay = None
+        self._plugin_settings_overlay = None
 
         # THE SCENE.
         #
@@ -206,6 +232,14 @@ class MainWindow(QMainWindow):
         # Kept as attributes so the appearance layer can take the dashboard
         # apart and put it back together: in the corner mode only the core
         # is left, and these are the parts that go away.
+        # A FAILURE IN A SLOT MUST NOT TAKE THE PROGRAM WITH IT.
+        #
+        # Qt turns an exception in a slot into a `qFatal`, and a `qFatal`
+        # is the end of the process. The handlers go in before anything
+        # is built, so a bug in a panel is a line in the terminal and not
+        # a desktop without an assistant.
+        install_excepthooks()
+
         self._header = self._build_header()
         root.addWidget(self._header)
 
@@ -232,8 +266,10 @@ class MainWindow(QMainWindow):
         self._gesture = GestureService(self)
         self._gesture.hands_sig.connect(self._gesture_overlay.set_hands)
         self._gesture.state_sig.connect(self._log_sig.emit)
+        self._gesture.gesture_sig.connect(self._on_gesture)
         self._content_panel = self._build_content_panel()
         self._quiz_panel = self._build_quiz_panel()
+        self._viewer_panel = self._build_viewer_panel()
 
         # Live camera container — replaces HUD when camera stream is active
         _cam_cont = QWidget()
@@ -415,9 +451,34 @@ class MainWindow(QMainWindow):
             QSplitter::handle {{ background: transparent; }}
             QSplitter::handle:hover {{ background: {C.PRI_GHO}; }}
         """)
+        # ONE PANEL AT A TIME BELOW THE HEAD.
+        #
+        # Three things open under the head: a notification (news, a search
+        # result, a briefing), the viewer, and the questionnaire. They used
+        # to be three widgets in the splitter, and the splitter gave each of
+        # them room — so two of them on screen at once fought over the same
+        # pixels, and a search result could land in a panel the quiz had
+        # already emptied.
+        #
+        # They are pages of one stack now. Only one is ever on screen, the
+        # switch is explicit, and "the modals must not lie on top of each
+        # other" stops being a thing to remember and becomes a property of
+        # the layout.
+        self._lower_blank = QWidget()
+        self._lower_blank.setStyleSheet("background: transparent;")
+        self._lower_stack = QStackedWidget()
+        self._lower_stack.setStyleSheet("background: transparent;")
+        self._lower_stack.addWidget(self._lower_blank)
+        self._lower_stack.addWidget(self._content_panel)
+        self._lower_stack.addWidget(self._viewer_panel)
+        self._lower_stack.setCurrentWidget(self._lower_blank)
+        # The viewer only works while it is on screen. A hidden viewer
+        # that keeps the camera open is a camera that stays claimed for
+        # nothing, and the machine that heats up for a panel nobody is
+        # looking at.
+        self._lower_stack.currentChanged.connect(self._on_lower_page_changed)
         self._center_split.addWidget(self._hud_cam_stack)
-        self._center_split.addWidget(self._content_panel)
-        self._center_split.addWidget(self._quiz_panel)
+        self._center_split.addWidget(self._lower_stack)
         self._center_split.setStretchFactor(0, 3)
         self._center_split.setStretchFactor(1, 1)
         self._center_split.setCollapsible(0, False)
@@ -435,9 +496,13 @@ class MainWindow(QMainWindow):
         self._appearance = Appearance(self)
         self._quitting = False
 
-        # Quick-access drawer (floating overlay, built after central widget layout is done)
-        self._quick_drawer = self._build_quick_drawer()
+        # THE CONTROLS DRAWER — one panel, two doors.
+        #
+        # The gear and the sliders open the same drawer at a different
+        # group, so there is one list of switches on screen and never two
+        # that could be mistaken for a copy of each other.
         self._ctrl_drawer = self._build_controls_drawer()
+        self._quick_drawer = self._ctrl_drawer
         self._warm_wake_state()
         self._update_autostart_btn(self._check_autostart())
         from memory.config_manager import get_brief_enabled as _gbe
@@ -606,40 +671,81 @@ class MainWindow(QMainWindow):
         self._cam_stream_sig.emit(True)
         t = threading.Thread(target=self._cam_loop, daemon=True, name="cam-stream")
         t.start()
+        # THE SUBSCRIPTION ENDS WITH THE WINDOW.
+        #
+        # The hub of the camera keeps a list of readers, and this window
+        # is one of them. A window that goes without saying goodbye would
+        # leave the hub calling a reader that is not there any more.
+        try:
+            self.destroyed.connect(self._forget_camera)
+        except Exception:
+            pass
+
+    def _forget_camera(self) -> None:
+        """Let go of the camera when the window is destroyed."""
+        self._cam_stop.set()
+        try:
+            from core.camera import unsubscribe as _unsubscribe
+            _unsubscribe(self._on_cam_frame_bytes)
+        except Exception:
+            pass
 
     def _cam_loop(self) -> None:
+        """Publish the frames of the camera OF THE PROCESS.
+
+        The camera is not opened here. It is the one of `gui/camera.py`,
+        and this is one more reader of it: the hands, the tile of the
+        viewer and this stream all want the same device, and a camera
+        opened twice is what made the whole program die with an access
+        violation.
+
+        AND OPENCV IS NOT HERE, NOT EVEN FOR NOTHING.
+            This thread used to ask for OpenCV and never used it. What it
+            really did was load a native library with threads of its own
+            from a background thread, right next to the interface. The
+            camera is read in the process that holds the camera, and the
+            pictures arrive as JPEG bytes; OpenCV has no business in this
+            process.
+        """
         try:
-            import cv2
-            # Reuse camera index detected by screen_processor (cached in api_keys.json)
-            cam_idx = 0
+            from core.camera import hub as _camera_hub
+            hub = _camera_hub()
             try:
-                import json as _j
-                cfg = _j.loads((CONFIG_DIR / "api_keys.json").read_text())
-                cam_idx = int(cfg.get("camera_index", 0))
+                from memory.config_manager import get_camera_index
+                index = get_camera_index()
             except Exception:
-                pass
-            try:
-                backend = cv2.CAP_DSHOW if _OS == "Windows" else cv2.CAP_ANY
-            except AttributeError:
-                backend = 0
-            cap = cv2.VideoCapture(cam_idx, backend)
-            if not cap.isOpened():
-                cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                return
-            # warm-up frames
-            for _ in range(5):
-                cap.read()
-            while not self._cam_stop.wait(0.033) and cap.isOpened():
-                ret, frame = cap.read()
-                if ret and frame is not None:
-                    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
-                    self._cam_frame_sig.emit(buf.tobytes())
-            cap.release()
+                index = None
+            if index is not None:
+                hub.set_index(index)
+            hub.subscribe(self._on_cam_frame_bytes)
+            while not self._cam_stop.wait(0.1):
+                if hub.error:
+                    print(f"[Camera] {hub.error}")
+                    break
         except Exception as e:
             print(f"[Camera] Stream error: {e}")
         finally:
+            try:
+                from core.camera import unsubscribe as _unsubscribe
+                _unsubscribe(self._on_cam_frame_bytes)
+            except Exception:
+                pass
             self._cam_stream_sig.emit(False)
+
+    def _on_cam_frame_bytes(self, ok: bool, jpeg: bytes) -> None:
+        """One frame of the camera, as a picture for the HUD.
+
+        THE BYTES GO AS THEY ARE: the picture is already a JPEG, and
+        the interface knows how to draw one. Encoding it a second time
+        here, in the thread that was reading the camera, was work that
+        nobody had asked for.
+        """
+        if not ok or not jpeg:
+            return
+        try:
+            self._cam_frame_sig.emit(jpeg)
+        except Exception:
+            pass
 
     def stop_camera_stream(self) -> None:
         self._cam_stop.set()
@@ -1021,34 +1127,32 @@ class MainWindow(QMainWindow):
                              work_dir: str, icon_loc: str) -> None:
         """
         Create a Windows .lnk shortcut WITHOUT launching PowerShell or cmd.
-        Tries win32com (pywin32) first; falls back to wscript.exe + VBScript.
-        wscript.exe is a GUI-mode host — it never opens a console window.
-        """
-        # ── Option 1: pywin32 (pure Python COM, zero subprocess) ──────────
-        try:
-            from win32com.client import Dispatch   # type: ignore
-            sh = Dispatch("WScript.Shell")
-            sc = sh.CreateShortCut(lnk)
-            sc.TargetPath       = target
-            sc.Arguments        = f'"{args}"'
-            sc.WorkingDirectory = work_dir
-            sc.Description      = "T.E.E.M.O. AI Assistant"
-            sc.IconLocation     = icon_loc
-            sc.save()
-            return
-        except ImportError:
-            pass
 
-        # ── Option 2: wscript.exe + VBScript (always available on Windows,
-        #    GUI-mode executable — never opens a console window) ────────────
+        THE SHELL IS TALKED TO FROM ANOTHER PROCESS.
+
+            The obvious way is `win32com.client.Dispatch("WScript.Shell")`,
+            and it is a trap: COM is not a library, it is an agreement
+            between the threads of a process about which apartment owns
+            which object. `win32com.client` initializes COM in the thread
+            that imports it, and the program has threads that are already
+            inside COM — the hardware panel talks to WMI — so importing it
+            in the middle of the program is how a process dies with
+            «Windows fatal exception: access violation» and no clue.
+
+            So the shortcut is written by `wscript.exe`, which is a
+            GUI-mode host: it never opens a console window, and the COM
+            that creates the shortcut lives in THAT process, not in this
+            one.
+        """
+        # ── wscript.exe + VBScript ──────────────────────────────────────────
         vbs = "\n".join([
             'Set ws = CreateObject("WScript.Shell")',
-            f'Set sc = ws.CreateShortcut("{lnk}")',
-            f'sc.TargetPath = "{target}"',
-            f'sc.Arguments = Chr(34) & "{args}" & Chr(34)',
-            f'sc.WorkingDirectory = "{work_dir}"',
+            f'Set sc = ws.CreateShortcut("{_vbs_quote(lnk)}")',
+            f'sc.TargetPath = "{_vbs_quote(target)}"',
+            f'sc.Arguments = Chr(34) & "{_vbs_quote(args)}" & Chr(34)',
+            f'sc.WorkingDirectory = "{_vbs_quote(work_dir)}"',
             'sc.Description = "T.E.E.M.O. AI Assistant"',
-            f'sc.IconLocation = "{icon_loc}"',
+            f'sc.IconLocation = "{_vbs_quote(icon_loc)}"',
             'sc.Save',
         ])
         import tempfile
@@ -1146,8 +1250,25 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log.append_log(f"ERR: Shortcut failed — {e}")
 
+    # ── the four shapes of the window ────────────────────────────────────────
+    #
+    # WHY THEY WERE HALF BUGGY
+    #     "The whole screen" and "the window again" were one button that
+    #     toggled between two states, and the way back was always
+    #     `showNormal()`. So a MAXIMIZED window that went full screen came
+    #     back SMALL — the user pressed the button to hide the taskbar and
+    #     got a little window in the corner of the screen, with no way to
+    #     tell why. The same button could not maximize, and nothing could
+    #     minimize except the frame of Windows, which is not there when the
+    #     window is in the corner.
+    #
+    # WHAT IT IS NOW
+    #     Four named actions, and the state of the window is remembered
+    #     properly: leaving the full screen returns to whatever it was —
+    #     maximized stays maximized, a normal window stays normal.
+
     def _toggle_fullscreen(self):
-        """The whole screen, or the window again.
+        """The whole screen, or the way back to what it was.
 
         The wish is remembered: when the user comes back to the dashboard
         after being in the corner, the window finds itself on the whole
@@ -1157,10 +1278,83 @@ class MainWindow(QMainWindow):
         """
         if self.isFullScreen():
             self._was_fullscreen = False
-            self.showNormal()
+            # Back to what it was — not always "normal". A maximized window
+            # that came back small was the bug.
+            if self._was_maximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+            self._raise_window()
         else:
+            self._was_maximized = self.isMaximized()
             self._was_fullscreen = True
             self.showFullScreen()
+
+    def _maximize_window(self):
+        """Big, with the taskbar still there."""
+        self._was_fullscreen = False
+        self._was_maximized = True
+        self.showMaximized()
+        self._raise_window()
+
+    def _restore_window(self):
+        """A window on the desktop, at the size it likes."""
+        self._was_fullscreen = False
+        self._was_maximized = False
+        self.showNormal()
+        self._raise_window()
+
+    def _minimize_window(self):
+        """Out of the way, but alive."""
+        self.showMinimized()
+
+    def _raise_window(self) -> None:
+        """Bring the window in front, politely.
+
+        A window that is maximized or full screen and then asked to come
+        forward can stay behind the window the user was working in, and the
+        button looks like it did nothing. Raising it and giving it the
+        focus is what the user asked for.
+        """
+        try:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        except Exception:
+            pass
+
+    def changeEvent(self, event):
+        """Keep the truth about the window's shape.
+
+        Windows changes the state on its own too — the title bar's double
+        click, Win+Up, dragging it to the top of the screen — and the
+        buttons in the drawer have to say what is true.
+        """
+        try:
+            if event.type() == QEvent.Type.WindowStateChange:
+                if self.isFullScreen():
+                    self._was_fullscreen = True
+                else:
+                    self._was_fullscreen = False
+                    self._was_maximized = self.isMaximized()
+                self._refresh_window_btns()
+        except Exception:
+            pass
+        super().changeEvent(event)
+
+    def _refresh_window_btns(self) -> None:
+        """The four buttons say what the window is doing."""
+        try:
+            if self.isFullScreen():
+                self._fullscreen_btn.setText(_t("window.restore"))
+            else:
+                self._fullscreen_btn.setText(_t("controls.fullscreen"))
+            if self.isMaximized():
+                self._maximize_btn.setText(_t("window.restore"))
+            else:
+                self._maximize_btn.setText(_t("window.maximize"))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Appearance — the three faces of the assistant
@@ -1315,11 +1509,25 @@ class MainWindow(QMainWindow):
         here rather than in the window's resizeEvent is the difference
         between the overlay being right and being nearly right: the window
         is not resized when the HUD is.
+
+        The same filter watches the notification panel: the pointer coming
+        over it stops the clock, so a notification the user is reading does
+        not vanish under their eyes.
         """
         if obj is getattr(self, "hud", None) and event.type() == QEvent.Type.Resize:
             overlay = getattr(self, "_gesture_overlay", None)
             if overlay is not None:
                 overlay.setGeometry(self.hud.rect())
+        elif obj in getattr(self, "_content_hover", ()):
+            # The pointer can be over the TEXT of the notification and not
+            # over the panel itself: Qt sends the Enter to the child and
+            # the panel never hears of it. So every part of the panel is
+            # watched, and the clock stops while the user is reading.
+            kind = event.type()
+            if kind == QEvent.Type.Enter:
+                self._set_content_paused(True)
+            elif kind == QEvent.Type.Leave:
+                self._set_content_paused(False)
         return super().eventFilter(obj, event)
 
     def showEvent(self, event):
@@ -1573,49 +1781,15 @@ class MainWindow(QMainWindow):
             (_t("window.status_protocol", protocol=APP_PROTOCOL), "PRI"),
         ])
 
-    def _build_left_panel(self) -> QWidget:
-        w = QWidget()
-        w.setStyleSheet("background: transparent;")
-        w.setFixedWidth(200)
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+    def _build_tasks_panel(self) -> QWidget:
+        """The work: the background tasks and the routines.
 
-        sysp = HoloPanel(_t("panel.systems"), _t("label.live"))
-        grid_w = QWidget()
-        grid_w.setStyleSheet("background: transparent;")
-        grid = QGridLayout(grid_w)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setSpacing(2)
-        self._g_cpu = RingGauge("CPU")
-        self._g_mem = RingGauge(_t("label.memory"))
-        self._g_gpu = RingGauge("GPU")
-        self._g_tmp = RingGauge(_t("label.temp"))
-        for i, g in enumerate((self._g_cpu, self._g_mem, self._g_gpu, self._g_tmp)):
-            grid.addWidget(g, i // 2, i % 2)
-        sysp.body.addWidget(grid_w)
-        lay.addWidget(sysp)
-        self._systems_panel = sysp
-
-        self._net_panel = HoloPanel(_t("panel.network"), "--")
-        self._net_spark = Sparkline(samples=60, floor=0.25)
-        self._net_panel.body.addWidget(self._net_spark)
-        lay.addWidget(self._net_panel)
-
-        stp = HoloPanel(_t("panel.status"), "")
-        os_name = "WINDOWS"
-        self._row_uptime = DataRow(_t("label.uptime"), "--:--", "GREEN")
-        self._row_proc = DataRow(_t("label.processes"), "--")
-        self._row_net = DataRow(_t("panel.network"), "--")
-        self._row_os = DataRow(_t("label.platform"), os_name)
-        self._row_engine = DataRow(_t("label.engine"), "--", "PRI")
-        self._row_voice = DataRow(_t("settings.voice"), "--")
-        for row in (self._row_uptime, self._row_proc, self._row_net, self._row_os,
-                    self._row_engine, self._row_voice):
-            stp.body.addWidget(row)
-        lay.addWidget(stp)
-        self._status_panel = stp
-
+        It used to sit in the LEFT column, under the gauges, which is
+        where nobody looks for it — and the right column had no room
+        for it, because the log and the command line took all of it.
+        It is a page of the right column now, next to the conversation
+        it belongs to.
+    """
         # Background tasks (core/tasks). Read from the engine every two seconds —
         # an in-memory list, no disk — and hidden rows cost nothing to paint.
         self._tasks_panel = HoloPanel(_t("panel.tasks"), "")
@@ -1695,10 +1869,117 @@ class MainWindow(QMainWindow):
         self._panel_switch.setStyleSheet(btn_css("dim", align="center"))
         self._panel_switch.clicked.connect(self._flip_tasks_panel)
         self._tasks_panel.add_header_widget(self._panel_switch)
-        lay.addWidget(self._tasks_panel, stretch=1)
         self._tasks_tmr = QTimer(self)
         self._tasks_tmr.timeout.connect(self._refresh_tasks)
         self._tasks_tmr.start(2000)
+        return self._tasks_panel
+
+
+    def _build_quick_access(self) -> QWidget:
+        """The switches that are used every day, in the column the eye goes to.
+
+        The controls drawer holds forty things, and the eight that are
+        touched every day were buried in it behind a group of five other
+        groups. They are here now, one press away, and the drawer keeps
+        the rest.
+        """
+        panel = HoloPanel(_t("panel.quick"), "")
+        grid = QWidget()
+        grid.setStyleSheet("background: transparent;")
+        gl = QGridLayout(grid)
+        gl.setContentsMargins(0, 0, 0, 0)
+        gl.setSpacing(6)
+
+        def _icon(kind, tip, slot):
+            b = IconButton(kind, 34)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            return b
+
+        _buttons = (
+            ("mic", _t("window.mute_tip"), self._toggle_mute),
+            ("expand", _t("window.fullscreen_tip"), self._toggle_fullscreen),
+            ("max", _t("window.maximize"), self._maximize_window),
+            ("min", _t("window.minimize"), self._minimize_window),
+            ("eye", _t("controls.hud_tip_face"), self._toggle_hud_style),
+            ("grid", _t("window.open_viewer_tip"), self._toggle_viewer),
+            ("hand", _t("controls.gesture_tip"), self._toggle_gesture),
+            ("deck", _t("controls.deck_tip"), self._toggle_blades),
+            ("sliders", _t("window.controls_drawer_tip"), self._open_controls),
+            ("gear", _t("window.setup_drawer_tip"), self._open_tools),
+        )
+        for _i, (_kind, _tip, _slot) in enumerate(_buttons):
+            gl.addWidget(_icon(_kind, _tip, _slot), _i // 2, _i % 2)
+        gl.setColumnStretch(0, 1)
+        gl.setColumnStretch(1, 1)
+        panel.body.addWidget(grid)
+        self._quick_panel = panel
+        return panel
+
+    def _open_controls(self) -> None:
+        """The drawer of the everyday switches, from the quick access."""
+        self._ctrl_btn.setChecked(True)
+        self._toggle_controls(True)
+
+    def _open_tools(self) -> None:
+        """The drawer of the tools, from the quick access."""
+        self._drawer_btn.setChecked(True)
+        self._toggle_drawer(True)
+
+
+    def _build_left_panel(self) -> QWidget:
+        w = QWidget()
+        w.setStyleSheet("background: transparent;")
+        w.setFixedWidth(200)
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(10)
+
+        sysp = HoloPanel(_t("panel.systems"), _t("label.live"))
+        grid_w = QWidget()
+        grid_w.setStyleSheet("background: transparent;")
+        grid = QGridLayout(grid_w)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(2)
+        self._g_cpu = RingGauge("CPU")
+        self._g_mem = RingGauge(_t("label.memory"))
+        self._g_gpu = RingGauge("GPU")
+        self._g_tmp = RingGauge(_t("label.temp"))
+        for i, g in enumerate((self._g_cpu, self._g_mem, self._g_gpu, self._g_tmp)):
+            grid.addWidget(g, i // 2, i % 2)
+        sysp.body.addWidget(grid_w)
+        lay.addWidget(sysp)
+        self._systems_panel = sysp
+
+        self._net_panel = HoloPanel(_t("panel.network"), "--")
+        self._net_spark = Sparkline(samples=60, floor=0.25)
+        self._net_panel.body.addWidget(self._net_spark)
+        lay.addWidget(self._net_panel)
+
+        stp = HoloPanel(_t("panel.status"), "")
+        os_name = "WINDOWS"
+        self._row_uptime = DataRow(_t("label.uptime"), "--:--", "GREEN")
+        self._row_proc = DataRow(_t("label.processes"), "--")
+        self._row_net = DataRow(_t("panel.network"), "--")
+        self._row_os = DataRow(_t("label.platform"), os_name)
+        self._row_engine = DataRow(_t("label.engine"), "--", "PRI")
+        self._row_voice = DataRow(_t("settings.voice"), "--")
+        for row in (self._row_uptime, self._row_proc, self._row_net, self._row_os,
+                    self._row_engine, self._row_voice):
+            stp.body.addWidget(row)
+        lay.addWidget(stp)
+        self._status_panel = stp
+
+        # THE EVERYDAY SWITCHES, ON THE OUTSIDE.
+        #
+        # The controls drawer holds forty things. Most of them are set once
+        # and then never touched again, and the ones that ARE touched every
+        # day were buried in a drawer behind a group of five other groups.
+        #
+        # So the eight that are used every day are here, in the column the
+        # eye already goes to, and the drawer keeps the rest.
+        lay.addWidget(self._build_quick_access(), stretch=1)
+
         self._refresh_identity_rows()
         return w
 
@@ -1832,19 +2113,43 @@ class MainWindow(QMainWindow):
         self._show_content("BACKGROUND TASK", body[:4000])
 
     def _build_right_panel(self) -> QWidget:
+        """The right column: the conversation, what you say to it, and the work.
+
+        It used to hold the log and the command line, and the log took most
+        of the column because a log is a thing that grows. The tasks had
+        nowhere to go and ended up in the LEFT column, under the gauges.
+
+        Now there are three pages and a rail — TALK, SAY IT and WORK. Each
+        one gets the whole column while it is the one being used, and the
+        column itself does not grow.
+        """
         w = QWidget()
         w.setStyleSheet("background: transparent;")
         w.setFixedWidth(300)
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(10)
+        lay.setSpacing(6)
 
+        self._right_rail = SegmentedRail([
+            ("talk", _t("tab.conversation")),
+            ("say", _t("tab.commands")),
+            ("work", _t("tab.tasks")),
+        ])
+        self._right_rail.changed.connect(self._select_right_page)
+        lay.addWidget(self._right_rail)
+
+        self._right_stack = QStackedWidget()
+        self._right_stack.setStyleSheet("background: transparent;")
+        lay.addWidget(self._right_stack, stretch=1)
+
+        # ── THE CONVERSATION ────────────────────────────────────────────────
         comm = HoloPanel(_t("panel.communications"), _t("label.log"))
         self._log = LogWidget()
         comm.body.addWidget(self._log)
-        lay.addWidget(comm, stretch=1)
+        self._right_stack.addWidget(comm)
         self._comm_panel = comm
 
+        # ── WHAT YOU SAY TO IT ──────────────────────────────────────────────
         cmd = HoloPanel(_t("panel.command"), _t("label.input"))
         self._drop_zone = FileDropZone()
         self._drop_zone.file_selected.connect(self._on_file_selected)
@@ -1870,77 +2175,142 @@ class MainWindow(QMainWindow):
         self._interrupt_btn.clicked.connect(self._do_interrupt)
         row.addWidget(self._interrupt_btn, 1)
         cmd.body.addLayout(row)
-        lay.addWidget(cmd)
+        self._right_stack.addWidget(cmd)
         self._cmd_panel = cmd
+
+        # ── THE WORK ────────────────────────────────────────────────────────
+        self._right_stack.addWidget(self._build_tasks_panel())
+
+        self._select_right_page("talk")
         return w
 
-    def _build_quick_drawer(self) -> QWidget:
-        """Floating panel under the gear: the things you set once."""
+    def _select_right_page(self, key: str) -> None:
+        """One page of the right column at a time."""
+        pages = {"talk": 0, "say": 1, "work": 2}
+        idx = pages.get(str(key))
+        if idx is None:
+            return
+        self._right_stack.setCurrentIndex(idx)
+        rail = getattr(self, "_right_rail", None)
+        if rail is not None:
+            rail.set_current(str(key))
+
+    # ── the controls drawer ──────────────────────────────────────────────────
+    #
+    # ONE DRAWER, SEVEN GROUPS.
+    #
+    # It used to be two drawers with two long lists in them, and the user
+    # was right twice over: the button was duplicated, and what was inside
+    # was a list of forty things with nothing to say which of them went
+    # together.
+    #
+    # Now there is ONE drawer, a rail of seven groups at the top of it and
+    # a stack of pages underneath. The rail is the index; the page is the
+    # list. The two header buttons are two doors to the same drawer — the
+    # sliders open the everyday switches, the gear opens the tools — so
+    # there is nothing on screen that could be mistaken for a second copy.
+
+    _GROUPS = ("voice", "language", "look", "hand", "session", "system", "tools")
+
+    def _build_controls_drawer(self) -> QWidget:
+        """The switches, in groups. One drawer, two doors."""
         self._BTN_PRI, self._BTN_DIM = btn_css("primary"), btn_css("dim")
-        w = HoloPanel(_t("panel.setup"), "", parent=self.centralWidget())
+        w = HoloPanel(_t("panel.controls"), "", parent=self.centralWidget())
         w.setObjectName("QuickDrawer")
         w.hide()
+        self._ctrl_panel = w
         lay = w.body
-        lay.setSpacing(5)
+        lay.setSpacing(6)
 
-        def _btn(text, slot, style=None):
+        # THE RAIL.
+        self._group_rail = SegmentedRail([
+            ("voice", _t("group.voice")),
+            ("language", _t("group.language")),
+            ("look", _t("group.look")),
+            ("hand", _t("group.hand")),
+            ("session", _t("group.session")),
+            ("system", _t("group.system")),
+            ("tools", _t("group.tools")),
+        ])
+        self._group_rail.changed.connect(self._select_group)
+        lay.addWidget(self._group_rail)
+
+        self._group_stack = QStackedWidget()
+        self._group_stack.setStyleSheet("background: transparent;")
+        self._group_pages: dict[str, QWidget] = {}
+        self._group_layouts: dict[str, QVBoxLayout] = {}
+        for _key in self._GROUPS:
+            _page = QWidget()
+            _page.setStyleSheet("background: transparent;")
+            _pl = QVBoxLayout(_page)
+            _pl.setContentsMargins(0, 0, 0, 0)
+            _pl.setSpacing(5)
+            self._group_pages[_key] = _page
+            self._group_layouts[_key] = _pl
+            self._group_stack.addWidget(_page)
+        lay.addWidget(self._group_stack, stretch=1)
+
+        def _row(layout, button, style=None):
+            button.setFixedHeight(30)
+            button.setFont(px_font(11, QFont.Weight.DemiBold, spacing=1.2))
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            if style:
+                button.setStyleSheet(style)
+            layout.addWidget(button)
+            return button
+
+        def _btn(layout, text, slot, style=None):
             b = QPushButton(text)
             b.setFixedHeight(30)
             b.setFont(px_font(11, QFont.Weight.DemiBold, spacing=1.2))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setStyleSheet(style or self._BTN_DIM)
             b.clicked.connect(slot)
-            lay.addWidget(b)
+            layout.addWidget(b)
             return b
 
-        _btn(_t("controls.remote"), self._open_remote, self._BTN_PRI)
-        _btn(_t("controls.shortcut"), self._create_desktop_shortcut)
-        self._autostart_btn = _btn(_t("controls.autostart_off"), self._toggle_autostart)
-        _btn(_t("controls.customise"), self._open_customize)
-        _btn(_t("controls.audio_devices"), self._open_audio_devices)
-        _btn(_t("controls.memory"), self._open_memory_panel)
-        _btn(_t("controls.plugins"), self._open_plugin_manager)
-        _btn(_t("controls.plugin_settings"), self._open_plugin_settings)
-        # The button is built here with the rest of the drawer; the panel behind
-        # it — and the whole providers package — is imported on the click. The
-        # drawer used to stutter for a measured 2.104 seconds because a state
-        # check imported openwakeword while it was being built, and adding a
-        # second thing that does that would undo the fix rather than repeat it.
-        # "&&": a single & in a button label is Qt's shortcut marker, and it
-        # was being drawn as an underscore — "ENGINE _PROVIDERS".
-        _btn(_t("controls.engine_providers"), self._open_providers)
+        def _cap(layout, text):
+            lbl = QLabel(text)
+            lbl.setFont(px_font(9))
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            layout.addWidget(lbl)
+            return lbl
 
-        w.adjustSize()
-        return w
+        _COMBO_CSS = f"""
+            QComboBox {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                selection-background-color: {C.PRI_DIM};
+            }}
+        """
 
-    def _build_controls_drawer(self) -> QWidget:
-        """The switches that get flicked every day, in their own panel."""
-        w = HoloPanel(_t("panel.controls"), "", parent=self.centralWidget())
-        w.setObjectName("QuickDrawer")
-        w.hide()
-        self._ctrl_panel = w
-        lay = w.body
-        lay.setSpacing(5)
+        def _combo(layout, items, tip, slot=None):
+            box = QComboBox()
+            box.setFixedHeight(30)
+            box.setFont(px_font(11))
+            for _label, _value in items:
+                box.addItem(_label, _value)
+            box.setStyleSheet(_COMBO_CSS)
+            box.setToolTip(tip)
+            if slot is not None:
+                box.currentIndexChanged.connect(slot)
+            layout.addWidget(box)
+            return box
 
-        def _row(button, style=None):
-            button.setFixedHeight(30)
-            button.setFont(px_font(11, QFont.Weight.DemiBold, spacing=1.2))
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            if style:
-                button.setStyleSheet(style)
-            lay.addWidget(button)
-            return button
+        # ── VOZ ──────────────────────────────────────────────────────────────
+        #
+        # How the assistant listens and how it answers. The switches that get
+        # flicked every day, all in one place, because they are the ones
+        # that are used every day.
+        voice = self._group_layouts["voice"]
 
-        fs_btn = _row(QPushButton(_t("controls.fullscreen")), self._BTN_DIM)
-        fs_btn.clicked.connect(self._toggle_fullscreen)
-        self._fullscreen_btn = fs_btn
-
-        self._brief_btn = _row(QPushButton())
-        self._brief_btn.clicked.connect(self._toggle_brief)
-
-        self._wake_btn = _row(QPushButton())
+        self._wake_btn = _row(voice, QPushButton())
         self._wake_btn.clicked.connect(self._toggle_wake_word)
-        self._wake_sleep_btn = _row(QPushButton())
+        self._wake_sleep_btn = _row(voice, QPushButton())
         self._wake_sleep_btn.clicked.connect(self._tap_wake_manual)
         # Neutral until the real state lands from the background warm-up.
         self._wake_btn.setText(_t("controls.wake_word"))
@@ -1964,7 +2334,7 @@ class MainWindow(QMainWindow):
         """)
         self._wake_phrase_edit.setToolTip(_t("controls.wake_phrase_tip"))
         self._wake_phrase_edit.editingFinished.connect(self._save_wake_phrase)
-        lay.addWidget(self._wake_phrase_edit)
+        voice.addWidget(self._wake_phrase_edit)
 
         # HOW IT LISTENS: one phrase, or any voice.
         #
@@ -1983,19 +2353,10 @@ class MainWindow(QMainWindow):
         self._wake_mode_combo.setFont(px_font(11))
         self._wake_mode_combo.addItem(_t("wake.mode_phrase"), "phrase")
         self._wake_mode_combo.addItem(_t("wake.mode_voice"), "voice")
-        self._wake_mode_combo.setStyleSheet(f"""
-            QComboBox {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                selection-background-color: {C.PRI_DIM};
-            }}
-        """)
+        self._wake_mode_combo.setStyleSheet(_COMBO_CSS)
         self._wake_mode_combo.setToolTip(_t("controls.wake_mode_tip"))
         self._wake_mode_combo.currentIndexChanged.connect(self._save_wake_mode)
-        lay.addWidget(self._wake_mode_combo)
+        voice.addWidget(self._wake_mode_combo)
 
         # WHAT THE MICROPHONE IS ACTUALLY LISTENING FOR.
         #
@@ -2008,9 +2369,21 @@ class MainWindow(QMainWindow):
         self._wake_effective_lbl.setWordWrap(True)
         self._wake_effective_lbl.setStyleSheet(
             f"color: {C.TEXT_DIM}; background: transparent;")
-        lay.addWidget(self._wake_effective_lbl)
+        voice.addWidget(self._wake_effective_lbl)
         self._refresh_wake_phrase_field()
-        # ── LANGUAGE AND REGION ─────────────────────────────────────────────
+
+        self._ptt_btn = _row(voice, QPushButton())
+        self._ptt_btn.clicked.connect(self._toggle_ptt)
+        self._refresh_talk_btns()
+
+        self._hud_btn = _row(voice, QPushButton())
+        self._hud_btn.clicked.connect(self._toggle_hud_style)
+        self._refresh_hud_btn()
+
+        self._brief_btn = _row(voice, QPushButton())
+        self._brief_btn.clicked.connect(self._toggle_brief)
+
+        # ── IDIOMA ───────────────────────────────────────────────────────────
         #
         # Two switches that decide who the product is talking to: the
         # language it speaks, and the place it believes the user is in. Both
@@ -2020,12 +2393,9 @@ class MainWindow(QMainWindow):
         # The region box is EDITABLE on purpose: the table of cities is a
         # convenience, not a cage, and somebody who lives somewhere the
         # product has never heard of still has to be able to say so.
-        self._language_caption = QLabel(_t("settings.language"))
-        self._language_caption.setFont(px_font(9))
-        self._language_caption.setStyleSheet(
-            f"color: {C.TEXT_DIM}; background: transparent;")
-        lay.addWidget(self._language_caption)
+        language = self._group_layouts["language"]
 
+        self._language_caption = _cap(language, _t("settings.language"))
         self._language_combo = QComboBox()
         self._language_combo.setFixedHeight(30)
         self._language_combo.setFont(px_font(11))
@@ -2033,26 +2403,12 @@ class MainWindow(QMainWindow):
             # The NATIVE name, because that is how a person asks for the
             # language they speak.
             self._language_combo.addItem(_lang.name_native, _lang.code)
-        self._language_combo.setStyleSheet(f"""
-            QComboBox {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                selection-background-color: {C.PRI_DIM};
-            }}
-        """)
+        self._language_combo.setStyleSheet(_COMBO_CSS)
         self._language_combo.setToolTip(_t("selector.language_tip"))
         self._language_combo.currentIndexChanged.connect(self._save_language)
-        lay.addWidget(self._language_combo)
+        language.addWidget(self._language_combo)
 
-        self._region_caption = QLabel(_t("settings.region"))
-        self._region_caption.setFont(px_font(9))
-        self._region_caption.setStyleSheet(
-            f"color: {C.TEXT_DIM}; background: transparent;")
-        lay.addWidget(self._region_caption)
-
+        self._region_caption = _cap(language, _t("settings.region"))
         self._region_combo = QComboBox()
         self._region_combo.setEditable(True)
         self._region_combo.setFixedHeight(30)
@@ -2060,15 +2416,7 @@ class MainWindow(QMainWindow):
         for _region in localization.regions():
             self._region_combo.addItem(localization.region_label(_region),
                                        (_region.city, _region.country))
-        self._region_combo.setStyleSheet(f"""
-            QComboBox {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                selection-background-color: {C.PRI_DIM};
-            }}
+        self._region_combo.setStyleSheet(_COMBO_CSS + f"""
             QLineEdit {{
                 background: {C.PANEL2}; color: {C.WHITE};
                 border: none; padding: 0px;
@@ -2082,158 +2430,102 @@ class MainWindow(QMainWindow):
         _region_edit = self._region_combo.lineEdit()
         if _region_edit is not None:
             _region_edit.editingFinished.connect(self._save_region)
-        lay.addWidget(self._region_combo)
+        language.addWidget(self._region_combo)
 
-        # ── APPEARANCE ──────────────────────────────────────────────────────
+        # One sentence, two lines at most: what the region is for, and what
+        # the language changes.
+        self._selector_note = _cap(language, _t("selector.explain"))
+
+        # ── ASPECTO ──────────────────────────────────────────────────────────
         #
-        # The three faces of the assistant, and the corner the core sits in.
-        # Both are applied the moment they are touched: a face that changes
-        # only on the next restart is a setting the user cannot see.
-        self._appearance_caption = QLabel(_t("appearance.title"))
-        self._appearance_caption.setFont(px_font(9))
-        self._appearance_caption.setStyleSheet(
-            f"color: {C.TEXT_DIM}; background: transparent;")
-        lay.addWidget(self._appearance_caption)
+        # The three faces of the assistant, the corner the core sits in, and
+        # the four shapes the window can take. All of it is applied the
+        # moment it is touched: a face that changes only on the next restart
+        # is a setting the user cannot see.
+        look = self._group_layouts["look"]
 
-        self._appearance_combo = QComboBox()
-        self._appearance_combo.setFixedHeight(30)
-        self._appearance_combo.setFont(px_font(11))
-        self._appearance_combo.addItem(_t("appearance.dashboard"), "dashboard")
-        self._appearance_combo.addItem(_t("appearance.core"), "core")
-        self._appearance_combo.addItem(_t("appearance.tray"), "tray")
-        self._appearance_combo.setStyleSheet(f"""
-            QComboBox {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                selection-background-color: {C.PRI_DIM};
-            }}
-        """)
-        self._appearance_combo.setToolTip(_t("appearance.mode_tip"))
-        self._appearance_combo.currentIndexChanged.connect(self._save_appearance)
-        lay.addWidget(self._appearance_combo)
+        self._appearance_caption = _cap(look, _t("appearance.title"))
+        self._appearance_combo = _combo(look, [
+            (_t("appearance.dashboard"), "dashboard"),
+            (_t("appearance.core"), "core"),
+            (_t("appearance.tray"), "tray"),
+        ], _t("appearance.mode_tip"), self._save_appearance)
 
-        self._corner_caption = QLabel(_t("appearance.corner"))
-        self._corner_caption.setFont(px_font(9))
-        self._corner_caption.setStyleSheet(
-            f"color: {C.TEXT_DIM}; background: transparent;")
-        lay.addWidget(self._corner_caption)
+        self._corner_caption = _cap(look, _t("appearance.corner"))
+        self._corner_combo = _combo(look, [
+            (_t("appearance.corner." + _c.replace("-", "_")), _c)
+            for _c in ("bottom-right", "bottom-left", "top-right", "top-left")
+        ], _t("appearance.corner_tip"), self._save_corner)
 
-        self._corner_combo = QComboBox()
-        self._corner_combo.setFixedHeight(30)
-        self._corner_combo.setFont(px_font(11))
-        for _corner in ("bottom-right", "bottom-left", "top-right", "top-left"):
-            self._corner_combo.addItem(
-                _t("appearance.corner." + _corner.replace("-", "_")), _corner)
-        self._corner_combo.setStyleSheet(f"""
-            QComboBox {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                selection-background-color: {C.PRI_DIM};
-            }}
-        """)
-        self._corner_combo.setToolTip(_t("appearance.corner_tip"))
-        self._corner_combo.currentIndexChanged.connect(self._save_corner)
-        lay.addWidget(self._corner_combo)
-
-        # ── WHERE A SONG IS OPENED ───────────────────────────────────────────
+        # THE FOUR SHAPES OF THE WINDOW, each one named.
         #
-        # Spotify or YouTube, and the user picks which one. Automatic means
-        # "Spotify when it is really installed here, YouTube otherwise" —
-        # and the tool used to try Spotify first on a machine where Spotify
-        # was not installed at all, which cost half a minute and opened the
-        # wrong player on the way to the right one.
-        self._music_caption = QLabel(_t("music.service"))
-        self._music_caption.setFont(px_font(9))
-        self._music_caption.setStyleSheet(
-            f"color: {C.TEXT_DIM}; background: transparent;")
-        lay.addWidget(self._music_caption)
+        # One button that toggled "the whole screen" left the user guessing
+        # what the other half of the pair did, and there was no way at all to
+        # ask for "make it big but keep the taskbar" without leaving the
+        # drawer and hunting for the buttons of Windows. Four named buttons
+        # answer the four real wishes.
+        self._maximize_btn = _row(look, QPushButton(_t("window.maximize")),
+                                  self._BTN_DIM)
+        self._maximize_btn.clicked.connect(self._maximize_window)
+        self._fullscreen_btn = _row(look, QPushButton(_t("controls.fullscreen")),
+                                    self._BTN_DIM)
+        self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
+        self._restore_btn = _row(look, QPushButton(_t("window.restore")),
+                                 self._BTN_DIM)
+        self._restore_btn.clicked.connect(self._restore_window)
+        self._minimize_btn = _row(look, QPushButton(_t("window.minimize")),
+                                  self._BTN_DIM)
+        self._minimize_btn.clicked.connect(self._minimize_window)
 
-        self._music_combo = QComboBox()
-        self._music_combo.setFixedHeight(30)
-        self._music_combo.setFont(px_font(11))
-        self._music_combo.addItem(_t("music.service_auto"), "auto")
-        self._music_combo.addItem(_t("music.service_spotify"), "spotify")
-        self._music_combo.addItem(_t("music.service_youtube"), "youtube")
-        self._music_combo.setStyleSheet(f"""
-            QComboBox {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
-            }}
-            QComboBox QAbstractItemView {{
-                background: {C.PANEL2}; color: {C.WHITE};
-                selection-background-color: {C.PRI_DIM};
-            }}
-        """)
-        self._music_combo.setToolTip(_t("music.service_tip"))
-        self._music_combo.currentIndexChanged.connect(self._save_music_service)
-        lay.addWidget(self._music_combo)
-        self._load_music_service()
-
-        # ── THE HANDS ───────────────────────────────────────────────────────
+        # ── MANO ─────────────────────────────────────────────────────────────
         #
         # The cursor you steer with: the camera watches, the skeleton of
         # each hand is drawn on the glass, the fingertip is the cursor and
         # the pinch is a click.
-        self._gesture_btn = _row(QPushButton(_t("controls.gesture")), self._BTN_DIM)
+        hand = self._group_layouts["hand"]
+
+        self._gesture_btn = _row(hand, QPushButton(_t("controls.gesture")),
+                                 self._BTN_DIM)
         self._gesture_btn.setToolTip(_t("controls.gesture_tip"))
         self._gesture_btn.clicked.connect(self._toggle_gesture)
 
         self._gesture_pointer_btn = _row(
-            QPushButton(_t("controls.gesture_pointer")), self._BTN_DIM)
+            hand, QPushButton(_t("controls.gesture_pointer")), self._BTN_DIM)
         self._gesture_pointer_btn.setToolTip(_t("controls.gesture_pointer_tip"))
         self._gesture_pointer_btn.clicked.connect(self._toggle_gesture_pointer)
 
-        # ── THE DECK AND THE PANEL THAT STAYS ON TOP ────────────────────────
+        # THE LEGEND, because a gesture nobody can check is a guess.
+        self._gesture_legend = QLabel(_t("gesture.legend"))
+        self._gesture_legend.setFont(px_font(9))
+        self._gesture_legend.setWordWrap(True)
+        self._gesture_legend.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        hand.addWidget(self._gesture_legend)
+
+        # ── SESIÓN ───────────────────────────────────────────────────────────
         #
-        # The deck is the session on one screen: every answer the
-        # assistant gave, one card each. The floating panel is the same
-        # idea over somebody else's window: it follows the assistant and
-        # can be dragged anywhere with the mouse or with the hand.
-        self._deck_btn_ctrl = _row(QPushButton(_t("controls.deck")), self._BTN_DIM)
+        # The deck is the session on one screen: every answer the assistant
+        # gave, one card each. The floating panel is the same idea over
+        # somebody else's window: it follows the assistant and can be dragged
+        # anywhere with the mouse or with the hand.
+        session = self._group_layouts["session"]
+
+        self._deck_btn_ctrl = _row(session, QPushButton(_t("controls.deck")),
+                                   self._BTN_DIM)
         self._deck_btn_ctrl.setToolTip(_t("controls.deck_tip"))
         self._deck_btn_ctrl.clicked.connect(self._toggle_blades)
 
-        self._floating_btn = _row(QPushButton(_t("controls.floating")), self._BTN_DIM)
+        self._floating_btn = _row(session, QPushButton(_t("controls.floating")),
+                                  self._BTN_DIM)
         self._floating_btn.setToolTip(_t("controls.floating_tip"))
         self._floating_btn.clicked.connect(self._toggle_floating)
 
         # The ignition can be watched again. It is a show, and the user is
         # allowed to watch a show twice.
-        self._boot_btn = _row(QPushButton(_t("controls.replay_boot")), self._BTN_DIM)
+        self._boot_btn = _row(session, QPushButton(_t("controls.replay_boot")),
+                              self._BTN_DIM)
         self._boot_btn.setToolTip(_t("controls.replay_boot_tip"))
         self._boot_btn.clicked.connect(self._replay_boot_clicked)
-
-        # THE LEGEND OF THE STAR.
-        #
-        # A control marked with a star is there and works as far as it
-        # goes, but the rest of it is not written yet. Saying so in the
-        # panel is better than a control that quietly does nothing.
-        self._pending_note = QLabel(_t("controls.pending"))
-        self._pending_note.setFont(px_font(9))
-        self._pending_note.setWordWrap(True)
-        self._pending_note.setStyleSheet(
-            f"color: {C.TEXT_DIM}; background: transparent;")
-        self._pending_note.setToolTip(_t("controls.pending_tip"))
-        lay.addWidget(self._pending_note)
-
-        # One sentence, two lines at most: what the region is for, and what
-        # the language changes.
-        self._selector_note = QLabel(_t("selector.explain"))
-        self._selector_note.setFont(px_font(9))
-        self._selector_note.setWordWrap(True)
-        self._selector_note.setStyleSheet(
-            f"color: {C.TEXT_DIM}; background: transparent;")
-        lay.addWidget(self._selector_note)
-
-        self._refresh_language_combo()
-        self._refresh_region_combo()
-        self._refresh_appearance_combo()
 
         # Which operator's tools the model is offered. Forty-five tools is a
         # lot of prompt for a conversation about one of them, and this is the
@@ -2256,19 +2548,98 @@ class MainWindow(QMainWindow):
         """)
         self._ctx_combo.setToolTip(_t("controls.context_tip"))
         self._ctx_combo.activated.connect(self._on_tool_context)
-        lay.addWidget(self._ctx_combo)
+        session.addWidget(self._ctx_combo)
         self._refresh_context_combo()
 
-        self._ptt_btn = _row(QPushButton())
-        self._ptt_btn.clicked.connect(self._toggle_ptt)
-        self._refresh_talk_btns()
+        # ── SISTEMA ──────────────────────────────────────────────────────────
+        #
+        # Spotify or YouTube, and the user picks which one. Automatic means
+        # "Spotify when it is really installed here, YouTube otherwise" — and
+        # the tool used to try Spotify first on a machine where Spotify was
+        # not installed at all, which cost half a minute and opened the
+        # wrong player on the way to the right one.
+        system = self._group_layouts["system"]
 
-        self._hud_btn = _row(QPushButton())
-        self._hud_btn.clicked.connect(self._toggle_hud_style)
-        self._refresh_hud_btn()
+        self._music_caption = _cap(system, _t("music.service"))
+        self._music_combo = _combo(system, [
+            (_t("music.service_auto"), "auto"),
+            (_t("music.service_spotify"), "spotify"),
+            (_t("music.service_youtube"), "youtube"),
+        ], _t("music.service_tip"), self._save_music_service)
+        self._load_music_service()
+
+        # THE LEGEND OF THE STAR.
+        #
+        # A control marked with a star is there and works as far as it
+        # goes, but the rest of it is not written yet. Saying so in the
+        # panel is better than a control that quietly does nothing.
+        self._pending_note = QLabel(_t("controls.pending"))
+        self._pending_note.setFont(px_font(9))
+        self._pending_note.setWordWrap(True)
+        self._pending_note.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        self._pending_note.setToolTip(_t("controls.pending_tip"))
+        system.addWidget(self._pending_note)
+
+        # ── HERRAMIENTAS ─────────────────────────────────────────────────────
+        #
+        # The things that are set once: the phone, the shortcut, the devices,
+        # the memory, the plugins, the engine.
+        tools = self._group_layouts["tools"]
+
+        _btn(tools, _t("controls.remote"), self._open_remote, self._BTN_PRI)
+        _btn(tools, _t("controls.shortcut"), self._create_desktop_shortcut)
+        self._autostart_btn = _btn(tools, _t("controls.autostart_off"),
+                                   self._toggle_autostart)
+        _btn(tools, _t("controls.customise"), self._open_customize)
+        _btn(tools, _t("controls.audio_devices"), self._open_audio_devices)
+        _btn(tools, _t("controls.memory"), self._open_memory_panel)
+        _btn(tools, _t("controls.plugins"), self._open_plugin_manager)
+        _btn(tools, _t("controls.plugin_settings"), self._open_plugin_settings)
+        # The button is built here with the rest of the drawer; the panel behind
+        # it — and the whole providers package — is imported on the click. The
+        # drawer used to stutter for a measured 2.104 seconds because a state
+        # check imported openwakeword while it was being built, and adding a
+        # second thing that does that would undo the fix rather than repeat it.
+        # "&&": a single & in a button label is Qt's shortcut marker, and it
+        # was being drawn as an underscore — "ENGINE _PROVIDERS".
+        _btn(tools, _t("controls.engine_providers"), self._open_providers)
+
+        for _page in self._group_pages.values():
+            _page.layout().addStretch()
+
+        self._refresh_language_combo()
+        self._refresh_region_combo()
+        self._refresh_appearance_combo()
+        self._select_group("voice")
 
         w.adjustSize()
         return w
+
+    def _select_group(self, key: str) -> None:
+        """Open one group of the drawer.
+
+        The rail and the stack are two views of the same thing, so this is
+        the only place that decides which group is open. It never emits the
+        change onwards: the rail is lit from here, not the other way round,
+        or the two would talk to each other for ever.
+        """
+        key = str(key)
+        page = self._group_pages.get(key)
+        if page is None:
+            return
+        self._group_stack.setCurrentWidget(page)
+        rail = getattr(self, "_group_rail", None)
+        if rail is not None:
+            rail.set_current(key)
+        # THE DRAWER IS AS TALL AS THE GROUP IT SHOWS.
+        #
+        # The groups are not the same height — the one with the four
+        # modes of the window is taller than the one with the language —
+        # and a drawer with a fixed height clips the tallest one.
+        drawer = getattr(self, "_ctrl_drawer", None)
+        if drawer is not None and drawer.isVisible():
+            self._position_ctrl_drawer()
 
     def _warm_wake_state(self) -> None:
         """Work out the wake-word state off the UI thread, once.
@@ -2288,19 +2659,27 @@ class MainWindow(QMainWindow):
             self._wake_btns_sig.emit()
         threading.Thread(target=work, daemon=True, name="wake-state-warm").start()
 
+    # ── the two doors of the drawer ──────────────────────────────────────────
+
     def _toggle_drawer(self, checked: bool):
+        """The gear: the drawer of the tools."""
         if checked:
+            self._ctrl_btn.setChecked(False)
             self._close_controls()
-            self._position_quick_drawer()
-            self._quick_drawer.show()
-            self._quick_drawer.raise_()
+            self._select_group("tools")
+            self._position_ctrl_drawer()
+            self._ctrl_drawer.show()
+            self._ctrl_drawer.raise_()
         else:
-            self._quick_drawer.hide()
+            self._ctrl_drawer.hide()
 
     def _toggle_controls(self, checked: bool):
+        """The sliders: the drawer of the everyday switches."""
         if checked:
+            self._drawer_btn.setChecked(False)
             self._close_setup()
             self._refresh_wake_btns()   # cheap now: the state was warmed at boot
+            self._select_group("voice")
             self._position_ctrl_drawer()
             self._ctrl_drawer.show()
             self._ctrl_drawer.raise_()
@@ -2320,7 +2699,9 @@ class MainWindow(QMainWindow):
             self._ctrl_btn.setChecked(False)
 
     def _place_drawer(self, drawer, left: int):
-        _W = 250
+        # Wide enough for the rail of groups and for a sentence of help
+        # underneath it.
+        _W = 300
         drawer.setFixedWidth(_W)
         drawer.adjustSize()
         top = self._header.height() + 2 if hasattr(self, "_header") else 60
@@ -2331,15 +2712,25 @@ class MainWindow(QMainWindow):
             self._place_drawer(self._quick_drawer, 12)
 
     def _position_ctrl_drawer(self):
-        # Under its own header button rather than under the other one's.
-        if hasattr(self, "_ctrl_drawer"):
-            left = 12
-            try:
-                left = max(12, self._ctrl_btn.mapTo(self.centralWidget(),
-                                                    QPoint(0, 0)).x() - 8)
-            except Exception:
-                pass
-            self._place_drawer(self._ctrl_drawer, left)
+        """Under the header button that opened it.
+
+        The gear and the sliders are two doors to one drawer, and the
+        drawer hangs under the door that was used — so the user sees where
+        it came from.
+        """
+        if not hasattr(self, "_ctrl_drawer"):
+            return
+        left = 12
+        button = self._ctrl_btn
+        if getattr(self, "_drawer_btn", None) is not None \
+                and self._drawer_btn.isChecked():
+            button = self._drawer_btn
+        try:
+            left = max(12, button.mapTo(self.centralWidget(),
+                                         QPoint(0, 0)).x() - 8)
+        except Exception:
+            pass
+        self._place_drawer(self._ctrl_drawer, left)
 
     def _build_input_row(self) -> QWidget:
         box = CommandFrame()
@@ -2377,6 +2768,15 @@ class MainWindow(QMainWindow):
         """
         Panel below the HUD — shows search results, news, briefings, reviews.
         Hidden by default; appears when show_content() is called.
+
+        IT IS A NOTIFICATION, NOT A PAGE.
+        -------------------------------
+        The user read the news and wanted it OUT OF THE WAY — closable with
+        the mouse and gone on its own. So the panel carries a line along its
+        bottom edge that runs out, and the panel goes when the line does.
+        The clock stops while the pointer is over it, because a
+        notification that vanishes while it is being read is worse than no
+        notification at all.
         """
         w = HoloPanel(_t("panel.briefing"), "")
         w.setObjectName("ContentPanel")
@@ -2388,7 +2788,7 @@ class MainWindow(QMainWindow):
 
         dismiss = IconButton("close", 22)
         dismiss.setToolTip(_t("window.dismiss"))
-        dismiss.clicked.connect(w.hide)
+        dismiss.clicked.connect(self._hide_content)
         w.add_header_widget(dismiss)
 
         self._content_display = QTextEdit()
@@ -2408,20 +2808,128 @@ class MainWindow(QMainWindow):
             }}
         """ + scroll_css())
         w.body.addWidget(self._content_display)
+
+        # THE LINE THAT RUNS OUT.
+        self._content_bar = CountdownBar(w)
+        w.body.addWidget(self._content_bar)
+
+        # Every piece of the panel watches the pointer, so that the clock
+        # stops while the user reads the text and not only while the
+        # pointer is on the frame around it.
+        self._content_hover = (w, self._content_display, dismiss)
+        for _part in self._content_hover:
+            _part.installEventFilter(self)
+
+        # How long a notification stays. Long enough to read a headline and
+        # a couple of lines; short enough that it is a notification.
+        self._content_default_life = 20.0
+        self._content_life = self._content_default_life
+        self._content_left = 0.0
+        self._content_paused = False
+        self._content_timer = QTimer(self)
+        self._content_timer.setInterval(200)
+        self._content_timer.timeout.connect(self._tick_content)
         return w
 
-    def _reveal_below_hud(self, panel: QWidget, want: int) -> None:
-        """Show a panel under the HUD at a usable height.
+    def _set_content_paused(self, paused: bool) -> None:
+        """Stop or restart the clock of the notification."""
+        if bool(paused) == bool(self._content_paused):
+            return
+        self._content_paused = bool(paused)
+        bar = getattr(self, "_content_bar", None)
+        if bar is not None:
+            bar.set_paused(self._content_paused)
 
-        Checked every time, not only the first: showing the quiz gives the
-        content panel a height of 0 while leaving it "visible", so the next
-        search result, review or finished task landed in a panel nobody could
-        see."""
+    def _tick_content(self) -> None:
+        """One fifth of a second of the notification's life."""
+        if self._content_paused:
+            return
+        self._content_left -= 0.2
+        if self._content_left <= 0.0:
+            self._hide_content()
+            return
+        bar = getattr(self, "_content_bar", None)
+        if bar is not None:
+            bar.set_fraction(self._content_left / max(1.0, self._content_life))
+
+    def _set_content_life(self, seconds: float) -> None:
+        """How long the panel under the head stays.
+
+        A NOTIFICATION goes on its own: news, a search result, a briefing.
+        A thing that is being READ does not: a live job and a review of a
+        document stay until the user closes them or another thing takes
+        their place. The difference is the difference between a message and
+        a page, and treating them the same made one of the two wrong.
+        """
+        self._content_life = float(seconds)
+        bar = getattr(self, "_content_bar", None)
+        if bar is not None:
+            bar.setVisible(self._content_life > 0)
+        if self._content_life > 0:
+            self._content_left = self._content_life
+            if bar is not None:
+                bar.set_fraction(1.0)
+                bar.set_paused(self._content_paused)
+            self._content_timer.start()
+        else:
+            self._content_timer.stop()
+            self._content_left = 0.0
+
+    def _hide_content(self) -> None:
+        """Take the notification away. The mouse can do it; so can the clock."""
+        self._content_timer.stop()
+        panel = getattr(self, "_content_panel", None)
+        if panel is not None:
+            panel.hide()
+        stack = getattr(self, "_lower_stack", None)
+        if stack is not None:
+            blank = getattr(self, "_lower_blank", None)
+            if blank is not None:
+                stack.setCurrentWidget(blank)
+            # THE SPACE GOES BACK TO THE HEAD.
+            #
+            # An empty page under the head is a hole in the interface: the
+            # face is smaller than it was and nothing says why. The room
+            # the notification was using goes back to the head.
+            self._shrink_below_hud()
+
+    def _shrink_below_hud(self) -> None:
+        """Give the room under the head back to the head."""
+        split = getattr(self, "_center_split", None)
+        stack = getattr(self, "_lower_stack", None)
+        if split is None or stack is None:
+            return
+        idx = split.indexOf(stack)
+        sizes = split.sizes()
+        if idx < 0 or idx >= len(sizes):
+            return
+        total = sum(sizes) or split.height()
+        new = list(sizes)
+        new[idx] = 0
+        new[0] = total
+        try:
+            split.setSizes(new)
+        except Exception:
+            pass
+
+    def _reveal_below_hud(self, panel: QWidget, want: int) -> None:
+        """Show one panel under the HUD at a usable height.
+
+        The panels under the head are pages of one stack, so opening one
+        closes the others. Checked every time, not only the first: the
+        panels are given room by the splitter, and the next search result,
+        review or finished task has to land in a panel that is really
+        there."""
+        stack = getattr(self, "_lower_stack", None)
+        if stack is None:
+            panel.show()
+            return
+        stack.setCurrentWidget(panel)
         panel.show()
         split = self._center_split
-        idx = split.indexOf(panel)
+        idx = split.indexOf(stack)
         sizes = split.sizes()
-        if idx < 0 or sizes[idx] >= 60:
+        if idx < 0 or sizes[idx] >= want:
             return
         total = sum(sizes) or split.height()
         new = [0] * len(sizes)
@@ -2445,6 +2953,11 @@ class MainWindow(QMainWindow):
         self._content_display.moveCursor(
             self._content_display.textCursor().MoveOperation.Start
         )
+        # THE CLOCK OF THE NOTIFICATION STARTS AGAIN.
+        #
+        # Every arrival is a new notification: the line runs out again from
+        # the beginning, and the pointer on the panel still stops it.
+        self._set_content_life(self._content_default_life)
         self._reveal_below_hud(self._content_panel, 220)
         # The same thing goes into the deck and onto the floating panel: the
         # card is the answer, and the little panel over the browser is the
@@ -2543,6 +3056,10 @@ class MainWindow(QMainWindow):
         bar.setValue(keep)
         if first:
             self.hud.glance(0.0, -0.85, hold=1.3)
+        # A LIVE JOB DOES NOT TIME OUT. It is not a notification: it is
+        # work in progress, and a panel that vanished half way through
+        # would be a panel the user could not read.
+        self._set_content_life(0)
         self._reveal_below_hud(self._content_panel, 260)
 
     # ── document review ──────────────────────────────────────────────────────
@@ -2624,6 +3141,8 @@ class MainWindow(QMainWindow):
         self._content_display.setHtml("".join(parts))
         self._content_display.moveCursor(
             self._content_display.textCursor().MoveOperation.Start)
+        # A REVIEW IS READ, NOT NOTIFIED: it stays until it is closed.
+        self._set_content_life(0)
         self._reveal_below_hud(self._content_panel, 260)
 
     # ── quiz panel ───────────────────────────────────────────────────────────
@@ -2633,6 +3152,76 @@ class MainWindow(QMainWindow):
     # a dropped file is — as a message the assistant reads and responds to. That keeps
     # the tool call short (it returns the moment the board is up) and leaves the
     # talking to the assistant, in the user's own language.
+
+    def _build_viewer_panel(self) -> QWidget:
+        """The viewer: camera on the left, the screen on the right, the hands below.
+
+        The questionnaire used to sit alone under the head, asking questions
+        that had nothing to do with the rest of the interface. The viewer
+        takes that place: the questions are still asked, but the panel also
+        shows the two things a user actually wants to CHECK — what the
+        camera sees and what the machine can read on the screen — and the
+        state of the hands, so a gesture can be verified instead of guessed.
+        """
+        panel = ViewerPanel(self, quiz=self._quiz_panel)
+        self._viewer = panel
+        return panel
+
+    def _on_gesture(self, pose: str, action: str) -> None:
+        """The hand says what it is doing, and the viewer shows it.
+
+        This is the whole point of the strip under the two pictures: a
+        gesture that cannot be checked is a guess, and the user is the only
+        one who can say whether the guess was right.
+        """
+        viewer = getattr(self, "_viewer", None)
+        if viewer is None:
+            return
+        service = getattr(self, "_gesture", None)
+        backend = service.backend if service is not None else "none"
+        hands = service.hands_count if service is not None else 0
+        viewer.set_gesture(backend, pose, action, [
+            (_t("viewer.hands_count"), str(hands), "TEXT"),
+        ])
+
+    def _on_lower_page_changed(self, _index: int) -> None:
+        """The page under the head changed: the viewer follows.
+
+        The camera and the screen are read only while the viewer is the
+        page on screen. A viewer that is hidden and still reading the
+        screen would be a program that watches the user's desktop with
+        nobody watching it.
+        """
+        viewer = getattr(self, "_viewer", None)
+        if viewer is None:
+            return
+        stack = getattr(self, "_lower_stack", None)
+        if stack is not None and stack.currentWidget() is viewer:
+            viewer.start()
+        else:
+            viewer.stop()
+
+    def _hide_viewer(self) -> None:
+        panel = getattr(self, "_viewer", None)
+        if panel is not None:
+            panel.stop()
+        stack = getattr(self, "_lower_stack", None)
+        if stack is not None:
+            blank = getattr(self, "_lower_blank", None)
+            if blank is not None:
+                stack.setCurrentWidget(blank)
+
+    def _toggle_viewer(self) -> None:
+        """Open the viewer, or close it if it is already open."""
+        stack = getattr(self, "_lower_stack", None)
+        panel = getattr(self, "_viewer", None)
+        if stack is None or panel is None:
+            return
+        if stack.currentWidget() is panel:
+            self._hide_viewer()
+            return
+        self._reveal_below_hud(panel, 300)
+        panel.start()
 
     def _quiz_btn(self, text: str, primary: bool = False) -> QPushButton:
         b = QPushButton(text)
@@ -2644,19 +3233,38 @@ class MainWindow(QMainWindow):
         return b
 
     def _build_quiz_panel(self) -> QWidget:
-        w = HoloPanel(_t("panel.quiz"), "")
+        """The questionnaire, as a tab of the viewer.
+
+        It used to be a panel of its own under the head, asking questions
+        in the middle of an interface that had nothing to do with it. The
+        user was right: that space was better spent on what the machine
+        can actually SEE.
+
+        So the questionnaire is a tab of the viewer now — the camera on
+        one side and the questions on the other, in one panel — and the
+        user can watch the screen while the assistant asks.
+        """
+        w = QWidget()
         w.setObjectName("QuizPanel")
-        w.hide()
-        self._quiz_title_lbl = PanelText(w, "title")
-        self._quiz_count_lbl = PanelText(w, "code")
-
-        quit_btn = IconButton("close", 22)
-        quit_btn.setToolTip(_t("window.dismiss"))
-        quit_btn.clicked.connect(self._hide_quiz)
-        w.add_header_widget(quit_btn)
-
-        lay = w.body
+        w.setStyleSheet("background: transparent;")
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        self._quiz_title_lbl = QLabel("")
+        self._quiz_title_lbl.setFont(px_font(13, QFont.Weight.DemiBold,
+                                             spacing=1.4))
+        self._quiz_title_lbl.setStyleSheet(
+            f"color: {C.PRI}; background: transparent;")
+        head.addWidget(self._quiz_title_lbl, 1)
+        self._quiz_count_lbl = QLabel("")
+        self._quiz_count_lbl.setFont(px_font(10, mono=True))
+        self._quiz_count_lbl.setStyleSheet(
+            f"color: {C.PRI_DIM}; background: transparent;")
+        head.addWidget(self._quiz_count_lbl)
+        lay.addLayout(head)
 
         self._quiz_q_lbl = QLabel("")
         self._quiz_q_lbl.setWordWrap(True)
@@ -2704,12 +3312,36 @@ class MainWindow(QMainWindow):
         }
         self._quiz_title_lbl.setText((topic or "quiz").upper()[:48])
         self.hud.glance(0.0, -0.85, hold=1.3)
-        self._reveal_below_hud(self._quiz_panel, 250)
+        # The viewer is the page, and the questionnaire is a tab of it.
+        viewer = getattr(self, "_viewer", None)
+        if viewer is not None:
+            viewer.show_quiz()
+        self._reveal_below_hud(self._viewer_panel, 300)
         self._quiz_render()
 
     def _hide_quiz(self):
+        """The questionnaire is done. The viewer stays, on its other tab.
+
+        THE PANEL OF THE QUESTIONS IS NOT HIDDEN. It is a page of the
+        stack of the viewer, and a page that is hidden while it is the
+        current one leaves the stack showing nothing: the second
+        questionnaire of the session would arrive at a panel that is not
+        there. The stack decides what is visible, and the stack is told.
+        """
         self._quiz = None
-        self._quiz_panel.hide()
+        viewer = getattr(self, "_viewer", None)
+        if viewer is not None:
+            viewer.show_view()
+        # The stack does not go back to a blank page by itself: a page that
+        # is hidden while it is the current one leaves an empty hole under
+        # the head, and the hole reads as a panel that failed to open.
+        stack = getattr(self, "_lower_stack", None)
+        if stack is not None and stack.currentWidget() is self._viewer_panel:
+            blank = getattr(self, "_lower_blank", None)
+            if blank is not None:
+                stack.setCurrentWidget(blank)
+            # The room under the head goes back to the head.
+            self._shrink_below_hud()
 
     def _quiz_clear_answers(self):
         while self._quiz_answers_lay.count():
@@ -2894,6 +3526,15 @@ class MainWindow(QMainWindow):
             self._remote_overlay.mark_connected()
 
     def _open_remote(self):
+        # THE CONFIRMATION IS THE ONE MODAL THAT BLOCKS THE OTHERS.
+        #
+        # This panel is built by hand, so it does not go through
+        # _show_overlay(); it has to ask the question itself. A panel that
+        # lands on top of a question waiting for an answer is the deck of
+        # cards the owner complained about, in a different suit.
+        if self._confirm_pending():
+            self._log.append_log("SYS: Answer the question on screen first.")
+            return
         if not self.on_remote_clicked:
             self._log.append_log("SYS: Dashboard not running — remote unavailable.")
             return
@@ -2908,6 +3549,9 @@ class MainWindow(QMainWindow):
         berr   = result[4] if len(result) >= 5 else ""
         if self._remote_overlay:
             self._remote_overlay._do_close()
+        # One modal at a time: the key panel does not land on top of the
+        # memory panel and the plugins panel at the same time.
+        self._close_overlays()
         cw  = self.centralWidget()
         ow, oh = RemoteKeyOverlay._OW, RemoteKeyOverlay._OH
         ov  = RemoteKeyOverlay(url, key, auto_login_url=auto, manual_url=manual,
@@ -3693,8 +4337,7 @@ class MainWindow(QMainWindow):
 
     def _open_customize(self):
         cfg = _read_full_config()
-        if self._customize_overlay:
-            self._customize_overlay.hide()
+        self._close_overlays()
         cw = self.centralWidget()
         ov = CustomizeOverlay(
             cfg.get("assistant_name", "T.E.E.M.O.") or "T.E.E.M.O.",
@@ -3712,8 +4355,7 @@ class MainWindow(QMainWindow):
         )
         ov.on_preview = self._preview_ui_color
         ov.saved.connect(self._apply_name_update)
-        ov.show()
-        self._customize_overlay = ov
+        self._show_overlay(ov, "_customize_overlay")
 
     def _preview_ui_color(self, hex_color: str):
         """Live preview — paints the whole interface the new colour (does NOT write to config)."""
@@ -3828,13 +4470,81 @@ class MainWindow(QMainWindow):
         ov.show()
         ov.raise_()
 
+    # ── the rule about modals ────────────────────────────────────────────────
+    #
+    # ONE AT A TIME.
+    #
+    # Two modals on the screen at once is a deck of cards laid on top of
+    # each other: the user cannot tell which one is on top, the one
+    # underneath keeps eating the clicks, and closing the wrong one leaves
+    # the other one there for ever. So opening a modal closes the one that
+    # was open.
+    #
+    # The confirmation is the exception, and it is an exception on purpose:
+    # it asks a question that has to be answered before anything else
+    # happens — usually before the machine is shut down. While it is open,
+    # nothing else opens over it.
+    _OVERLAY_ATTRS = ("_audio_overlay", "_providers_overlay", "_memory_overlay",
+                       "_customize_overlay", "_plugin_manager_overlay",
+                       "_plugin_settings_overlay", "_remote_overlay")
+
+    def _close_overlays(self, keep: str = "") -> None:
+        """Close every modal except the one named."""
+        for name in self._OVERLAY_ATTRS:
+            if name == keep:
+                continue
+            ov = getattr(self, name, None)
+            if ov is None:
+                continue
+            try:
+                ov.hide()
+                ov.deleteLater()
+            except Exception:
+                pass
+            setattr(self, name, None)
+
+    def _confirm_pending(self) -> bool:
+        """Is there a question waiting for an answer?"""
+        ov = getattr(self, "_confirm_overlay", None)
+        try:
+            return ov is not None and ov.isVisible()
+        except Exception:
+            return False
+
+    def _show_overlay(self, ov, name: str = "") -> bool:
+        """Show one modal, and only one.
+
+        `name` is the attribute the window keeps it under, and it is set
+        HERE and not by the caller: the closing of the others empties
+        every one of those attributes, so an overlay that was filed away
+        before the closing was filed away again.
+
+        Returns False when the modal was refused — which happens only when
+        a confirmation is waiting for an answer.
+        """
+        if self._confirm_pending():
+            try:
+                ov.hide()
+                ov.deleteLater()
+            except Exception:
+                pass
+            try:
+                self._log.append_log("SYS: Answer the question on screen first.")
+            except Exception:
+                pass
+            return False
+        self._close_overlays()
+        self._centre_overlay(ov)
+        if name:
+            setattr(self, name, ov)
+        return True
+
     # ── Audio devices ────────────────────────────────────────────────────────
 
     def _open_audio_devices(self):
         ov = AudioDeviceOverlay(parent=self.centralWidget())
         ov.picked.connect(self._on_audio_devices_applied)
-        self._centre_overlay(ov)
-        self._audio_overlay = ov            # keep a reference so it isn't GC'd
+        self._show_overlay(ov, "_audio_overlay")   # kept so it is not GC'd
 
     def _on_audio_devices_applied(self):
         self._log.append_log("SYS: Audio devices updated.")
@@ -3861,8 +4571,7 @@ class MainWindow(QMainWindow):
             self._log.append_log(f"SYS: Provider settings unavailable: {e}")
             return
         ov.changed.connect(self._on_providers_applied)
-        self._centre_overlay(ov)
-        self._providers_overlay = ov        # keep a reference so it isn't GC'd
+        self._show_overlay(ov, "_providers_overlay")   # kept so it is not GC'd
 
     def _on_providers_applied(self):
         """Rebuild the session so the new engine takes over.
@@ -3883,8 +4592,7 @@ class MainWindow(QMainWindow):
 
     def _open_memory_panel(self):
         ov = MemoryOverlay(parent=self.centralWidget())
-        self._centre_overlay(ov)
-        self._memory_overlay = ov
+        self._show_overlay(ov, "_memory_overlay")
 
     # ── Irreversible-action confirmation ─────────────────────────────────────
 
@@ -3892,6 +4600,9 @@ class MainWindow(QMainWindow):
         self._hide_confirm_banner()
         ov = ConfirmBanner(title, detail, parent=self.centralWidget())
         ov.answered.connect(self._on_confirm_answered)
+        # The confirmation is the one modal that does not close the others:
+        # it is the one that asks the question, so it IS the modal.
+        self._close_overlays()
         self._centre_overlay(ov)
         self._confirm_overlay = ov
 
@@ -3917,30 +4628,13 @@ class MainWindow(QMainWindow):
         plugins = self.get_plugins() if self.get_plugins else []
         cw = self.centralWidget()
         ov = PluginManagerOverlay(plugins, parent=cw)
-        ov.adjustSize()
-        ov.setGeometry(
-            (cw.width()  - ov.width())  // 2,
-            (cw.height() - ov.height()) // 2,
-            ov.width(), ov.height(),
-        )
-        ov.show()
-        ov.raise_()
-        self._plugin_manager_overlay = ov   # keep a reference so it isn't GC'd
+        self._show_overlay(ov, "_plugin_manager_overlay")
 
     def _open_plugin_settings(self):
         sections = self.get_plugin_settings() if self.get_plugin_settings else []
         cw = self.centralWidget()
         ov = PluginSettingsOverlay(sections, parent=cw)
-        ow = PluginSettingsOverlay._OW
-        oh = min(560, cw.height() - 16)
-        ov.setGeometry(
-            (cw.width()  - ow) // 2,
-            (cw.height() - oh) // 2,
-            ow, oh,
-        )
-        ov.show()
-        ov.raise_()
-        self._plugin_settings_overlay = ov   # keep a reference so it isn't GC'd
+        self._show_overlay(ov, "_plugin_settings_overlay")
 
     # ── Clipboard intelligence ───────────────────────────────────────────────────
 

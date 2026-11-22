@@ -837,6 +837,255 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "QCM",
         "zh": "问答",
     },
+    "panel.viewer": {
+        "en": "VIEWER",
+        "es": "VISOR",
+        "pt": "VISOR",
+        "fr": "MONITEUR",
+        "zh": "观察窗",
+    },
+    "panel.quick": {
+        "en": "QUICK ACCESS",
+        "es": "ACCESOS RÁPIDOS",
+        "pt": "ACESSOS RÁPIDOS",
+        "fr": "ACCÈS RAPIDES",
+        "zh": "快捷方式",
+    },
+
+    # -- the viewer ----------------------------------------------------------
+    "viewer.camera": {
+        "en": "CAMERA",
+        "es": "CÁMARA",
+        "pt": "CÂMERA",
+        "fr": "CAMÉRA",
+        "zh": "摄像头",
+    },
+    "viewer.camera_live": {
+        "en": "CAMERA · LIVE",
+        "es": "CÁMARA · EN VIVO",
+        "pt": "CÂMERA · AO VIVO",
+        "fr": "CAMÉRA · EN DIRECT",
+        "zh": "摄像头 · 实时",
+    },
+    "viewer.camera_wait": {
+        "en": "The camera is opening",
+        "es": "La cámara se está abriendo",
+        "pt": "A câmera está abrindo",
+        "fr": "La caméra s'ouvre",
+        "zh": "摄像头正在打开",
+    },
+    "viewer.screen": {
+        "en": "SCREEN",
+        "es": "PANTALLA",
+        "pt": "TELA",
+        "fr": "ÉCRAN",
+        "zh": "屏幕",
+    },
+    "viewer.screen_live": {
+        "en": "SCREEN · LIVE",
+        "es": "PANTALLA · EN VIVO",
+        "pt": "TELA · AO VIVO",
+        "fr": "ÉCRAN · EN DIRECT",
+        "zh": "屏幕 · 实时",
+    },
+    "viewer.screen_wait": {
+        "en": "The screen is being read",
+        "es": "Se está leyendo la pantalla",
+        "pt": "A tela está sendo lida",
+        "fr": "L'écran est en cours de lecture",
+        "zh": "正在读取屏幕",
+    },
+    "viewer.hands": {
+        "en": "THE HANDS",
+        "es": "LAS MANOS",
+        "pt": "AS MÃOS",
+        "fr": "LES MAINS",
+        "zh": "手部",
+    },
+    "viewer.tracker": {
+        "en": "Tracker",
+        "es": "Rastreador",
+        "pt": "Rastreador",
+        "fr": "Suivi",
+        "zh": "追踪器",
+    },
+    "viewer.pose": {
+        "en": "Pose",
+        "es": "Postura",
+        "pt": "Postura",
+        "fr": "Posture",
+        "zh": "手势",
+    },
+    "viewer.action": {
+        "en": "Action",
+        "es": "Acción",
+        "pt": "Ação",
+        "fr": "Geste",
+        "zh": "动作",
+    },
+    "viewer.hands_count": {
+        "en": "Hands",
+        "es": "Manos",
+        "pt": "Mãos",
+        "fr": "Mains",
+        "zh": "手",
+    },
+    "viewer.tab_view": {
+        "en": "THE VIEW",
+        "es": "LA VISTA",
+        "pt": "A VISTA",
+        "fr": "LA VUE",
+        "zh": "画面",
+    },
+    "viewer.tab_quiz": {
+        "en": "QUESTIONS",
+        "es": "PREGUNTAS",
+        "pt": "PERGUNTAS",
+        "fr": "CUESTIONARIO",
+        "zh": "问答",
+    },
+    "gesture.legend": {
+        "en": "PINCH click · PINCH held right click · PINCH+move drag · "
+              "TWO FINGERS scroll · TWO HANDS zoom · FIST group · "
+              "OPEN PALM swipe · POINT move",
+        "es": "PELLIZCO clic · PELLIZCO mantido clic derecho · "
+              "PELLIZCO+arrastre arrastrar · DOS DEDOS rueda · "
+              "DOS MANOS zoom · PUÑO grupo · PALMA ABIERTA deslizar · "
+              "DEDO mover",
+        "pt": "BELISCA clique · BELISCA mantido clique direito · "
+              "BELISCA+arrastar arrastar · DOIS DEDOS rolagem · "
+              "DUAS MÃOS zoom · PUNHO grupo · PALMA ABERTA deslizar · "
+              "DEDO mover",
+        "fr": "PINCE clic · PINCE tenu clic droit · PINCE+glisser "
+              "glisser · DEUX DOIGTS molette · DEUX MAINS zoom · "
+              "POING group · PAUME OUVERTE balayer · DOIGT déplacer",
+        "zh": "捏合 点击 · 长捏合 右键 · 捏合加移动 拖动 · "
+              "两指 滚轮 · 双手 缩放 · 握拳 多选 · "
+              "张开手掌 滑动 · 单指 移动",
+    },
+
+    # -- the groups of the controls drawer ------------------------------------
+    "group.voice": {
+        "en": "VOICE",
+        "es": "VOZ",
+        "pt": "VOZ",
+        "fr": "VOIX",
+        "zh": "语音",
+    },
+    "group.language": {
+        "en": "LANGUAGE",
+        "es": "IDIOMA",
+        "pt": "IDIOMA",
+        "fr": "LANGUE",
+        "zh": "语言",
+    },
+    "group.look": {
+        "en": "LOOK",
+        "es": "ASPECTO",
+        "pt": "APARÊNCIA",
+        "fr": "APPARENCE",
+        "zh": "外观",
+    },
+    "group.hand": {
+        "en": "HAND",
+        "es": "MANO",
+        "pt": "MÃO",
+        "fr": "MAIN",
+        "zh": "手",
+    },
+    "group.session": {
+        "en": "SESSION",
+        "es": "SESIÓN",
+        "pt": "SESSÃO",
+        "fr": "SÉANCE",
+        "zh": "会话",
+    },
+    "group.system": {
+        "en": "SYSTEM",
+        "es": "SISTEMA",
+        "pt": "SISTEMA",
+        "fr": "SYSTÈME",
+        "zh": "系统",
+    },
+    "group.tools": {
+        "en": "TOOLS",
+        "es": "HERRAMIENTAS",
+        "pt": "FERRAMENTAS",
+        "fr": "OUTILS",
+        "zh": "工具",
+    },
+
+    # -- the window ----------------------------------------------------------
+    "window.maximize": {
+        "en": "MAXIMIZE",
+        "es": "MAXIMIZAR",
+        "pt": "MAXIMIZAR",
+        "fr": "AGRANDIR",
+        "zh": "最大化",
+    },
+    "window.restore": {
+        "en": "WINDOW",
+        "es": "VENTANA",
+        "pt": "JANELA",
+        "fr": "FENÊTRE",
+        "zh": "窗口",
+    },
+    "window.minimize": {
+        "en": "MINIMIZE",
+        "es": "MINIMIZAR",
+        "pt": "MINIMIZAR",
+        "fr": "RÉDUIRE",
+        "zh": "最小化",
+    },
+    "window.window_modes": {
+        "en": "WINDOW",
+        "es": "VENTANA",
+        "pt": "JANELA",
+        "fr": "FENÊTRE",
+        "zh": "窗口",
+    },
+    "window.open_viewer": {
+        "en": "Open the viewer",
+        "es": "Abrir el visor",
+        "pt": "Abrir o visor",
+        "fr": "Ouvrir le moniteur",
+        "zh": "打开观察窗",
+    },
+    "window.open_viewer_tip": {
+        "en": "Camera on the left, the screen on the right, the hands below",
+        "es": "Cámara a la izquierda, la pantalla a la derecha, las manos abajo",
+        "pt": "Câmera à esquerda, a tela à direita, as mãos abaixo",
+        "fr": "Caméra à gauche, l'écran à droite, les mains en bas",
+        "zh": "左摄像头，右屏幕，下为手部",
+    },
+    "window.quick_access": {
+        "en": "QUICK ACCESS",
+        "es": "ACCESOS RÁPIDOS",
+        "pt": "ACESSOS RÁPIDOS",
+        "fr": "ACCÈS RAPIDES",
+        "zh": "快捷方式",
+    },
+    "tab.conversation": {
+        "en": "TALK",
+        "es": "CHARLA",
+        "pt": "CONVERSA",
+        "fr": "DISCUSSION",
+        "zh": "对话",
+    },
+    "tab.commands": {
+        "en": "SAY IT",
+        "es": "DILO",
+        "pt": "DIGA",
+        "fr": "DITES",
+        "zh": "说",
+    },
+    "tab.tasks": {
+        "en": "WORK",
+        "es": "TAREAS",
+        "pt": "TAREFAS",
+        "fr": "TÂCHES",
+        "zh": "任务",
+    },
 
     # -- small labels -------------------------------------------------------
     # "CPU" and "GPU" are not in here: they are hardware acronyms and read the

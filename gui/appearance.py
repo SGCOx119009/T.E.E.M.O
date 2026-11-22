@@ -52,6 +52,11 @@ CORE_MARGIN = 24
 _DASHBOARD_WIDGETS = (
     "_header", "_left_panel", "_right_panel", "_content_panel",
     "_quiz_panel", "_footer", "_cam_preview", "_clipboard_panel",
+    # The stack under the head: the notification, the viewer and the
+    # questionnaire are its pages, and the stack itself is what has to go
+    # in the corner mode. Hiding the pages one by one left the stack —
+    # and the hole where a page used to be — sitting in the corner.
+    "_lower_stack",
 )
 
 # The floating overlays — the setup one, the remote one, the customisation
