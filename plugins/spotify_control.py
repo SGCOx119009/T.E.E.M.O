@@ -386,6 +386,101 @@ def _resolve_exact_track(
     return None, candidates or [_track_summary(item) for item in tracks[:5]]
 
 
+def _title_variants(query: str, artist: str) -> list[tuple[str, str]]:
+    """The (title, artist) pairs to look for, in the order they are tried.
+
+    People say a song the way they say it: "Skillet Monster" is the artist
+    first and the title after, and the song in Spotify is called "Monster".
+    The pair as it was said is looked for first, and the other way round
+    only if the first one is not there — so a song that IS called "Skillet
+    Monster" is never confused with the one that is not.
+    """
+    exact = (query.strip(), artist.strip())
+    pairs = [exact]
+    if artist.strip():
+        return pairs
+    words = query.strip().split()
+    if len(words) >= 2:
+        # "Skillet Monster" is said artist first and title after, so the
+        # title is the LAST word and the artist is everything before it.
+        other = (words[-1], " ".join(words[:-1]))
+        if other != exact:
+            pairs.append(other)
+    return pairs
+
+
+def _candidates_in_grids(
+    grids: list[Any], wanted_title: str, wanted_artist: str
+) -> list[tuple[Any, dict]]:
+    """The rows of the result tables that are exactly the wanted song.
+
+    A row is a group whose name is the title of the song, and inside it
+    the kind ("Canción"), the artist as a link and the play control. The
+    same song can be in more than one table, so the results are gathered
+    by identity: the same title with the same artist is the same song.
+    """
+    wanted_title = _fold(wanted_title)
+    wanted_artist = _fold(wanted_artist)
+    candidates: list[tuple[Any, dict]] = []
+    for grid in grids:
+        for row in grid.descendants():
+            if (
+                str(row.element_info.control_type or "") != "Group"
+                or _fold(str(row.element_info.name or "")) != wanted_title
+            ):
+                continue
+            children = row.descendants()
+            labels = [
+                (
+                    str(child.element_info.control_type or ""),
+                    str(child.element_info.name or "").strip(),
+                )
+                for child in children
+            ]
+            if not any(
+                kind == "DataItem"
+                and _fold(name).startswith(("cancion", "song", "pista"))
+                for kind, name in labels
+            ):
+                continue
+            artists = list(dict.fromkeys(
+                name for kind, name in labels
+                if kind == "Hyperlink"
+                and _fold(name) != wanted_title
+            ))
+            if wanted_artist and wanted_artist not in {
+                _fold(name) for name in artists
+            }:
+                continue
+            buttons = [
+                child
+                for child in children
+                if str(child.element_info.control_type or "") == "Button"
+                and _is_track_play_button(
+                    str(child.element_info.name or ""), wanted_title
+                )
+            ]
+            if len(buttons) != 1:
+                continue
+            summary = {
+                "title": str(row.element_info.name or "")[:200],
+                "artist": ", ".join(artists)[:300],
+            }
+            identity = (
+                _fold(summary["title"]),
+                _fold(summary["artist"]),
+            )
+            if not any(
+                (
+                    _fold(existing["title"]),
+                    _fold(existing["artist"]),
+                ) == identity
+                for _, existing in candidates
+            ):
+                candidates.append((buttons[0], summary))
+    return candidates
+
+
 def _desktop_candidates(
     query: str, artist: str
 ) -> tuple[Any | None, list[tuple[Any, dict]], str | None]:
@@ -444,66 +539,27 @@ def _desktop_candidates(
                         in {"search results", "resultados de busqueda"}
                     )
                 ]
-                if len(grids) == 1:
-                    wanted_title = _fold(query)
-                    wanted_artist = _fold(artist)
+                if grids:
+                    # EVERY RESULT TABLE IS READ, NOT JUST THE FIRST ONE.
+                    #
+                    # The client of the Microsoft Store shows the search in
+                    # two tables with the same name: one with the best
+                    # matches and one with the whole list. The code used to
+                    # ask for ONE table and gave up when it found two — so
+                    # on that client the song never played, and the only
+                    # thing the user heard was the delay.
+                    #
+                    # The same song appears in both tables, and the results
+                    # are gathered by identity (title and artist), so the
+                    # song is still ONE song.
                     candidates: list[tuple[Any, dict]] = []
-                    for row in grids[0].descendants():
-                        if (
-                            str(row.element_info.control_type or "") != "Group"
-                            or _fold(str(row.element_info.name or ""))
-                            != wanted_title
-                        ):
-                            continue
-                        children = row.descendants()
-                        labels = [
-                            (
-                                str(child.element_info.control_type or ""),
-                                str(child.element_info.name or "").strip(),
-                            )
-                            for child in children
-                        ]
-                        if not any(
-                            kind == "DataItem"
-                            and _fold(name).startswith(("cancion", "song", "pista"))
-                            for kind, name in labels
-                        ):
-                            continue
-                        artists = list(dict.fromkeys(
-                            name for kind, name in labels
-                            if kind == "Hyperlink"
-                            and _fold(name) != wanted_title
-                        ))
-                        if wanted_artist and wanted_artist not in {
-                            _fold(name) for name in artists
-                        }:
-                            continue
-                        buttons = [
-                            child
-                            for child in children
-                            if str(child.element_info.control_type or "") == "Button"
-                            and _is_track_play_button(
-                                str(child.element_info.name or ""), wanted_title
-                            )
-                        ]
-                        if len(buttons) != 1:
-                            continue
-                        summary = {
-                            "title": str(row.element_info.name or "")[:200],
-                            "artist": ", ".join(artists)[:300],
-                        }
-                        identity = (
-                            _fold(summary["title"]),
-                            _fold(summary["artist"]),
+                    for wanted_title, wanted_artist in _title_variants(query, artist):
+                        found = _candidates_in_grids(
+                            grids, wanted_title, wanted_artist
                         )
-                        if not any(
-                            (
-                                _fold(existing["title"]),
-                                _fold(existing["artist"]),
-                            ) == identity
-                            for _, existing in candidates
-                        ):
-                            candidates.append((buttons[0], summary))
+                        if found:
+                            candidates = found
+                            break
                     if candidates:
                         return window, candidates, None
                     last_error = (
@@ -512,12 +568,24 @@ def _desktop_candidates(
                     )
                 else:
                     last_error = (
-                        "Spotify's search results are not exposed as one "
+                        "Spotify's search results are not exposed as an "
                         "accessible result list."
                     )
+        except (LookupError, RuntimeError) as exc:
+            # THE TREE CHANGED UNDER THE READER.
+            #
+            # The client reloads itself after a search, and the element that
+            # was there a moment ago is not there now: the element that is
+            # gone says so with a KeyError, and the one that is busy says
+            # so with a RuntimeError. Neither of them is a failure of the
+            # search — it is the search still going — so the loop looks
+            # again instead of giving the whole attempt up.
+            last_error = (
+                "Spotify Desktop UI Automation failed "
+                f"({type(exc).__name__})."
+            )
         except (
-            ImportError, AttributeError, RuntimeError, TypeError, OSError,
-            COMError,
+            ImportError, AttributeError, TypeError, OSError, COMError,
         ) as exc:
             return None, [], (
                 "Spotify Desktop UI Automation failed "
@@ -625,7 +693,7 @@ def _desktop_play(query: str, artist: str) -> str:
         effect_started = True
         button.invoke()
     except (
-        AttributeError, RuntimeError, TypeError, OSError, COMError
+        AttributeError, RuntimeError, TypeError, OSError, COMError, LookupError
     ) as exc:
         if not effect_started:
             return outcome.failed(
@@ -645,7 +713,13 @@ def _desktop_play(query: str, artist: str) -> str:
     deadline = time.monotonic() + _VERIFY_TIMEOUT
     while time.monotonic() < deadline:
         try:
-            if _desktop_is_playing(window, query, artist):
+            # THE TITLE OF THE SONG, NOT THE WORDS OF THE REQUEST.
+            # The user says "Skillet Monster"; the song is called
+            # "Monster" and the bar at the bottom says "Monster". The
+            # verification has to look for what is on the screen.
+            if _desktop_is_playing(
+                window, summary["title"], summary["artist"]
+            ):
                 return outcome.done(
                     "spotify_control",
                     action="play",

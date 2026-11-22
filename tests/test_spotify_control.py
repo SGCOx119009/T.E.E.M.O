@@ -89,6 +89,103 @@ class SpotifyControlTests(unittest.TestCase):
         self.assertIs(candidates[0][0], expected_button)
         self.assertEqual(candidates[0][1]["artist"], "Daft Punk")
 
+    def test_free_desktop_search_reads_every_result_table(self) -> None:
+        """The client of the Microsoft Store shows the search in TWO tables.
+
+        The code used to ask for one table and gave up when it found two,
+        so on that client the song never played: the user heard the delay
+        and nothing else. Both tables are read, and the same song in both
+        is still one song.
+        """
+        song = _UiaNode("Group", "Monster", [
+            _UiaNode("DataItem", "Canción • Skillet"),
+            _UiaNode("Hyperlink", "Monster"),
+            _UiaNode("Hyperlink", "Skillet"),
+            _UiaNode("Button", "Reproducir"),
+        ])
+        other = _UiaNode("Group", "Monster", [
+            _UiaNode("DataItem", "Sencillo • Skillet"),
+            _UiaNode("Hyperlink", "Monster"),
+            _UiaNode("Hyperlink", "Skillet"),
+            _UiaNode("Button", "Reproducir Monster"),
+        ])
+        window = _UiaNode("Pane", "Spotify Free", [
+            _UiaNode("DataGrid", "Search results", [song]),
+            _UiaNode("DataGrid", "Search results", [song, other]),
+        ])
+        window.process_id = lambda: 123
+        desktop = types.SimpleNamespace(windows=lambda **_kwargs: [window])
+        process = types.SimpleNamespace(pid=123, name="Spotify.exe")
+        with (
+            patch.object(spotify_control.os, "startfile"),
+            patch.object(spotify_control.appidentity, "running",
+                         return_value=[process]),
+            patch.dict(
+                sys.modules,
+                {"pywinauto": types.SimpleNamespace(
+                    Desktop=lambda **_kwargs: desktop
+                )},
+            ),
+        ):
+            actual_window, candidates, error = (
+                spotify_control._desktop_candidates("Monster", "Skillet")
+            )
+
+        self.assertIsNone(error)
+        self.assertIs(actual_window, window)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0][1]["title"], "Monster")
+        self.assertEqual(candidates[0][1]["artist"], "Skillet")
+
+    def test_a_song_named_artist_and_title_is_found(self) -> None:
+        """"Skillet Monster" is the artist first and the title after.
+
+        The song in Spotify is called "Monster", so the exact pair is not
+        there — and the code used to say so and play nothing.
+        """
+        song = _UiaNode("Group", "Monster", [
+            _UiaNode("DataItem", "Canción • Skillet"),
+            _UiaNode("Hyperlink", "Monster"),
+            _UiaNode("Hyperlink", "Skillet"),
+            _UiaNode("Button", "Reproducir Monster"),
+        ])
+        window = _UiaNode("Pane", "Spotify Free", [
+            _UiaNode("DataGrid", "Search results", [song]),
+        ])
+        window.process_id = lambda: 123
+        desktop = types.SimpleNamespace(windows=lambda **_kwargs: [window])
+        process = types.SimpleNamespace(pid=123, name="Spotify.exe")
+        with (
+            patch.object(spotify_control.os, "startfile"),
+            patch.object(spotify_control.appidentity, "running",
+                         return_value=[process]),
+            patch.dict(
+                sys.modules,
+                {"pywinauto": types.SimpleNamespace(
+                    Desktop=lambda **_kwargs: desktop
+                )},
+            ),
+        ):
+            actual_window, candidates, error = (
+                spotify_control._desktop_candidates("Skillet Monster", "")
+            )
+
+        self.assertIsNone(error)
+        self.assertIs(actual_window, window)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0][1]["title"], "Monster")
+        self.assertEqual(candidates[0][1]["artist"], "Skillet")
+
+    def test_the_title_variants_are_tried_in_order(self) -> None:
+        self.assertEqual(
+            spotify_control._title_variants("Monster", "Skillet"),
+            [("Monster", "Skillet")],
+        )
+        self.assertEqual(
+            spotify_control._title_variants("Skillet Monster", ""),
+            [("Skillet Monster", ""), ("Monster", "Skillet")],
+        )
+
     def test_free_desktop_search_waits_out_stale_results(self) -> None:
         stale = _UiaNode("Pane", "Spotify Free", [
             _UiaNode("DataGrid", "Search results", [

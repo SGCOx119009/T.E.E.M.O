@@ -306,9 +306,19 @@ def _spotify_desktop_play(query: str, artist: str) -> str:
 
 
 def _spotify_result_fields(result: str) -> dict:
+    """The fields of a result string, with or without quotes.
+
+    The values come in two shapes: a word without spaces is written bare
+    (track=Monster) and one with spaces is written between quotes
+    (track="Skillet Monster"). Both are read, because the two shapes come
+    from two different places and the field that matters is the title of
+    the song that is really playing.
+    """
     fields: dict[str, str] = {}
-    for key, value in re.findall(r'(\w+)="([^"]*)"', result or ""):
-        fields[key] = value
+    for key, quoted, bare in re.findall(
+        r'(\w+)=(?:"([^"]*)"|([^\s]+))', result or ""
+    ):
+        fields[key] = quoted if quoted else bare
     return fields
 
 
