@@ -23,7 +23,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QCursor, QDragEnterEvent, QDropEvent, QFont,
     QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap, QRadialGradient, QShortcut,
+    QPen, QPixmap, QRadialGradient, QShortcut, QTransform,
 )
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -573,6 +573,287 @@ class _CameraPreview(QWidget):
 # edge, and painting reads the palette at paint time, so every one of these
 # re-themes live with the accent picker at no cost.
 
+class CountdownBar(QWidget):
+    """A thin line that runs out: the time a notification has left.
+
+    IT IS NOT A TIMER BAR. There is no number and no button — the line
+    simply thins out as the seconds go by, and it is drawn in the accent
+    colour so that the panel that carries it says, without a word, that
+    it is a notification and not a page that will stay for ever.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(2)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._fraction = 0.0
+        self._paused = False
+
+    def set_fraction(self, value: float) -> None:
+        """How much of the life is left: 1.0 is new, 0.0 is over."""
+        self._fraction = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def set_paused(self, paused: bool) -> None:
+        """The clock stops while the pointer is on the notification."""
+        self._paused = bool(paused)
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        h = self.height()
+        p.fillRect(QRectF(0, 0, w, h), QColor(C.BORDER))
+        if self._fraction <= 0.0:
+            p.end()
+            return
+        # A paused notification is drawn at half brightness: the clock is
+        # stopped, and the user can see that it is.
+        colour = QColor(C.PRI if not self._paused else C.PRI_DIM)
+        p.fillRect(QRectF(0, 0, w * self._fraction, h), colour)
+        p.end()
+
+
+class SegmentedRail(QWidget):
+    """A row of pills, one of them lit: the switch between groups.
+
+    It exists because a list of forty switches is not a list anybody reads.
+    The rail says "there are six things here", and the lit pill says which
+    one is open. It is drawn rather than styled, so the lit edge follows
+    the accent colour when it changes.
+    """
+
+    changed = pyqtSignal(str)
+
+    def __init__(self, items=None, parent=None):
+        super().__init__(parent)
+        self._keys: list[str] = []
+        self._labels: list[str] = []
+        self._buttons: list[QPushButton] = []
+        self._current = ""
+        self.setFixedHeight(26)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        for key, label in (items or []):
+            self.add_group(key, label)
+
+    def add_group(self, key: str, label: str) -> None:
+        """Append one pill."""
+        btn = QPushButton(str(label))
+        btn.setCheckable(True)
+        btn.setFont(px_font(9, QFont.Weight.DemiBold, spacing=1.1))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setMinimumHeight(22)
+        btn.clicked.connect(lambda _=False, k=str(key): self.set_current(k, emit=True))
+        self._buttons.append(btn)
+        self._keys.append(str(key))
+        self._labels.append(str(label))
+        self.layout().addWidget(btn)
+        if not self._current:
+            self.set_current(str(key))
+
+    def set_current(self, key: str, emit: bool = False) -> None:
+        """Light one pill and put the others out."""
+        key = str(key)
+        if key not in self._keys:
+            return
+        self._current = key
+        for btn, k in zip(self._buttons, self._keys):
+            btn.setChecked(k == key)
+        if emit:
+            self.changed.emit(key)
+
+    @property
+    def current(self) -> str:
+        return self._current
+
+    def key_at(self, index: int) -> str:
+        return self._keys[index] if 0 <= index < len(self._keys) else ""
+
+
+class ObservationCanvas(QWidget):
+    """What the assistant is looking at, drawn.
+
+    This is the right half of the viewer: the screen as the machine sees
+    it. A picture arrives as bytes and is painted; when there is no
+    picture, the panel says so in words instead of showing a grey hole.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(120)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Expanding)
+        self._pix: QPixmap | None = None
+        self._placeholder = ""
+        self._caption = ""
+        self._badge = ""
+        self._live = False
+        self._mirrored = False
+
+    def set_mirrored(self, mirrored: bool) -> None:
+        """Mirror the picture — a camera is seen the way a mirror shows it."""
+        self._mirrored = bool(mirrored)
+        self.update()
+
+    def set_frame(self, data: bytes) -> bool:
+        """Paint a picture. Returns True when it was read.
+
+        IT RUNS ON THE MAIN THREAD, ALWAYS. A QPixmap is a thing of the
+        interface, and the interface belongs to the main thread: making
+        one in a worker thread is undefined behaviour, and undefined
+        behaviour in Windows is a process that dies without a word. So
+        the bytes arrive by a signal and the picture is made here.
+        """
+        if not data:
+            return False
+        pix = QPixmap()
+        if not pix.loadFromData(data):
+            return False
+        if self._mirrored:
+            # The camera is seen the way a mirror shows it. The transform
+            # is a QTransform and not a "scale" of the enum: there is no
+            # such thing, and asking for one raised an exception in a
+            # slot — which in Qt is not a message but a `qFatal`, and a
+            # `qFatal` is the whole program dying.
+            pix = pix.transformed(QTransform().scale(-1, 1))
+        self._pix = pix
+        self.update()
+        return True
+
+    def clear_frame(self) -> None:
+        self._pix = None
+        self.update()
+
+    def set_placeholder(self, text: str) -> None:
+        self._placeholder = str(text or "")
+        self.update()
+
+    def set_caption(self, text: str) -> None:
+        self._caption = str(text or "")
+        self.update()
+
+    def set_badge(self, text: str, live: bool = False) -> None:
+        self._badge = str(text or "")
+        self._live = bool(live)
+        self.update()
+
+    def is_live(self) -> bool:
+        """Whether a picture is coming."""
+        return self._live
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        W, H = self.width(), self.height()
+        p.fillRect(self.rect(), QColor(0, 4, 8, 190))
+        # A faint grid: the picture is a picture, but this is an instrument.
+        p.setPen(QPen(blend(C.PRI, 0.10), 1))
+        step = 26
+        x = 0
+        while x < W:
+            p.drawLine(QLineF(x, 0, x, H))
+            x += step
+        y = 0
+        while y < H:
+            p.drawLine(QLineF(0, y, W, y))
+            y += step
+        if self._pix is not None and not self._pix.isNull():
+            scaled = self._pix.scaled(
+                max(1, W - 12), max(1, H - 12),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            p.drawPixmap(int((W - scaled.width()) / 2),
+                         int((H - scaled.height()) / 2), scaled)
+        else:
+            p.setFont(px_font(11))
+            p.setPen(QPen(qcol(C.TEXT_DIM)))
+            p.drawText(QRectF(0, 0, W, H), Qt.AlignmentFlag.AlignCenter,
+                       self._placeholder)
+        # brackets
+        p.setPen(QPen(blend(C.PRI, 0.55), 1.2))
+        size = 12
+        p.drawLine(QLineF(4, 4 + size, 4, 4))
+        p.drawLine(QLineF(4, 4, 4 + size, 4))
+        p.drawLine(QLineF(W - 4, H - 4 - size, W - 4, H - 4))
+        p.drawLine(QLineF(W - 4 - size, H - 4, W - 4, H - 4))
+        if self._badge:
+            p.setFont(px_font(9, QFont.Weight.Bold, spacing=1.4))
+            colour = qcol(C.GREEN) if self._live else qcol(C.TEXT_DIM)
+            p.setPen(QPen(colour))
+            p.drawText(QRectF(W - 120, 8, 112, 16),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       self._badge)
+        if self._caption:
+            p.setFont(px_font(9.5))
+            p.setPen(QPen(qcol(C.TEXT_MED)))
+            p.drawText(QRectF(10, H - 20, W - 20, 16),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       self._caption)
+        p.end()
+
+
+class GestureReadout(QWidget):
+    """What the hands are doing, in words.
+
+    The visor exists so that a gesture can be CHECKED: this is the part
+    that says "left hand — two fingers — scrolling down", so the user can
+    see that the machine read the hand the way the user meant it.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(58)
+        self._rows: list[tuple[str, str, str]] = []
+        self._title = ""
+
+    def set_title(self, text: str) -> None:
+        self._title = str(text or "")
+        self.update()
+
+    def set_rows(self, rows) -> None:
+        """`rows` is a list of (label, value, colour) triples."""
+        rows = [(str(a), str(b), str(c)) for a, b, c in (rows or [])]
+        if rows != self._rows:
+            self._rows = rows
+            self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        if not p.isActive():
+            return
+        W, H = self.width(), self.height()
+        p.fillRect(self.rect(), QColor(0, 4, 8, 170))
+        p.setPen(QPen(blend(C.PRI, 0.30), 1))
+        p.drawLine(QLineF(0, 0.5, W, 0.5))
+        p.setFont(px_font(9, QFont.Weight.Bold, spacing=1.6))
+        p.setPen(QPen(qcol(C.PRI)))
+        p.drawText(QRectF(10, 4, W - 20, 16),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   self._title)
+        y = 24
+        for label, value, colour in self._rows:
+            p.setFont(px_font(9.5))
+            p.setPen(QPen(qcol(C.TEXT_DIM)))
+            p.drawText(QRectF(10, y, 96, 16),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       label)
+            p.setFont(px_font(10, QFont.Weight.DemiBold))
+            p.setPen(QPen(qcol(_pal(colour) or C.TEXT)))
+            p.drawText(QRectF(108, y, W - 118, 16),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                       value)
+            y += 18
+        p.end()
+
+
 class HoloPanel(QWidget):
     """A glass "screen": a translucent panel with two cut corners, lit edges and
     a header strip carrying a title and a short code. Children go in `body`;
@@ -930,6 +1211,30 @@ def paint_icon(p: QPainter, kind: str, r: QRectF, col: QColor) -> None:
             x0 = cx - s * 0.75 + i * s * 0.16
             x1 = cx + s * 0.75 - i * s * 0.10
             p.drawLine(QLineF(x0, y, x1, y))
+    elif kind == "eye":
+        # The face of the assistant, seen as the eye it is.
+        p.drawArc(QRectF(cx - s * 0.85, cy - s * 0.55, s * 1.7, s * 1.1),
+                  200 * 16, 140 * 16)
+        p.setBrush(QBrush(col))
+        p.drawEllipse(QPointF(cx, cy), s * 0.22, s * 0.22)
+        p.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+    elif kind == "grid":
+        # The viewer: two panes, side by side.
+        p.drawRect(QRectF(cx - s * 0.8, cy - s * 0.6, s * 0.72, s * 1.2))
+        p.drawRect(QRectF(cx + s * 0.08, cy - s * 0.6, s * 0.72, s * 1.2))
+    elif kind == "hand":
+        # A hand: the palm and four fingers.
+        p.drawRoundedRect(QRectF(cx - s * 0.45, cy - s * 0.1, s * 0.9, s * 0.95),
+                          s * 0.25, s * 0.25)
+        for i in range(4):
+            x = cx - s * 0.33 + i * s * 0.22
+            p.drawLine(QLineF(x, cy - s * 0.1, x, cy - s * 0.72))
+    elif kind == "max":
+        # A square that fills the screen.
+        p.drawRect(QRectF(cx - s * 0.7, cy - s * 0.7, s * 1.4, s * 1.4))
+    elif kind == "min":
+        # A line at the bottom of the screen.
+        p.drawLine(QLineF(cx - s * 0.7, cy + s * 0.55, cx + s * 0.7, cy + s * 0.55))
 
 
 class IconButton(QPushButton):
