@@ -125,6 +125,65 @@ DEFAULT_THRESHOLD = 0.5
 # Mic frames arrive at 16 kHz int16; this is just the detector's input rate.
 SAMPLE_RATE = 16000
 
+# ── The one import of openwakeword ───────────────────────────────────────────
+# THE BUG THIS LOCKS OUT
+#     openwakeword's own __init__.py imports model.py FIRST and defines
+#     `get_pretrained_model_paths` at the BOTTOM. model.py does `import
+#     openwakeword` at module level and later reads
+#     `openwakeword.get_pretrained_model_paths(...)`. So for as long as the
+#     package is half-imported, `openwakeword` is a partially initialized
+#     module and that attribute is not on it yet.
+#
+#     Python serialises imports per module, but NOT across threads: a second
+#     thread that asks for `openwakeword.model` while the first thread is
+#     still executing `__init__.py` is handed the half-built module out of
+#     sys.modules instead of waiting for it. The app starts the wake word
+#     from a background thread while the main thread touches the same
+#     package for the voice-activity model, and the result was this, on the
+#     first launch of the app and never again:
+#
+#         partially initialized module 'openwakeword' has no attribute
+#         'get_pretrained_model_paths' (most likely due to a circular import)
+#
+#     The second launch worked, because by then the module was cached
+#     complete. A wake word that only works from the second attempt is a
+#     wake word that does not work.
+#
+# THE FIX
+#     One lock, one import, the ROOT package first (importing the root
+#     completes __init__ before any submodule can be half-built), and a
+#     check that the attribute the caller needs actually exists. If it does
+#     not, the half-imported entries are dropped from sys.modules and the
+#     import is done again from scratch, which is the only way to recover
+#     from a thread that died mid-import.
+_IMPORT_LOCK = threading.Lock()
+
+
+def _load_openwakeword():
+    """Return the fully imported openwakeword package, or None.
+
+    Safe to call from any thread, any number of times. Never raises.
+    """
+    with _IMPORT_LOCK:
+        try:
+            import openwakeword
+        except Exception:
+            return None
+        if hasattr(openwakeword, "get_pretrained_model_paths"):
+            return openwakeword
+        # A half-imported module is sitting in sys.modules: drop every entry
+        # of the package and import it again, this time to completion.
+        for name in [n for n in list(sys.modules)
+                     if n == "openwakeword" or n.startswith("openwakeword.")]:
+            sys.modules.pop(name, None)
+        try:
+            import openwakeword
+        except Exception:
+            return None
+        if not hasattr(openwakeword, "get_pretrained_model_paths"):
+            return None
+        return openwakeword
+
 
 def _custom_model_path() -> str:
     """Path of a user-supplied model file, or "" when there is none."""
@@ -149,9 +208,11 @@ def _model_stem() -> str:
 
 def _models_dir() -> Path | None:
     """Where openwakeword keeps its models, or None if it is not installed."""
+    module = _load_openwakeword()
+    if module is None:
+        return None
     try:
-        import openwakeword
-        return Path(openwakeword.__file__).resolve().parent / "resources" / "models"
+        return Path(module.__file__).resolve().parent / "resources" / "models"
     except Exception:
         return None
 
@@ -225,11 +286,14 @@ def install_and_download(logger: Callable[[str], None] = print,
         logger("Wake word: downloading models…")
         _tell("Wake word: downloading models…")
         try:
-            import openwakeword.utils as _u
+            module = _load_openwakeword()
+            utils = getattr(module, "utils", None) if module else None
+            if utils is None:
+                return False, "openwakeword could not be imported"
             try:
-                _u.download_models([_UPSTREAM_WAKE_STEM])
+                utils.download_models([_UPSTREAM_WAKE_STEM])
             except TypeError:
-                _u.download_models()   # older signature downloads the default set
+                utils.download_models()   # older signature downloads the default set
         except Exception as e:
             return False, f"model download failed: {e}"
 
@@ -274,14 +338,23 @@ class WakeWordDetector:
         self._stem = _model_stem()
         custom = _custom_model_path()
         try:
-            from openwakeword.model import Model
+            module = _load_openwakeword()
+            if module is None:
+                raise RuntimeError(
+                    "openwakeword could not be imported completely "
+                    "(the package leaves a half-built module behind when two "
+                    "threads import it at once)"
+                )
+            model_class = getattr(module, "Model", None)
+            if model_class is None:
+                raise RuntimeError("openwakeword.Model is missing")
             if custom:
                 # A user-supplied model: hand the file to openwakeword as-is.
-                self._model = Model(wakeword_models=[custom],
-                                    inference_framework="onnx")
+                self._model = model_class(wakeword_models=[custom],
+                                          inference_framework="onnx")
             else:
-                self._model = Model(wakeword_models=[self._stem],
-                                    inference_framework="onnx")
+                self._model = model_class(wakeword_models=[self._stem],
+                                          inference_framework="onnx")
         except Exception as e:
             self._logger(f"Wake word: could not load model — {e}")
             self._notify("Wake word unavailable — use the WAKE NOW button.")
@@ -407,7 +480,7 @@ def wake_mode() -> str:
         mode = str(get_wake_mode() or "").strip().lower()
     except Exception:
         mode = ""
-    return mode if mode in (WAKE_MODE_PHRASE, WAKE_MODE_VOICE) else WAKE_MODE_PHRASE
+    return mode if mode in (WAKE_MODE_PHRASE, WAKE_MODE_VOICE) else WAKE_MODE_VOICE
 
 
 class VoiceActivityDetector:
@@ -453,9 +526,11 @@ class VoiceActivityDetector:
     @staticmethod
     def _model_path() -> Path | None:
         """The VAD model that ships inside openwakeword, or None."""
+        module = _load_openwakeword()
+        if module is None:
+            return None
         try:
-            import openwakeword
-            path = (Path(openwakeword.__file__).resolve().parent
+            path = (Path(module.__file__).resolve().parent
                     / "resources" / "models" / "silero_vad.onnx")
             return path if path.is_file() else None
         except Exception:

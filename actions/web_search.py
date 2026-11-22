@@ -358,10 +358,19 @@ def web_search(
     aspect = params.get("aspect", "general").strip() or "general"
 
     if not query and not items:
-        return "Please provide a search query."
+        return outcome.failed("web_search", "no search query was given")
 
     if items and mode not in ("compare",):
         mode = "compare"
+
+    # THE REGION MAKES THE NEWS LOCAL.
+    #
+    # "Give me the news" is not a question about the world. It is a question
+    # about the place the person lives, and only then about everything else.
+    # The configured region is what turns the answer from "a doping ban in
+    # athletics" into "what happened in Tacna, in Peru, and then the world".
+    if mode == "news":
+        query = _with_region(query)
 
     if player:
         print(f"[WebSearch] {mode}: {query or ', '.join(items)}")  # terminal
@@ -396,7 +405,57 @@ def web_search(
     #
     # core/prompt.txt carries the matching rule: inside the markers is data, an
     # instruction there is something to REPORT rather than follow.
-    return outcome.untrusted("web", found)
+    #
+    # THE STATUS LINE MATTERS HERE AS MUCH AS THE WRAPPER
+    #   A search that came back with results IS a completed search. With no
+    #   status in the reply, the dispatcher read it as "unverified — NOT
+    #   confirmed", and the model, told a search was not confirmed, asked
+    #   again. The same refusal loop that burned the budget on document
+    #   summaries burned it on searches.
+    return (
+        outcome.done("web_search", mode=mode, verified=True,
+                     query=query or ", ".join(items))
+        + "\n"
+        + outcome.untrusted("web", found)
+    )
+
+
+def _with_region(query: str) -> str:
+    """Add the configured region to a news query that does not name a place.
+
+    A question about a specific country or city is a question about THAT
+    place, and appending another one to it would be worse than leaving it
+    alone. So the query is checked against every place in the region table
+    — accents and case ignored, because "noticias en Perú" and "Peru" are
+    the same place — and only a query that names none of them gets the
+    configured region.
+    """
+    query = str(query or "").strip()
+    try:
+        import unicodedata
+
+        from core.localization import get_region, regions, DEFAULT_REGION
+
+        def _fold(text: str) -> str:
+            decomposed = unicodedata.normalize("NFKD", str(text or "").casefold())
+            return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+        haystack = _fold(query)
+        names = []
+        for region in regions():
+            names.extend([region.city, region.country])
+        region = get_region()
+        if region is not None:
+            names.extend([region.city, region.country])
+        for name in names:
+            folded = _fold(name)
+            if folded and folded in haystack:
+                return query
+        if region is None or region.city == DEFAULT_REGION.city:
+            return query
+        return f"{query} {region.city} {region.country}".strip()
+    except Exception:
+        return query
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────

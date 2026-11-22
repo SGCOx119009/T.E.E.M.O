@@ -35,12 +35,34 @@ def test_the_default_phrase_is_ours():
     assert wake_word.DEFAULT_WAKE_PHRASE == "Hey T.E.E.M.O"
 
 
-def test_the_bundled_model_hears_the_upstream_phrase():
+def test_the_bundled_model_hears_the_upstream_phrase(monkeypatch):
     """Sin un modelo propio, lo que el microfono oye NO es la frase del
     producto. Las dos cosas son verdad a la vez, y por eso el producto
-    tiene que decir la segunda."""
+    tiene que decir la segunda.
+
+    El modo por defecto ahora es "cualquier voz", donde no hay frase que
+    decir; esta prueba fija el otro modo, el de frase, que sigue disponible
+    para quien tenga un modelo entrenado para ella."""
+    monkeypatch.setattr(wake_word, "_custom_model_path", lambda: "")
+    monkeypatch.setattr(
+        "memory.config_manager.get_wake_mode", lambda: "phrase", raising=False)
     assert wake_word.effective_wake_phrase() == wake_word._UPSTREAM_WAKE_PHRASE
     assert wake_word.effective_wake_phrase() != wake_word.DEFAULT_WAKE_PHRASE
+
+
+def test_the_default_listening_mode_is_any_voice():
+    """Despertar con cualquier voz es el modo por defecto, y el motivo es
+    concreto: el modelo preentrenado no oye el nombre de este producto, y
+    repetirlo no ayuda a nadie. Repetir el nombre era exactamente lo que el
+    usuario hacia cuando el asistente no se levantaba."""
+    from memory import config_manager
+    original = config_manager.get_wake_mode
+    try:
+        config_manager.get_wake_mode = lambda: "voice"
+        assert wake_word.wake_mode() == wake_word.WAKE_MODE_VOICE
+        assert wake_word.effective_wake_phrase() == ""
+    finally:
+        config_manager.get_wake_mode = original
 
 
 def test_the_upstream_phrase_is_never_written_out_in_full():
@@ -113,9 +135,18 @@ def test_the_interface_shows_what_the_microphone_hears():
 
 
 def test_the_interface_offers_the_voice_mode():
+    """The two ways of listening are in the interface, and the interface
+    speaks the language that is configured.
+
+    The WORDS live in the catalogue now — that is what makes the interface
+    bilingual — and what matters here is that the VALUES behind them are
+    still "phrase" and "voice", because those are what get stored."""
     source = (BASE / "gui" / "window.py").read_text(encoding="utf-8")
     assert "_wake_mode_combo" in source
-    assert "Wake on any voice" in source
+    from core import localization
+    assert localization.t("wake.mode_phrase", "en")
+    assert localization.t("wake.mode_voice", "en")
+    assert localization.t("wake.mode_voice", "es") != localization.t("wake.mode_voice", "en")
 
 
 def test_the_session_tells_the_truth_when_it_says_it_is_asleep():

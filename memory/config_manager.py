@@ -555,12 +555,18 @@ def save_wake_model(path: str) -> None:
 def get_wake_mode() -> str:
     """How the assistant listens for the person: a phrase, or any speech.
 
-    "phrase" is the default and listens for the configured wake phrase.
-    "voice" listens for ANY speech, which is what a person who says a
-    phrase the shipped model was never trained on needs.
+    "voice" is the default. The phrase model that ships inside openwakeword
+    was trained for a phrase this product no longer uses, so a person who
+    says the product's own name into the microphone hears nothing happen —
+    and repeating it does not help, because the model cannot hear a phrase
+    it was never trained on. Voice mode has no such blind spot: any speech
+    wakes the assistant, which is what the owner of this machine asked for.
+
+    "phrase" listens for the configured wake phrase and needs a model
+    trained for it.
     """
     value = str(load_api_keys().get("wake_mode") or "").strip().lower()
-    return value if value in ("phrase", "voice") else "phrase"
+    return value if value in ("phrase", "voice") else "voice"
 
 
 @_locked
@@ -568,7 +574,7 @@ def save_wake_mode(mode: str) -> None:
     """Persist how the assistant listens. An unknown value restores the default."""
     ensure_config_dir()
     value = str(mode or "").strip().lower()
-    _save_flag("wake_mode", value if value in ("phrase", "voice") else "phrase")
+    _save_flag("wake_mode", value if value in ("phrase", "voice") else "voice")
 
 
 def get_push_to_talk_enabled() -> bool:
@@ -1377,3 +1383,45 @@ def save_providers(mode: str = None, pipeline: dict = None, creds: dict = None,
         block_updates["coding"] = str(coding or "").strip()
 
     _save_provider_configs(creds or {}, block_updates)
+
+
+# ── Language and region ─────────────────────────────────────────────────────
+# The product speaks five languages and lives in one place. Both settings
+# live at the top level of api_keys.json, next to everything else, and both
+# go through the same locked read-modify-write as every other setter here.
+#
+# The language is a code ("en", "es", "pt", "fr", "zh"); which codes are
+# real is decided by core/localization.py, which is the only place that
+# knows the catalog. Here it is just a stored string.
+DEFAULT_LANGUAGE_CODE = "en"
+
+
+def get_language() -> str:
+    """The stored language code, or the default when it is unset."""
+    value = str(load_api_keys().get("language") or "").strip().lower()
+    return value or DEFAULT_LANGUAGE_CODE
+
+
+def save_language(code: str) -> None:
+    """Persist the language code."""
+    _patch_config(language=str(code or "").strip().lower())
+
+
+def get_region() -> dict:
+    """The stored region as {"city": ..., "country": ...}, or {} when unset."""
+    region = load_api_keys().get("region")
+    if not isinstance(region, dict):
+        return {}
+    city = str(region.get("city") or "").strip()
+    country = str(region.get("country") or "").strip()
+    if not city and not country:
+        return {}
+    return {"city": city, "country": country}
+
+
+def save_region(city: str, country: str) -> None:
+    """Persist the region."""
+    _patch_config(region={
+        "city": str(city or "").strip(),
+        "country": str(country or "").strip(),
+    })

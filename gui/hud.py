@@ -40,10 +40,30 @@ from gui.theme import (
 
 from gui.style import blend, chamfer, px_font, with_alpha
 
+from core.localization import t as _t
+
 try:
     from gui.reactor import Reactor3D
 except Exception:      # pragma: no cover — the classic core still draws
     Reactor3D = None
+
+
+# The state token is internal; the word on screen is the translated one. A
+# state this table does not know about is shown exactly as it came.
+_STATE_TEXT = {
+    "MUTED": "hud.state.muted",
+    "SPEAKING": "hud.state.speaking",
+    "THINKING": "hud.state.thinking",
+    "PROCESSING": "hud.state.processing",
+    "LISTENING": "hud.state.listening",
+    "IDLE": "hud.state.idle",
+    "INITIALISING": "hud.state.initialising",
+}
+
+
+def _state_text(token: str) -> str:
+    key = _STATE_TEXT.get(str(token or "").upper())
+    return _t(key) if key else str(token or "")
 
 
 class HudCanvas(QWidget):
@@ -283,7 +303,8 @@ class HudCanvas(QWidget):
             p.drawLine(QLineF(x0, y0 + sy * cut, x0 + sx * cut, y0))
         p.setFont(px_font(10, QFont.Weight.DemiBold, spacing=2.2))
         p.setPen(QPen(blend(C.PRI, 0.55)))
-        p.drawText(QRectF(m + 24, m + 8, 260, 16), Qt.AlignmentFlag.AlignVCenter, "VOICE INTERFACE")
+        p.drawText(QRectF(m + 24, m + 8, 260, 16), Qt.AlignmentFlag.AlignVCenter,
+                   _t("hud.voice_interface"))
         p.end()
         return pm
 
@@ -594,8 +615,9 @@ class HudCanvas(QWidget):
         W, H = self.width(), self.height()
 
         # The backdrop is one cached pixmap, rebuilt only when the size or the
-        # theme changes — so live re-theming still repaints it.
-        key = (W, H, C.PRI, C.BG, C.WHITE)
+        # theme changes — so live re-theming still repaints it. The language is
+        # part of the key for the same reason: the caption on it is a word.
+        key = (W, H, C.PRI, C.BG, C.WHITE, _t("hud.voice_interface"))
         if self._grid_cache is None or self._grid_key != key:
             self._grid_cache = self._make_grid(W, H)
             self._grid_key = key
@@ -636,15 +658,15 @@ class HudCanvas(QWidget):
 
         # state line: spaced capitals between two fading rules that pulse
         if self.muted:
-            txt, col = "MUTED", qcol(C.MUTED_C)
+            txt, col = _state_text("MUTED"), qcol(C.MUTED_C)
         elif self.speaking:
-            txt, col = "SPEAKING", qcol(C.ACC)
+            txt, col = _state_text("SPEAKING"), qcol(C.ACC)
         elif self.state in ("THINKING", "PROCESSING"):
-            txt, col = self.state, qcol(C.ACC2)
+            txt, col = _state_text(self.state), qcol(C.ACC2)
         elif self.state == "LISTENING":
-            txt, col = "LISTENING", qcol(C.GREEN)
+            txt, col = _state_text("LISTENING"), qcol(C.GREEN)
         else:
-            txt, col = str(self.state), qcol(C.PRI)
+            txt, col = _state_text(self.state), qcol(C.PRI)
         p.setFont(px_font(13, QFont.Weight.DemiBold, spacing=5))
         tw = p.fontMetrics().horizontalAdvance(txt)
         p.setPen(QPen(col))

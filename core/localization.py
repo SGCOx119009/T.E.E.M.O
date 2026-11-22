@@ -1,0 +1,2719 @@
+"""
+core/localization.py - the language of the product, and the place it lives.
+
+THE PROBLEM THIS EXISTS FOR
+    A voice assistant that only speaks English is an assistant that only
+    works for the people who speak English. The person who asks for the
+    weather in Tacna wants the answer in Spanish, the person in Paris wants
+    it in French, and the person in Shanghai wants it in Chinese. The
+    interface has to follow too: a button that says "Retry" to a person who
+    cannot read it is not a button, it is a decoration.
+
+WHAT THIS MODULE IS
+    One catalog of strings in five languages, one stored language, and one
+    stored region (city + country). The interface asks for a string by key;
+    the model is told, in English, which language to answer in and which
+    place the user is in.
+
+WHY THE TRANSLATIONS ARE WRITTEN BY HAND
+    A machine translation of "The task did not happen" is usually fine and
+    sometimes subtly wrong, and "subtly wrong" is the expensive kind: the
+    sentence is grammatical, it is understood, and it says something else.
+    These strings are short, they are seen every day, and they were written
+    one at a time by somebody who speaks the language.
+
+TWO RULES THAT MUST NOT BE BROKEN
+    * No placeholder may exist in one language and be missing in another.
+      A "{city}" that survives in English and vanishes in French produces an
+      empty sentence, and no test would notice unless one asks for exactly
+      that.
+    * `t()` and `translate()` NEVER raise. A missing translation has to
+      degrade to English, and a missing key has to degrade to the key
+      itself. The window that asks for a string must never die asking for
+      it.
+
+THE REGION
+    The region is not decoration either. "What is the weather like?" has no
+    answer without a place, and "give me the news" means something
+    different in Tacna than in Santiago. So the region is a city, a country
+    and, when we know it, the coordinates that go with it. A city that is
+    not in the table is still accepted: a person is allowed to live
+    somewhere the product has never heard of.
+"""
+from __future__ import annotations
+
+import unicodedata
+from dataclasses import dataclass
+
+from memory import config_manager
+
+# ── Languages ────────────────────────────────────────────────────────────────
+
+DEFAULT_LANGUAGE = "en"
+
+
+@dataclass(frozen=True)
+class Language:
+    """One language the product speaks.
+
+    `name_en` is for the settings panel of an English installation;
+    `name_native` is what a person calls the language in the language
+    itself, because "Portuguese" is not how a Portuguese speaker asks for
+    Portuguese.
+    """
+
+    code: str
+    name_en: str
+    name_native: str
+
+
+LANGUAGES: tuple[Language, ...] = (
+    Language(code="en", name_en="English", name_native="English"),
+    Language(code="es", name_en="Spanish", name_native="Español"),
+    Language(code="pt", name_en="Portuguese", name_native="Português"),
+    Language(code="fr", name_en="French", name_native="Français"),
+    Language(code="zh", name_en="Chinese", name_native="简体中文"),
+)
+
+_LANGUAGE_CODES = frozenset(lang.code for lang in LANGUAGES)
+
+
+def language_codes() -> list[str]:
+    """The codes of every language the product ships, in order."""
+    return [lang.code for lang in LANGUAGES]
+
+
+def _language_object(code: str) -> Language:
+    """The Language of that code, or the default one."""
+    wanted = str(code or "").strip().lower()
+    for lang in LANGUAGES:
+        if lang.code == wanted:
+            return lang
+    return LANGUAGES[0]
+
+
+def _normalize_lang(code: str | None) -> str | None:
+    """A code we recognise, or None."""
+    wanted = str(code or "").strip().lower()
+    return wanted if wanted in _LANGUAGE_CODES else None
+
+
+# ── The catalog ──────────────────────────────────────────────────────────────
+# Every key has all five languages. The English value is the reference: the
+# other four say the same thing in the other language, with the same
+# placeholder names.
+
+CATALOG: dict[str, dict[str, str]] = {
+    # -- system / runtime
+    "app.name": {
+        "en": "T.E.E.M.O.",
+        "es": "T.E.E.M.O.",
+        "pt": "T.E.E.M.O.",
+        "fr": "T.E.E.M.O.",
+        "zh": "T.E.E.M.O.",
+    },
+    "app.tagline": {
+        "en": "A voice assistant that lives on your desktop.",
+        "es": "Un asistente de voz que vive en tu escritorio.",
+        "pt": "Um assistente de voz que vive na sua área de trabalho.",
+        "fr": "Un assistant vocal qui vit sur votre bureau.",
+        "zh": "常驻桌面的语音助手。",
+    },
+    "app.ready": {
+        "en": "Ready.",
+        "es": "Listo.",
+        "pt": "Pronto.",
+        "fr": "Prêt.",
+        "zh": "已就绪。",
+    },
+    "app.listening": {
+        "en": "Listening.",
+        "es": "Escuchando.",
+        "pt": "Ouvindo.",
+        "fr": "À l'écoute.",
+        "zh": "正在聆听。",
+    },
+    "app.stopped": {
+        "en": "Stopped.",
+        "es": "Detenido.",
+        "pt": "Parado.",
+        "fr": "Arrêté.",
+        "zh": "已停止。",
+    },
+    "app.error": {
+        "en": "Something went wrong.",
+        "es": "Algo salió mal.",
+        "pt": "Algo deu errado.",
+        "fr": "Une erreur est survenue.",
+        "zh": "出现问题。",
+    },
+    "app.ready_short": {
+        "en": "Ready",
+        "es": "Listo",
+        "pt": "Pronto",
+        "fr": "Prêt",
+        "zh": "就绪",
+    },
+    "app.version": {
+        "en": "App version {version}",
+        "es": "Versión de la aplicación {version}",
+        "pt": "Versão do aplicativo {version}",
+        "fr": "Version de l'application {version}",
+        "zh": "应用版本 {version}",
+    },
+
+    # -- settings panel
+    "settings.title": {
+        "en": "Settings",
+        "es": "Ajustes",
+        "pt": "Configurações",
+        "fr": "Paramètres",
+        "zh": "设置",
+    },
+    "settings.language": {
+        "en": "Language",
+        "es": "Idioma",
+        "pt": "Idioma",
+        "fr": "Langue",
+        "zh": "语言",
+    },
+    "settings.language_help": {
+        "en": "The language used in the interface and in every answer.",
+        "es": "El idioma de la interfaz y de todas las respuestas.",
+        "pt": "O idioma da interface e de todas as respostas.",
+        "fr": "La langue de l'interface et de toutes les réponses.",
+        "zh": "界面和所有回答使用的语言。",
+    },
+    "settings.language_value": {
+        "en": "Selected language: {language}",
+        "es": "Idioma seleccionado: {language}",
+        "pt": "Idioma selecionado: {language}",
+        "fr": "Langue sélectionnée : {language}",
+        "zh": "已选语言：{language}",
+    },
+    "settings.region": {
+        "en": "Region",
+        "es": "Región",
+        "pt": "Região",
+        "fr": "Région",
+        "zh": "地区",
+    },
+    "settings.region_city": {
+        "en": "City",
+        "es": "Ciudad",
+        "pt": "Cidade",
+        "fr": "Ville",
+        "zh": "城市",
+    },
+    "settings.region_country": {
+        "en": "Country",
+        "es": "País",
+        "pt": "País",
+        "fr": "Pays",
+        "zh": "国家",
+    },
+    "settings.region_help": {
+        "en": "Used for local weather and regional news.",
+        "es": "Se usa para el clima local y las noticias regionales.",
+        "pt": "Usado para o clima local e as notícias regionais.",
+        "fr": "Utilisé pour la météo locale et les nouvelles régionales.",
+        "zh": "用于本地天气和地区新闻。",
+    },
+    "settings.save": {
+        "en": "Save",
+        "es": "Guardar",
+        "pt": "Salvar",
+        "fr": "Enregistrer",
+        "zh": "保存",
+    },
+    "settings.saved": {
+        "en": "Saved.",
+        "es": "Guardado.",
+        "pt": "Salvo.",
+        "fr": "Enregistré.",
+        "zh": "已保存。",
+    },
+    "settings.cancel": {
+        "en": "Cancel",
+        "es": "Cancelar",
+        "pt": "Cancelar",
+        "fr": "Annuler",
+        "zh": "取消",
+    },
+    "settings.wake_phrase": {
+        "en": "Wake phrase",
+        "es": "Frase de activación",
+        "pt": "Frase de ativação",
+        "fr": "Phrase d'activation",
+        "zh": "唤醒短语",
+    },
+    "settings.wake_mode": {
+        "en": "Wake mode",
+        "es": "Modo de activación",
+        "pt": "Modo de ativação",
+        "fr": "Mode d'activation",
+        "zh": "唤醒方式",
+    },
+    "settings.voice": {
+        "en": "Voice",
+        "es": "Voz",
+        "pt": "Voz",
+        "fr": "Voix",
+        "zh": "声音",
+    },
+    "settings.scale": {
+        "en": "Interface scale",
+        "es": "Escala de la interfaz",
+        "pt": "Escala da interface",
+        "fr": "Échelle de l'interface",
+        "zh": "界面缩放",
+    },
+    "settings.providers": {
+        "en": "Providers",
+        "es": "Proveedores",
+        "pt": "Provedores",
+        "fr": "Fournisseurs",
+        "zh": "服务商",
+    },
+
+    # -- common actions
+    "action.ok": {
+        "en": "Ok",
+        "es": "Ok",
+        "pt": "Ok",
+        "fr": "Ok",
+        "zh": "确定",
+    },
+    "action.cancel": {
+        "en": "Cancel",
+        "es": "Cancelar",
+        "pt": "Cancelar",
+        "fr": "Annuler",
+        "zh": "取消",
+    },
+    "action.close": {
+        "en": "Close",
+        "es": "Cerrar",
+        "pt": "Fechar",
+        "fr": "Fermer",
+        "zh": "关闭",
+    },
+    "action.save": {
+        "en": "Save",
+        "es": "Guardar",
+        "pt": "Salvar",
+        "fr": "Enregistrer",
+        "zh": "保存",
+    },
+    "action.retry": {
+        "en": "Retry",
+        "es": "Reintentar",
+        "pt": "Tentar de novo",
+        "fr": "Réessayer",
+        "zh": "重试",
+    },
+    "action.copy": {
+        "en": "Copy",
+        "es": "Copiar",
+        "pt": "Copiar",
+        "fr": "Copier",
+        "zh": "复制",
+    },
+    "action.paste": {
+        "en": "Paste",
+        "es": "Pegar",
+        "pt": "Colar",
+        "fr": "Coller",
+        "zh": "粘贴",
+    },
+    "action.open": {
+        "en": "Open",
+        "es": "Abrir",
+        "pt": "Abrir",
+        "fr": "Ouvrir",
+        "zh": "打开",
+    },
+    "action.refresh": {
+        "en": "Refresh",
+        "es": "Actualizar",
+        "pt": "Atualizar",
+        "fr": "Actualiser",
+        "zh": "刷新",
+    },
+    "action.send": {
+        "en": "Send",
+        "es": "Enviar",
+        "pt": "Enviar",
+        "fr": "Envoyer",
+        "zh": "发送",
+    },
+    "action.delete": {
+        "en": "Delete",
+        "es": "Eliminar",
+        "pt": "Excluir",
+        "fr": "Supprimer",
+        "zh": "删除",
+    },
+    "action.confirm": {
+        "en": "Confirm",
+        "es": "Confirmar",
+        "pt": "Confirmar",
+        "fr": "Confirmer",
+        "zh": "确认",
+    },
+    "action.back": {
+        "en": "Back",
+        "es": "Atrás",
+        "pt": "Voltar",
+        "fr": "Retour",
+        "zh": "返回",
+    },
+    "action.next": {
+        "en": "Next",
+        "es": "Siguiente",
+        "pt": "Próximo",
+        "fr": "Suivant",
+        "zh": "下一步",
+    },
+
+    # -- hud / chat
+    "hud.thinking": {
+        "en": "Thinking",
+        "es": "Pensando",
+        "pt": "Pensando",
+        "fr": "Réflexion",
+        "zh": "思考中",
+    },
+    "hud.listening": {
+        "en": "Listening",
+        "es": "Escuchando",
+        "pt": "Ouvindo",
+        "fr": "À l'écoute",
+        "zh": "正在聆听",
+    },
+    "hud.speaking": {
+        "en": "Speaking",
+        "es": "Hablando",
+        "pt": "Falando",
+        "fr": "En train de parler",
+        "zh": "正在说话",
+    },
+    "hud.idle": {
+        "en": "Idle",
+        "es": "Inactivo",
+        "pt": "Ocioso",
+        "fr": "Inactif",
+        "zh": "空闲",
+    },
+    "hud.processing": {
+        "en": "Processing",
+        "es": "Procesando",
+        "pt": "Processando",
+        "fr": "Traitement en cours",
+        "zh": "处理中",
+    },
+    "hud.error": {
+        "en": "Error",
+        "es": "Fallo",
+        "pt": "Erro",
+        "fr": "Erreur",
+        "zh": "错误",
+    },
+    "chat.you": {
+        "en": "You",
+        "es": "Tú",
+        "pt": "Você",
+        "fr": "Vous",
+        "zh": "你",
+    },
+    "chat.assistant": {
+        "en": "Assistant",
+        "es": "Asistente",
+        "pt": "Assistente",
+        "fr": "Aide",
+        "zh": "助手",
+    },
+    "chat.empty": {
+        "en": "No messages yet.",
+        "es": "Todavía no hay mensajes.",
+        "pt": "Ainda não há mensagens.",
+        "fr": "Aucun message pour l'instant.",
+        "zh": "还没有消息。",
+    },
+    "chat.placeholder": {
+        "en": "Write a message",
+        "es": "Escribe un mensaje",
+        "pt": "Escreva uma mensagem",
+        "fr": "Écrivez un message",
+        "zh": "输入消息",
+    },
+    "chat.copy": {
+        "en": "Copy",
+        "es": "Copiar",
+        "pt": "Copiar",
+        "fr": "Copier",
+        "zh": "复制",
+    },
+    "chat.copied": {
+        "en": "Copied.",
+        "es": "Copiado.",
+        "pt": "Copiado.",
+        "fr": "Copié.",
+        "zh": "已复制。",
+    },
+
+    # -- tools and their outcomes (core/outcome.py statuses)
+    "tool.done": {
+        "en": "Done",
+        "es": "Hecho",
+        "pt": "Feito",
+        "fr": "Terminé",
+        "zh": "完成",
+    },
+    "tool.unverified": {
+        "en": "Unverified",
+        "es": "Sin verificar",
+        "pt": "Não verificado",
+        "fr": "Non vérifié",
+        "zh": "未确认",
+    },
+    "tool.failed": {
+        "en": "Failed",
+        "es": "Falló",
+        "pt": "Falhou",
+        "fr": "Échec",
+        "zh": "失败",
+    },
+    "tool.ask": {
+        "en": "Needs an answer",
+        "es": "Necesita una respuesta",
+        "pt": "Precisa de uma resposta",
+        "fr": "Nécessite une réponse",
+        "zh": "需要回答",
+    },
+    "tool.started": {
+        "en": "Started",
+        "es": "Iniciado",
+        "pt": "Iniciado",
+        "fr": "Démarré",
+        "zh": "已开始",
+    },
+    "tool.done_help": {
+        "en": "The task was done and the result was checked.",
+        "es": "La tarea se hizo y el resultado se comprobó.",
+        "pt": "A tarefa foi feita e o resultado foi conferido.",
+        "fr": "La tâche a été faite et le résultat a été vérifié.",
+        "zh": "任务已完成并已核对结果。",
+    },
+    "tool.unverified_help": {
+        "en": "The request was sent but the result could not be confirmed.",
+        "es": "La solicitud se envió pero no se pudo confirmar el resultado.",
+        "pt": "A solicitação foi enviada, mas o resultado não pôde ser confirmado.",
+        "fr": "La demande a été envoyée, mais le résultat n'a pas pu être confirmé.",
+        "zh": "请求已发出，但无法确认结果。",
+    },
+    "tool.failed_help": {
+        "en": "The task did not happen. Tell the user the reason.",
+        "es": "La tarea no ocurrió. Dile al usuario el motivo.",
+        "pt": "A tarefa não aconteceu. Diga ao usuário o motivo.",
+        "fr": "La tâche n'a pas eu lieu. Indiquez la raison à l'utilisateur.",
+        "zh": "任务没有完成，请告知用户原因。",
+    },
+    "tool.ask_help": {
+        "en": "Nothing was done yet. Ask the user and wait for the answer.",
+        "es": "Todavía no se hizo nada. Pregunta al usuario y espera la respuesta.",
+        "pt": "Nada foi feito ainda. Pergunte ao usuário e espere a resposta.",
+        "fr": "Rien n'a encore été fait. Interrogez l'utilisateur et attendez sa réponse.",
+        "zh": "尚未执行任何操作，请询问用户并等待答复。",
+    },
+    "tool.started_help": {
+        "en": "The task is under way. Say that it is running, not that it is done.",
+        "es": "La tarea está en curso. Di que está en marcha, no que está terminada.",
+        "pt": "A tarefa está em andamento. Diga que está em curso, não que está concluída.",
+        "fr": "La tâche est en cours. Dites qu'elle est lancée, pas qu'elle est terminée.",
+        "zh": "任务正在进行，请说明正在执行，而不是已经完成。",
+    },
+    "tool.done_detail": {
+        "en": "{action} finished.",
+        "es": "{action} terminado.",
+        "pt": "{action} concluída.",
+        "fr": "{action} terminée.",
+        "zh": "{action}已完成。",
+    },
+
+    # -- weather
+    "weather.report": {
+        "en": "Weather report",
+        "es": "Informe del clima",
+        "pt": "Boletim do tempo",
+        "fr": "Bulletin météo",
+        "zh": "天气预报",
+    },
+    "weather.for_city": {
+        "en": "Weather for {city}",
+        "es": "Clima en {city}",
+        "pt": "Tempo em {city}",
+        "fr": "Météo à {city}",
+        "zh": "{city}的天气",
+    },
+    "weather.today": {
+        "en": "Today",
+        "es": "Hoy",
+        "pt": "Hoje",
+        "fr": "Aujourd'hui",
+        "zh": "今天",
+    },
+    "weather.tomorrow": {
+        "en": "Tomorrow",
+        "es": "Mañana",
+        "pt": "Amanhã",
+        "fr": "Demain",
+        "zh": "明天",
+    },
+    "weather.now": {
+        "en": "Right now",
+        "es": "Ahora",
+        "pt": "Agora",
+        "fr": "Maintenant",
+        "zh": "现在",
+    },
+    "weather.temperature": {
+        "en": "Temperature",
+        "es": "Temperatura",
+        "pt": "Temperatura",
+        "fr": "Température",
+        "zh": "温度",
+    },
+    "weather.feels_like": {
+        "en": "Feels like",
+        "es": "Sensación térmica",
+        "pt": "Sensação térmica",
+        "fr": "Ressenti comme",
+        "zh": "体感温度",
+    },
+    "weather.humidity": {
+        "en": "Humidity",
+        "es": "Humedad",
+        "pt": "Umidade",
+        "fr": "Humidité",
+        "zh": "湿度",
+    },
+    "weather.wind": {
+        "en": "Wind",
+        "es": "Viento",
+        "pt": "Vento",
+        "fr": "Vent",
+        "zh": "风速",
+    },
+    "weather.precipitation": {
+        "en": "Precipitation",
+        "es": "Precipitación",
+        "pt": "Precipitação",
+        "fr": "Précipitations",
+        "zh": "降水量",
+    },
+    "weather.reading": {
+        "en": "{label}: {value}",
+        "es": "{label} - {value}",
+        "pt": "{label} - {value}",
+        "fr": "{label} : {value}",
+        "zh": "{label}：{value}",
+    },
+
+    # -- news
+    "news.headlines": {
+        "en": "Headlines",
+        "es": "Titulares",
+        "pt": "Manchetes",
+        "fr": "À la une",
+        "zh": "头条",
+    },
+    "news.national": {
+        "en": "National news",
+        "es": "Noticias nacionales",
+        "pt": "Notícias nacionais",
+        "fr": "Actualités nationales",
+        "zh": "国内新闻",
+    },
+    "news.regional": {
+        "en": "Regional news",
+        "es": "Noticias regionales",
+        "pt": "Notícias regionais",
+        "fr": "Actualités régionales",
+        "zh": "地区新闻",
+    },
+    "news.international": {
+        "en": "International news",
+        "es": "Noticias internacionales",
+        "pt": "Notícias internacionais",
+        "fr": "Actualités internationales",
+        "zh": "国际新闻",
+    },
+    "news.source": {
+        "en": "Source",
+        "es": "Fuente",
+        "pt": "Fonte",
+        "fr": "Origine",
+        "zh": "来源",
+    },
+    "news.summary": {
+        "en": "Summary",
+        "es": "Resumen",
+        "pt": "Resumo",
+        "fr": "Résumé",
+        "zh": "摘要",
+    },
+    "news.item": {
+        "en": "{title} - {source}",
+        "es": "{title} — {source}",
+        "pt": "{title} — {source}",
+        "fr": "{title} — {source}",
+        "zh": "{title}（{source}）",
+    },
+
+    # -- region and errors
+    "region.set": {
+        "en": "Region set to {region}.",
+        "es": "Región establecida en {region}.",
+        "pt": "Região definida como {region}.",
+        "fr": "Région définie sur {region}.",
+        "zh": "地区已设置为 {region}。",
+    },
+    "region.not_set": {
+        "en": "No region set.",
+        "es": "No hay región establecida.",
+        "pt": "Nenhuma região definida.",
+        "fr": "Aucune région définie.",
+        "zh": "尚未设置地区。",
+    },
+    "region.current": {
+        "en": "Current region: {region}",
+        "es": "Región actual: {region}",
+        "pt": "Região atual: {region}",
+        "fr": "Région actuelle : {region}",
+        "zh": "当前地区：{region}",
+    },
+    "error.detail": {
+        "en": "Something went wrong: {reason}",
+        "es": "Algo salió mal: {reason}",
+        "pt": "Algo deu errado: {reason}",
+        "fr": "Une erreur est survenue : {reason}",
+        "zh": "出现问题：{reason}",
+    },
+}
+
+
+# ── The interface ───────────────────────────────────────────────────────────
+#
+# The catalog above is what the ASSISTANT says. This block is what the PERSON
+# sees: the panel titles, the button labels, the tooltips, the state words in
+# the header and the HUD, the lines in the activity log.
+#
+# They live in the same catalog because they obey the same rule. A button that
+# says "Retry" to somebody who cannot read it is not a button, it is a
+# decoration. So every string here exists in all five languages, written by
+# hand, with the same placeholders in the same places.
+#
+# The grouping follows the file the string belongs to, so a new button finds
+# its key next to its neighbours.
+
+_GUI_CATALOG: dict[str, dict[str, str]] = {
+    # -- panel titles -------------------------------------------------------
+    "panel.systems": {
+        "en": "SYSTEMS",
+        "es": "SISTEMAS",
+        "pt": "SISTEMAS",
+        "fr": "SYSTÈMES",
+        "zh": "系统",
+    },
+    "panel.network": {
+        "en": "NETWORK",
+        "es": "RED",
+        "pt": "REDE",
+        "fr": "RÉSEAU",
+        "zh": "网络",
+    },
+    "panel.status": {
+        "en": "STATUS",
+        "es": "ESTADO",
+        "pt": "ESTADO",
+        "fr": "ÉTAT",
+        "zh": "状态",
+    },
+    "panel.tasks": {
+        "en": "TASKS",
+        "es": "TAREAS",
+        "pt": "TAREFAS",
+        "fr": "TÂCHES",
+        "zh": "任务",
+    },
+    "panel.routines": {
+        "en": "ROUTINES",
+        "es": "RUTINAS",
+        "pt": "ROTINAS",
+        "fr": "RÉGIMES",
+        "zh": "例行任务",
+    },
+    "panel.communications": {
+        "en": "COMMUNICATIONS",
+        "es": "COMUNICACIONES",
+        "pt": "COMUNICAÇÕES",
+        "fr": "COMMUNICATION",
+        "zh": "通信",
+    },
+    "panel.command": {
+        "en": "COMMAND",
+        "es": "COMANDO",
+        "pt": "COMANDO",
+        "fr": "COMMANDE",
+        "zh": "命令",
+    },
+    "panel.setup": {
+        "en": "SETUP",
+        "es": "AJUSTES",
+        "pt": "CONFIGURAÇÃO",
+        "fr": "PARAMÈTRES",
+        "zh": "设置",
+    },
+    "panel.controls": {
+        "en": "CONTROLS",
+        "es": "CONTROLES",
+        "pt": "CONTROLES",
+        "fr": "CONTRÔLES",
+        "zh": "控制",
+    },
+    "panel.briefing": {
+        "en": "BRIEFING",
+        "es": "INFORME",
+        "pt": "RELATÓRIO",
+        "fr": "RAPPORT",
+        "zh": "简报",
+    },
+    "panel.quiz": {
+        "en": "QUIZ",
+        "es": "CUESTIONARIO",
+        "pt": "PERGUNTAS",
+        "fr": "QCM",
+        "zh": "问答",
+    },
+
+    # -- small labels -------------------------------------------------------
+    # "CPU" and "GPU" are not in here: they are hardware acronyms and read the
+    # same in every language, so translating them would only make them wrong.
+    "label.memory": {
+        "en": "MEMORY",
+        "es": "MEMORIA",
+        "pt": "MEMÓRIA",
+        "fr": "MÉMOIRE",
+        "zh": "内存",
+    },
+    "label.temp": {
+        "en": "TEMP",
+        "es": "TEMP.",
+        "pt": "TEMP.",
+        "fr": "TEMP.",
+        "zh": "温度",
+    },
+    "label.uptime": {
+        "en": "UPTIME",
+        "es": "TIEMPO ACTIVO",
+        "pt": "TEMPO ATIVO",
+        "fr": "TEMPS DE FONCTIONNEMENT",
+        "zh": "运行时间",
+    },
+    "label.processes": {
+        "en": "PROCESSES",
+        "es": "PROCESOS",
+        "pt": "PROCESSOS",
+        "fr": "PROCESSUS",
+        "zh": "进程",
+    },
+    "label.platform": {
+        "en": "PLATFORM",
+        "es": "PLATAFORMA",
+        "pt": "PLATAFORMA",
+        "fr": "PLATEFORME",
+        "zh": "平台",
+    },
+    "label.engine": {
+        "en": "ENGINE",
+        "es": "MOTOR",
+        "pt": "MOTOR",
+        "fr": "MOTEUR",
+        "zh": "引擎",
+    },
+    "label.live": {
+        "en": "LIVE",
+        "es": "EN VIVO",
+        "pt": "AO VIVO",
+        "fr": "EN DIRECT",
+        "zh": "实时",
+    },
+    "label.log": {
+        "en": "LOG",
+        "es": "REGISTRO",
+        "pt": "REGISTRO",
+        "fr": "JOURNAL",
+        "zh": "日志",
+    },
+    "label.input": {
+        "en": "INPUT",
+        "es": "ENTRADA",
+        "pt": "ENTRADA",
+        "fr": "ENTRÉE",
+        "zh": "输入",
+    },
+
+    # -- the window ---------------------------------------------------------
+    "window.personal_ai_system": {
+        "en": "PERSONAL AI SYSTEM",
+        "es": "SISTEMA DE IA PERSONAL",
+        "pt": "SISTEMA DE IA PESSOAL",
+        "fr": "SYSTÈME D'IA PERSONNEL",
+        "zh": "个人 AI 系统",
+    },
+    "window.subtitle_default": {
+        "en": "Personal AI Assistant",
+        "es": "Asistente de IA personal",
+        "pt": "Assistente de IA pessoal",
+        "fr": "Assistant IA personnel",
+        "zh": "个人 AI 助手",
+    },
+    "window.setup_drawer_tip": {
+        "en": "Setup — things you set once",
+        "es": "Ajustes — lo que configuras una vez",
+        "pt": "Configuração — o que se ajusta uma vez",
+        "fr": "Paramètres — ce que vous réglez une fois",
+        "zh": "设置——只需设置一次的内容",
+    },
+    "window.controls_drawer_tip": {
+        "en": "Controls — the everyday switches",
+        "es": "Controles — los interruptores de cada día",
+        "pt": "Controles — os interruptores do dia a dia",
+        "fr": "Contrôles — les interrupteurs de tous les jours",
+        "zh": "控制——日常用的开关",
+    },
+    "window.fullscreen_tip": {
+        "en": "Fullscreen  [F11]",
+        "es": "Pantalla completa  [F11]",
+        "pt": "Ecrã inteiro  [F11]",
+        "fr": "Plein écran  [F11]",
+        "zh": "全屏  [F11]",
+    },
+    "window.mic_active": {
+        "en": "MIC ACTIVE",
+        "es": "MICRÓFONO ACTIVO",
+        "pt": "MICROFONE ATIVO",
+        "fr": "MICRO ACTIF",
+        "zh": "麦克风已开",
+    },
+    "window.mic_muted": {
+        "en": "MIC MUTED",
+        "es": "MICRÓFONO EN SILENCIO",
+        "pt": "MICROFONE MUDO",
+        "fr": "MICRO COUPÉ",
+        "zh": "麦克风已静音",
+    },
+    "window.mute_tip": {
+        "en": "Mute or unmute the microphone  [F4]",
+        "es": "Silenciar o activar el micrófono  [F4]",
+        "pt": "Silenciar ou ativar o microfone  [F4]",
+        "fr": "Couper ou réactiver le micro  [F4]",
+        "zh": "静音或取消静音麦克风  [F4]",
+    },
+    "window.interrupt": {
+        "en": "INTERRUPT",
+        "es": "INTERRUMPIR",
+        "pt": "INTERROMPER",
+        "fr": "INTERROMPRE",
+        "zh": "打断",
+    },
+    "window.interrupt_tip": {
+        "en": "Stop the assistant mid-sentence  [ESC]",
+        "es": "Detener al asistente a mitad de frase  [ESC]",
+        "pt": "Parar o assistente no meio da frase  [ESC]",
+        "fr": "Arrêter l'assistant en cours de phrase  [ESC]",
+        "zh": "打断助手说话  [ESC]",
+    },
+    "window.type_command": {
+        "en": "Type a command or question…",
+        "es": "Escribe una orden o una pregunta…",
+        "pt": "Escreva um comando ou uma pergunta…",
+        "fr": "Tapez une commande ou une question…",
+        "zh": "输入命令或问题…",
+    },
+    "window.send_tip": {
+        "en": "Send  [Enter]",
+        "es": "Enviar  [Enter]",
+        "pt": "Enviar  [Enter]",
+        "fr": "Envoyer  [Enter]",
+        "zh": "发送  [Enter]",
+    },
+    "window.dismiss": {
+        "en": "Dismiss",
+        "es": "Descartar",
+        "pt": "Dispensar",
+        "fr": "Ignorer",
+        "zh": "关闭",
+    },
+    "window.no_file_loaded": {
+        "en": "No file loaded",
+        "es": "Ningún archivo cargado",
+        "pt": "Nenhum ficheiro carregado",
+        "fr": "Aucun fichier chargé",
+        "zh": "未加载文件",
+    },
+    "window.footer_shortcuts": {
+        "en": "F4 MUTE   ·   F11 FULLSCREEN   ·   ESC INTERRUPT   ·   BY FATIHMAKES",
+        "es": "F4 SILENCIO   ·   F11 PANTALLA COMPLETA   ·   ESC INTERRUMPIR   ·   BY FATIHMAKES",
+        "pt": "F4 SILENCIAR   ·   F11 ECRÃ INTEIRO   ·   ESC INTERROMPER   ·   BY FATIHMAKES",
+        "fr": "F4 COUPER LE MICRO   ·   F11 PLEIN ÉCRAN   ·   ESC INTERROMPRE   ·   BY FATIHMAKES",
+        "zh": "F4 静音   ·   F11 全屏   ·   ESC 打断   ·   BY FATIHMAKES",
+    },
+    "window.camera_feed": {
+        "en": "◈  CAMERA FEED",
+        "es": "◈  CÁMARA EN VIVO",
+        "pt": "◈  CÂMERA AO VIVO",
+        "fr": "◈  FLUX VIDÉO",
+        "zh": "◈  摄像头画面",
+    },
+    "window.close": {
+        "en": "✕  CLOSE",
+        "es": "✕  CERRAR",
+        "pt": "✕  FECHAR",
+        "fr": "✕  FERMER",
+        "zh": "✕  关闭",
+    },
+    "window.video": {
+        "en": "▶  VIDEO",
+        "es": "▶  VÍDEO",
+        "pt": "▶  VÍDEO",
+        "fr": "▶  VIDÉO",
+        "zh": "▶  视频",
+    },
+    "window.video_label": {
+        "en": "VIDEO",
+        "es": "VÍDEO",
+        "pt": "VÍDEO",
+        "fr": "VIDÉO",
+        "zh": "视频",
+    },
+    "window.picture_label": {
+        "en": "PICTURE",
+        "es": "IMAGEN",
+        "pt": "IMAGEM",
+        "fr": "IMAGE",
+        "zh": "图片",
+    },
+    "window.picture": {
+        "en": "◧  PICTURE",
+        "es": "◧  IMAGEN",
+        "pt": "◧  IMAGEM",
+        "fr": "◧  IMAGE",
+        "zh": "◧  图片",
+    },
+    "window.sound_off": {
+        "en": "🔇  SOUND OFF",
+        "es": "🔇  SONIDO APAGADO",
+        "pt": "🔇  SOM DESLIGADO",
+        "fr": "🔇  SON COUPÉ",
+        "zh": "🔇  已静音",
+    },
+    "window.sound_on": {
+        "en": "🔊  SOUND ON",
+        "es": "🔊  SONIDO ENCENDIDO",
+        "pt": "🔊  SOM LIGADO",
+        "fr": "🔊  SON ACTIVÉ",
+        "zh": "🔊  有声",
+    },
+    "window.status_mic_live": {
+        "en": "MIC · LIVE",
+        "es": "MIC · EN VIVO",
+        "pt": "MIC · AO VIVO",
+        "fr": "MIC · EN DIRECT",
+        "zh": "麦克风 · 实时",
+    },
+    "window.status_mic_muted": {
+        "en": "MIC · MUTED",
+        "es": "MIC · SILENCIADO",
+        "pt": "MIC · MUDO",
+        "fr": "MIC · COUPÉ",
+        "zh": "麦克风 · 已静音",
+    },
+    "window.status_engine": {
+        "en": "ENGINE · {engine}",
+        "es": "MOTOR · {engine}",
+        "pt": "MOTOR · {engine}",
+        "fr": "MOTEUR · {engine}",
+        "zh": "引擎 · {engine}",
+    },
+    "window.status_protocol": {
+        "en": "PROTOCOL · {protocol}",
+        "es": "PROTOCOLO · {protocol}",
+        "pt": "PROTOCOLO · {protocol}",
+        "fr": "PROTOCOLE · {protocol}",
+        "zh": "协议 · {protocol}",
+    },
+    "window.no_tasks": {
+        "en": "No background tasks yet.",
+        "es": "Todavía no hay tareas en segundo plano.",
+        "pt": "Ainda não há tarefas em segundo plano.",
+        "fr": "Aucune tâche en arrière-plan.",
+        "zh": "还没有后台任务。",
+    },
+    "window.no_routines": {
+        "en": "No routines yet. Ask for one by voice — "
+              "\"every weekday at 08:30, tell me the weather\".",
+        "es": "Todavía no hay rutinas. Pide una por voz — "
+              "\"cada día laborable a las 08:30, dime el tiempo\".",
+        "pt": "Ainda não há rotinas. Peça uma por voz — "
+              "\"todo dia útil às 08:30, me diga o tempo\".",
+        "fr": "Aucune routine. Demandez-en une à la voix — "
+              "\"chaque jour à 08:30, dis-moi la météo\".",
+        "zh": "还没有例行任务。用语音提出一个——"
+              "「每个工作日 08:30 告诉我天气」。",
+    },
+    "window.file_hint_folder": {
+        "en": "{icon}  {name}  ·  {count} files  ·  Tell {assistant} what to change in it",
+        "es": "{icon}  {name}  ·  {count} archivos  ·  Dile a {assistant} qué cambiar",
+        "pt": "{icon}  {name}  ·  {count} ficheiros  ·  Diga a {assistant} o que mudar",
+        "fr": "{icon}  {name}  ·  {count} fichiers  ·  Dites à {assistant} quoi changer",
+        "zh": "{icon}  {name}  ·  {count} 个文件  ·  告诉 {assistant} 要改什么",
+    },
+    "window.file_hint_file": {
+        "en": "{icon}  {name}  ·  {size}  ·  Tell {assistant} what to do with it",
+        "es": "{icon}  {name}  ·  {size}  ·  Dile a {assistant} qué hacer con él",
+        "pt": "{icon}  {name}  ·  {size}  ·  Diga a {assistant} o que fazer com ele",
+        "fr": "{icon}  {name}  ·  {size}  ·  Dites à {assistant} qu'en faire",
+        "zh": "{icon}  {name}  ·  {size}  ·  告诉 {assistant} 要怎么处理",
+    },
+
+    # -- the two drawers ----------------------------------------------------
+    "controls.fullscreen": {
+        "en": "⛶  FULLSCREEN  [F11]",
+        "es": "⛶  PANTALLA COMPLETA  [F11]",
+        "pt": "⛶  ECRÃ INTEIRO  [F11]",
+        "fr": "⛶  PLEIN ÉCRAN  [F11]",
+        "zh": "⛶  全屏  [F11]",
+    },
+    "controls.remote": {
+        "en": "◉  REMOTE CONTROL",
+        "es": "◉  CONTROL REMOTO",
+        "pt": "◉  CONTROLO REMOTO",
+        "fr": "◉  TÉLÉCOMMANDE",
+        "zh": "◉  远程控制",
+    },
+    "controls.shortcut": {
+        "en": "⊞  CREATE DESKTOP SHORTCUT",
+        "es": "⊞  CREAR ACCESO DIRECTO EN EL ESCRITORIO",
+        "pt": "⊞  CRIAR ATALHO NA ÁREA DE TRABALHO",
+        "fr": "⊞  CRÉER UN RACCOURCI SUR LE BUREAU",
+        "zh": "⊞  创建桌面快捷方式",
+    },
+    "controls.autostart_on": {
+        "en": "◉  AUTO-START: ON",
+        "es": "◉  INICIO AUTOMÁTICO: SÍ",
+        "pt": "◉  INÍCIO AUTOMÁTICO: SIM",
+        "fr": "◉  DÉMARRAGE AUTO : OUI",
+        "zh": "◉  开机自启：开",
+    },
+    "controls.autostart_off": {
+        "en": "◉  AUTO-START: OFF",
+        "es": "◉  INICIO AUTOMÁTICO: NO",
+        "pt": "◉  INÍCIO AUTOMÁTICO: NÃO",
+        "fr": "◉  DÉMARRAGE AUTO : NON",
+        "zh": "◉  开机自启：关",
+    },
+    "controls.customise": {
+        "en": "⚙  CUSTOMISE ASSISTANT",
+        "es": "⚙  PERSONALIZAR EL ASISTENTE",
+        "pt": "⚙  PERSONALIZAR O ASSISTENTE",
+        "fr": "⚙  PERSONNALISER L'ASSISTANT",
+        "zh": "⚙  自定义助手",
+    },
+    "controls.audio_devices": {
+        "en": "🎧  AUDIO DEVICES",
+        "es": "🎧  DISPOSITIVOS DE AUDIO",
+        "pt": "🎧  DISPOSITIVOS DE ÁUDIO",
+        "fr": "🎧  PÉRIPHÉRIQUES AUDIO",
+        "zh": "🎧  音频设备",
+    },
+    "controls.memory": {
+        "en": "🧠  MEMORY",
+        "es": "🧠  MEMORIA",
+        "pt": "🧠  MEMÓRIA",
+        "fr": "🧠  MÉMOIRE",
+        "zh": "🧠  记忆",
+    },
+    "controls.plugins": {
+        "en": "🧩  PLUGINS",
+        "es": "🧩  COMPLEMENTOS",
+        "pt": "🧩  EXTENSÕES",
+        "fr": "🧩  EXTENSIONS",
+        "zh": "🧩  插件",
+    },
+    "controls.plugin_settings": {
+        "en": "⚙  PLUGIN SETTINGS",
+        "es": "⚙  AJUSTES DE COMPLEMENTOS",
+        "pt": "⚙  CONFIGURAÇÃO DE EXTENSÕES",
+        "fr": "⚙  RÉGLAGES DES EXTENSIONS",
+        "zh": "⚙  插件设置",
+    },
+    "controls.engine_providers": {
+        "en": "🔌  ENGINE && PROVIDERS",
+        "es": "🔌  MOTOR Y PROVEEDORES",
+        "pt": "🔌  MOTOR E PROVEDORES",
+        "fr": "🔌  MOTEUR ET FOURNISSEURS",
+        "zh": "🔌  引擎与服务商",
+    },
+    "controls.wake_word": {
+        "en": "🎙  WAKE WORD",
+        "es": "🎙  FRASE DE ACTIVACIÓN",
+        "pt": "🎙  FRASE DE ATIVAÇÃO",
+        "fr": "🎙  PHRASE D'ACTIVATION",
+        "zh": "🎙  唤醒短语",
+    },
+    "controls.wake_download": {
+        "en": "⬇  WAKE WORD: DOWNLOAD",
+        "es": "⬇  FRASE DE ACTIVACIÓN: DESCARGAR",
+        "pt": "⬇  FRASE DE ATIVAÇÃO: BAIXAR",
+        "fr": "⬇  PHRASE D'ACTIVATION : TÉLÉCHARGER",
+        "zh": "⬇  唤醒短语：下载",
+    },
+    "controls.wake_on": {
+        "en": "🎙  WAKE WORD: ON",
+        "es": "🎙  FRASE DE ACTIVACIÓN: SÍ",
+        "pt": "🎙  FRASE DE ATIVAÇÃO: SIM",
+        "fr": "🎙  PHRASE D'ACTIVATION : OUI",
+        "zh": "🎙  唤醒短语：开",
+    },
+    "controls.wake_off": {
+        "en": "🎙  WAKE WORD: OFF",
+        "es": "🎙  FRASE DE ACTIVACIÓN: NO",
+        "pt": "🎙  FRASE DE ATIVAÇÃO: NÃO",
+        "fr": "🎙  PHRASE D'ACTIVATION : NON",
+        "zh": "🎙  唤醒短语：关",
+    },
+    "controls.sleep_now": {
+        "en": "😴  SLEEP NOW",
+        "es": "😴  DORMIR AHORA",
+        "pt": "😴  DORMIR AGORA",
+        "fr": "😴  DORMIR MAINTENANT",
+        "zh": "😴  现在休眠",
+    },
+    "controls.wake_now": {
+        "en": "👂  WAKE NOW",
+        "es": "👂  DESPERTAR AHORA",
+        "pt": "👂  ACORDAR AGORA",
+        "fr": "👂  RÉVEILLER MAINTENANT",
+        "zh": "👂  现在唤醒",
+    },
+    "controls.downloading": {
+        "en": "⬇  DOWNLOADING… (one-time)",
+        "es": "⬇  DESCARGANDO… (una vez)",
+        "pt": "⬇  BAIXANDO… (uma vez)",
+        "fr": "⬇  TÉLÉCHARGEMENT… (une seule fois)",
+        "zh": "⬇  下载中…（仅一次）",
+    },
+    "controls.wake_phrase_tip": {
+        "en": "The words you want the assistant to answer to. They only take "
+              "effect if a wake model trained for them is installed — see the "
+              "line under this box.",
+        "es": "Las palabras a las que quieres que responda el asistente. Solo "
+              "surten efecto si hay instalado un modelo de activación entrenado "
+              "con ellas; mira la línea de debajo de este campo.",
+        "pt": "As palavras a que quer que o assistente responda. Só têm efeito "
+              "se houver instalado um modelo de ativação treinado com elas — "
+              "veja a linha por baixo deste campo.",
+        "fr": "Les mots auxquels vous voulez que l'assistant réponde. Ils ne "
+              "prennent effet que si un modèle d'activation entraîné pour eux "
+              "est installé — regardez la ligne sous ce champ.",
+        "zh": "你希望助手应答的词语。只有在安装了针对它们训练的唤醒模型时才有效——"
+              "请看这个输入框下面的一行说明。",
+    },
+    "controls.wake_mode_tip": {
+        "en": "Any voice wakes it up — no phrase to memorise and no model to "
+              "train. A phrase needs a wake model trained for it.",
+        "es": "Cualquier voz lo despierta: no hay frase que memorizar ni modelo "
+              "que entrenar. Una frase necesita un modelo de activación "
+              "entrenado para ella.",
+        "pt": "Qualquer voz o acorda: não há frase para memorizar nem modelo "
+              "para treinar. Uma frase precisa de um modelo de ativação "
+              "treinado para ela.",
+        "fr": "N'importe quelle voix le réveille — pas de phrase à mémoriser ni "
+              "de modèle à entraîner. Une phrase exige un modèle d'activation "
+              "entraîné pour elle.",
+        "zh": "任何声音都能唤醒它——不用记短语，也不用训练模型。使用短语则需要一个"
+              "针对它训练的唤醒模型。",
+    },
+    "controls.context_tip": {
+        "en": "The tools the assistant is given. Narrowing it makes the prompt "
+              "smaller and the model less likely to reach for the wrong one.",
+        "es": "Las herramientas que se le dan al asistente. Reducirlas hace "
+              "el prompt más pequeño y que el modelo coja menos la que no toca.",
+        "pt": "As ferramentas que são dadas ao assistente. Reduzi-las torna o "
+              "prompt menor e evita que o modelo escolha a errada.",
+        "fr": "Les outils donnés à l'assistant. Les réduire rend le prompt plus "
+              "petit et évite que le modèle saisisse le mauvais.",
+        "zh": "给助手的工具。缩小这个范围会让提示更短，模型也更不容易拿错工具。",
+    },
+    "controls.ptt_on": {
+        "en": "🎚  PUSH-TO-TALK: {chord}",
+        "es": "🎚  PULSA PARA HABLAR: {chord}",
+        "pt": "🎚  PRESSIONE PARA FALAR: {chord}",
+        "fr": "🎚  APPUYER POUR PARLER : {chord}",
+        "zh": "🎚  按住说话：{chord}",
+    },
+    "controls.ptt_off": {
+        "en": "🎚  PUSH-TO-TALK: OFF",
+        "es": "🎚  PULSA PARA HABLAR: NO",
+        "pt": "🎚  PRESSIONE PARA FALAR: NÃO",
+        "fr": "🎚  APPUYER POUR PARLER : NON",
+        "zh": "🎚  按住说话：关",
+    },
+    "controls.ptt_tip_on": {
+        "en": "Microphone stays closed until you hold the key — nothing is sent "
+              "while you are not holding it.",
+        "es": "El micrófono se mantiene cerrado mientras no mantengas la tecla: "
+              "no se envía nada mientras no la pulses.",
+        "pt": "O microfone fica fechado enquanto não mantiver a tecla: nada é "
+              "enviado enquanto não a premir.",
+        "fr": "Le micro reste fermé tant que vous ne maintenez pas la touche : "
+              "rien n'est envoyé le temps que vous ne la maintenez pas.",
+        "zh": "不按住按键时麦克风保持关闭——不按住就不会发送任何内容。",
+    },
+    "controls.ptt_tip_off": {
+        "en": "Hold a key to talk instead of streaming the mic continuously.",
+        "es": "Mantén una tecla para hablar en vez de tener el micrófono "
+              "abierto continuamente.",
+        "pt": "Mantenha uma tecla para falar em vez de manter o microfone "
+              "aberto continuamente.",
+        "fr": "Maintenez une touche pour parler au lieu de laisser le micro "
+              "ouvert en continu.",
+        "zh": "按住一个键即可说话，而不必一直开着麦克风。",
+    },
+    "controls.hud_face": {
+        "en": "🧑  HUD: ANIMATED FACE",
+        "es": "🧑  HUD: CARA ANIMADA",
+        "pt": "🧑  HUD: ROSTO ANIMADO",
+        "fr": "🧑  HUD : VISAGE ANIMÉ",
+        "zh": "🧑  HUD：动画头像",
+    },
+    "controls.hud_core": {
+        "en": "◉  HUD: REACTOR CORE",
+        "es": "◉  HUD: NÚCLEO DEL REACTOR",
+        "pt": "◉  HUD: NÚCLEO DO REATOR",
+        "fr": "◉  HUD : CŒUR DU RÉACTEUR",
+        "zh": "◉  HUD：反应堆核心",
+    },
+    "controls.hud_tip_face": {
+        "en": "An animated head that speaks your words and shows what the "
+              "assistant is doing. Tap to switch to the reactor core.",
+        "es": "Una cabeza animada que dice tus palabras y muestra lo que hace "
+              "el asistente. Toca para cambiar al núcleo del reactor.",
+        "pt": "Uma cabeça animada que diz as suas palavras e mostra o que o "
+              "assistente está a fazer. Toque para mudar para o núcleo do reator.",
+        "fr": "Une tête animée qui dit vos mots et montre ce que fait "
+              "l'assistant. Touchez pour passer au cœur du réacteur.",
+        "zh": "一个会说出你的话、并显示助手正在做什么的动画头像。点按可切换到反应堆核心。",
+    },
+    "controls.hud_tip_core": {
+        "en": "A 3-D reactor core that turns with the state and moves with your "
+              "voice. Tap to switch to the animated head.",
+        "es": "Un núcleo de reactor en 3D que gira con el estado y se mueve con "
+              "tu voz. Toca para cambiar a la cabeza animada.",
+        "pt": "Um núcleo de reator em 3D que gira com o estado e mexe-se com a "
+              "sua voz. Toque para mudar para o rosto animado.",
+        "fr": "Un cœur de réacteur en 3D qui tourne selon l'état et bouge avec "
+              "votre voix. Touchez pour passer au visage animé.",
+        "zh": "一个随状态转动、随你的声音起伏的 3D 反应堆核心。点按可切换到动画头像。",
+    },
+    "controls.brief_on": {
+        "en": "☀  MORNING BRIEF: ON",
+        "es": "☀  RESUMEN MATUTINO: SÍ",
+        "pt": "☀  RESUMO MATINAL: SIM",
+        "fr": "☀  BRIEFING MATINAL : OUI",
+        "zh": "☀  晨报：开",
+    },
+    "controls.brief_off": {
+        "en": "☀  MORNING BRIEF: OFF",
+        "es": "☀  RESUMEN MATUTINO: NO",
+        "pt": "☀  RESUMO MATINAL: NÃO",
+        "fr": "☀  BRIEFING MATINAL : NON",
+        "zh": "☀  晨报：关",
+    },
+
+    # -- the wake word ------------------------------------------------------
+    "wake.mode_phrase": {
+        "en": "Wake on a phrase",
+        "es": "Despertar con una frase",
+        "pt": "Acordar com uma frase",
+        "fr": "Réveil sur une phrase",
+        "zh": "用短语唤醒",
+    },
+    "wake.mode_voice": {
+        "en": "Wake on any voice",
+        "es": "Despertar con cualquier voz",
+        "pt": "Acordar com qualquer voz",
+        "fr": "Réveil à la première voix",
+        "zh": "用任意语音唤醒",
+    },
+    "wake.mode_changed": {
+        "en": "Wake mode is now '{mode}' — {detail}.",
+        "es": "El modo de activación ahora es '{mode}' — {detail}.",
+        "pt": "O modo de ativação agora é '{mode}' — {detail}.",
+        "fr": "Le mode d'activation est maintenant '{mode}' — {detail}.",
+        "zh": "唤醒方式现在为「{mode}」——{detail}。",
+    },
+    "wake.detail_voice": {
+        "en": "any voice wakes it up",
+        "es": "cualquier voz lo despierta",
+        "pt": "qualquer voz o acorda",
+        "fr": "n'importe quelle voix le réveille",
+        "zh": "任何声音都能唤醒它",
+    },
+    "wake.detail_phrase": {
+        "en": "it listens for a phrase",
+        "es": "escucha una frase",
+        "pt": "ouve uma frase",
+        "fr": "il écoute une phrase",
+        "zh": "它会等待一个短语",
+    },
+    "wake.phrase_changed": {
+        "en": "Wake phrase is now '{phrase}'.",
+        "es": "La frase de activación ahora es '{phrase}'.",
+        "pt": "A frase de ativação agora é '{phrase}'.",
+        "fr": "La phrase d'activation est maintenant '{phrase}'.",
+        "zh": "唤醒短语现在是「{phrase}」。",
+    },
+    "wake.effective_voice": {
+        "en": "Microphone: wakes on ANY VOICE — say anything, no phrase needed.",
+        "es": "Micrófono: se despierta con CUALQUIER VOZ: di lo que sea, no "
+              "hace falta ninguna frase.",
+        "pt": "Microfone: acorda com QUALQUER VOZ — diga o que quiser, não é "
+              "precisa de nenhuma frase.",
+        "fr": "Micro : il se réveille à N'IMPORTE QUELLE VOIX — dites ce que vous "
+              "voulez, aucune phrase n'est nécessaire.",
+        "zh": "麦克风：任何声音都能唤醒它——随便说什么都行，不需要短语。",
+    },
+    "wake.effective_phrase": {
+        "en": "Microphone: listening for '{phrase}'.",
+        "es": "Micrófono: escucha «{phrase}».",
+        "pt": "Microfone: à escuta de «{phrase}».",
+        "fr": "Micro : il écoute « {phrase} ».",
+        "zh": "麦克风：正在等待「{phrase}」。",
+    },
+    "wake.effective_model": {
+        "en": "Microphone: the installed wake model listens for '{effective}', "
+              "NOT '{wanted}'. Either say '{effective}', or switch to "
+              "'{mode}' above.",
+        "es": "Micrófono: el modelo de activación instalado escucha «{effective}», "
+              "NO «{wanted}». Di «{effective}» o cambia a «{mode}» arriba.",
+        "pt": "Microfone: o modelo de ativação instalado ouve «{effective}», "
+              "NÃO «{wanted}». Diga «{effective}» ou mude para «{mode}» acima.",
+        "fr": "Micro : le modèle d'activation installé écoute « {effective} », et "
+              "NON « {wanted} ». Dites « {effective} » ou passez à "
+              "« {mode} » ci-dessus.",
+        "zh": "麦克风：已安装的唤醒模型等待的是「{effective}」，而不是「{wanted}」。"
+              "请说「{effective}」，或在上方切换到「{mode}」。",
+    },
+    "wake.effective_none": {
+        "en": "Microphone: no wake model is installed, so '{wanted}' will not "
+              "wake it up. Use '{mode}' or install a model trained for your "
+              "phrase.",
+        "es": "Micrófono: no hay ningún modelo de activación instalado, así que "
+              "«{wanted}» no lo despertará. Usa «{mode}» o instala un modelo "
+              "entrenado con tu frase.",
+        "pt": "Microfone: não há nenhum modelo de ativação instalado, por isso "
+              "«{wanted}» não o acordará. Use «{mode}» ou instale um modelo "
+              "treinado com a sua frase.",
+        "fr": "Micro : aucun modèle d'activation n'est installé, donc « {wanted} » "
+              "ne le réveillera pas. Utilisez « {mode} » ou installez un modèle "
+              "entraîné pour votre phrase.",
+        "zh": "麦克风：没有安装唤醒模型，因此「{wanted}」无法唤醒它。请使用「{mode}」，"
+              "或安装一个针对你的短语训练的模型。",
+    },
+
+    # -- the two selectors --------------------------------------------------
+    "selector.language_tip": {
+        "en": "The language of the interface and of the assistant's speech.",
+        "es": "El idioma de la interfaz y de la voz del asistente.",
+        "pt": "O idioma da interface e da voz do assistente.",
+        "fr": "La langue de l'interface et de la voix de l'assistant.",
+        "zh": "界面和助手语音使用的语言。",
+    },
+    "selector.region_tip": {
+        "en": "Your city and country — used for the local weather and for "
+              "national and regional news. You can type a city that is not "
+              "on the list.",
+        "es": "Tu ciudad y tu país: se usan para el clima local y las "
+              "noticias nacionales y regionales. Puedes escribir una ciudad "
+              "que no esté en la lista.",
+        "pt": "A sua cidade e o seu país — usados para o tempo local e para as "
+              "notícias nacionais e regionais. Pode escrever uma cidade que não "
+              "esteja na lista.",
+        "fr": "Votre ville et votre pays — utilisés pour la météo locale et "
+              "pour les actualités nationales et régionales. Vous pouvez saisir "
+              "une ville qui n'est pas dans la liste.",
+        "zh": "你所在的城市和国家——用于本地天气以及全国和地区新闻。你也可以输入"
+              "列表中没有的城市。",
+    },
+    "selector.explain": {
+        "en": "The region sets the weather and the news. The language changes "
+              "the whole interface and the assistant's speech.",
+        "es": "La región decide el clima y las noticias. El idioma cambia toda "
+              "la interfaz y la voz del asistente.",
+        "pt": "A região define o tempo e as notícias. O idioma muda toda a "
+              "interface e a voz do assistente.",
+        "fr": "La région règle la météo et les nouvelles. La langue change "
+              "toute l'interface et la voix de l'assistant.",
+        "zh": "地区决定天气和新闻。语言会改变整个界面以及助手说话的语言。",
+    },
+    "selector.language_changed": {
+        "en": "Language is now {language}.",
+        "es": "El idioma ahora es {language}.",
+        "pt": "O idioma agora é {language}.",
+        "fr": "La langue est maintenant {language}.",
+        "zh": "语言现在为 {language}。",
+    },
+    "selector.region_changed": {
+        "en": "Region is now {region}.",
+        "es": "La región ahora es {region}.",
+        "pt": "A região agora é {region}.",
+        "fr": "La région est maintenant {region}.",
+        "zh": "地区现在为 {region}。",
+    },
+
+    # -- the HUD ------------------------------------------------------------
+    "hud.voice_interface": {
+        "en": "VOICE INTERFACE",
+        "es": "INTERFAZ DE VOZ",
+        "pt": "INTERFACE DE VOZ",
+        "fr": "INTERFACE VOCALE",
+        "zh": "语音界面",
+    },
+    "hud.visual_input": {
+        "en": "◈  VISUAL INPUT",
+        "es": "◈  ENTRADA VISUAL",
+        "pt": "◈  ENTRADA VISUAL",
+        "fr": "◈  ENTRÉE VISUELLE",
+        "zh": "◈  视觉输入",
+    },
+    "hud.state.muted": {
+        "en": "MUTED",
+        "es": "SILENCIADO",
+        "pt": "MUDO",
+        "fr": "COUPÉ",
+        "zh": "已静音",
+    },
+    "hud.state.listening": {
+        "en": "LISTENING",
+        "es": "ESCUCHANDO",
+        "pt": "OUVINDO",
+        "fr": "À L'ÉCOUTE",
+        "zh": "正在聆听",
+    },
+    "hud.state.speaking": {
+        "en": "SPEAKING",
+        "es": "HABLANDO",
+        "pt": "FALANDO",
+        "fr": "PARLANT",
+        "zh": "正在说话",
+    },
+    "hud.state.thinking": {
+        "en": "THINKING",
+        "es": "PENSANDO",
+        "pt": "PENSANDO",
+        "fr": "RÉFLEXION",
+        "zh": "思考中",
+    },
+    "hud.state.processing": {
+        "en": "PROCESSING",
+        "es": "PROCESANDO",
+        "pt": "PROCESSANDO",
+        "fr": "TRAITEMENT",
+        "zh": "处理中",
+    },
+    "hud.state.idle": {
+        "en": "IDLE",
+        "es": "INACTIVO",
+        "pt": "OCIOSO",
+        "fr": "INACTIF",
+        "zh": "空闲",
+    },
+    "hud.state.initialising": {
+        "en": "INITIALISING",
+        "es": "INICIANDO",
+        "pt": "INICIANDO",
+        "fr": "INITIALISATION",
+        "zh": "正在初始化",
+    },
+
+    # -- the quiz board -----------------------------------------------------
+    "quiz.next": {
+        "en": "NEXT  →",
+        "es": "SIGUIENTE  →",
+        "pt": "PRÓXIMO  →",
+        "fr": "SUIVANT  →",
+        "zh": "下一题  →",
+    },
+    "quiz.finish": {
+        "en": "FINISH  →",
+        "es": "TERMINAR  →",
+        "pt": "TERMINAR  →",
+        "fr": "TERMINER  →",
+        "zh": "完成  →",
+    },
+    "quiz.answer": {
+        "en": "ANSWER",
+        "es": "RESPONDER",
+        "pt": "RESPONDER",
+        "fr": "RÉPONDRE",
+        "zh": "回答",
+    },
+    "quiz.your_answer": {
+        "en": "your answer",
+        "es": "tu respuesta",
+        "pt": "sua resposta",
+        "fr": "votre réponse",
+        "zh": "你的答案",
+    },
+    "quiz.correct": {
+        "en": "✓  correct",
+        "es": "✓  correcto",
+        "pt": "✓  correto",
+        "fr": "✓  juste",
+        "zh": "✓  正确",
+    },
+    "quiz.noted": {
+        "en": "…  noted — I'll go over this one with you",
+        "es": "…  anotado — lo repasaremos juntos",
+        "pt": "…  anotado — vou rever esta consigo",
+        "fr": "…  noté — on la reverra ensemble",
+        "zh": "…  已记录——这道我们一起看",
+    },
+
+    # -- the overlays -------------------------------------------------------
+    "overlay.initialise_required": {
+        "en": "◈  INITIALISATION REQUIRED",
+        "es": "◈  SE REQUIERE INICIALIZACIÓN",
+        "pt": "◈  É NECESSÁRIA INICIALIZAÇÃO",
+        "fr": "◈  INITIALISATION REQUISE",
+        "zh": "◈  需要初始化",
+    },
+    "overlay.configure_before_boot": {
+        "en": "Configure T.E.E.M.O. before first boot.",
+        "es": "Configura T.E.E.M.O. antes del primer arranque.",
+        "pt": "Configure o T.E.E.M.O. antes do primeiro arranque.",
+        "fr": "Configurez T.E.E.M.O. avant le premier démarrage.",
+        "zh": "首次启动前请先配置 T.E.E.M.O.。",
+    },
+    "overlay.gemini_api_key": {
+        "en": "GEMINI API KEY",
+        "es": "CLAVE API DE GEMINI",
+        "pt": "CHAVE DE API DO GEMINI",
+        "fr": "CLÉ API GEMINI",
+        "zh": "GEMINI API 密钥",
+    },
+    "overlay.operating_system": {
+        "en": "OPERATING SYSTEM",
+        "es": "SISTEMA OPERATIVO",
+        "pt": "SISTEMA OPERATIVO",
+        "fr": "SYSTÈME D'EXPLOITATION",
+        "zh": "操作系统",
+    },
+    "overlay.initialise": {
+        "en": "▸  INITIALISE SYSTEMS",
+        "es": "▸  INICIALIZAR SISTEMAS",
+        "pt": "▸  INICIALIZAR SISTEMAS",
+        "fr": "▸  INITIALISER LES SYSTÈMES",
+        "zh": "▸  初始化系统",
+    },
+    "overlay.no_key_local": {
+        "en": "NO KEY — USE A LOCAL MODEL",
+        "es": "SIN CLAVE — USA UN MODELO LOCAL",
+        "pt": "SEM CHAVE — USE UM MODELO LOCAL",
+        "fr": "PAS DE CLÉ — UTILISEZ UN MODÈLE LOCAL",
+        "zh": "无密钥——使用本地模型",
+    },
+    "overlay.assistant_name": {
+        "en": "ASSISTANT NAME",
+        "es": "NOMBRE DEL ASISTENTE",
+        "pt": "NOME DO ASSISTENTE",
+        "fr": "NOM DE L'ASSISTANT",
+        "zh": "助手名称",
+    },
+    "overlay.your_name": {
+        "en": "YOUR NAME  (leave blank for default sir / efendim)",
+        "es": "TU NOMBRE  (déjalo vacío para el señor / efendim por defecto)",
+        "pt": "O SEU NOME  (deixe em branco para o senhor / efendim por omissão)",
+        "fr": "VOTRE NOM  (laissez vide pour monsieur / efendim par défaut)",
+        "zh": "你的名字  （留空则默认使用先生／efendim）",
+    },
+    "overlay.user_name_hint": {
+        "en": "e.g.  Tony   (leave blank for auto)",
+        "es": "p. ej.  Tony   (déjalo vacío para automático)",
+        "pt": "ex.  Tony   (deixe em branco para automático)",
+        "fr": "ex.  Tony   (laissez vide pour automatique)",
+        "zh": "例如  Tony   （留空则自动）",
+    },
+    "overlay.assistant_voice": {
+        "en": "ASSISTANT VOICE",
+        "es": "VOZ DEL ASISTENTE",
+        "pt": "VOZ DO ASSISTENTE",
+        "fr": "VOIX DE L'ASSISTANT",
+        "zh": "助手的声音",
+    },
+    "overlay.ui_colour": {
+        "en": "UI COLOUR  —  drag the handle",
+        "es": "COLOR DE LA INTERFAZ  —  arrastra el mango",
+        "pt": "COR DA INTERFACE  —  arraste a pega",
+        "fr": "COULEUR DE L'INTERFACE  —  glissez la poignée",
+        "zh": "界面颜色  —  拖动手柄",
+    },
+    "overlay.default": {
+        "en": "DEFAULT",
+        "es": "PREDETERMINADO",
+        "pt": "PADRÃO",
+        "fr": "PAR DÉFAUT",
+        "zh": "默认",
+    },
+    "overlay.custom_hex": {
+        "en": "(custom hex colour)",
+        "es": "(color hexadecimal personalizado)",
+        "pt": "(cor hexadecimal personalizada)",
+        "fr": "(couleur hexadécimale personnalisée)",
+        "zh": "（自定义十六进制颜色）",
+    },
+    "overlay.apply_changes": {
+        "en": "▸  APPLY CHANGES",
+        "es": "▸  APLICAR CAMBIOS",
+        "pt": "▸  APLICAR ALTERAÇÕES",
+        "fr": "▸  APPLIQUER LES MODIFICATIONS",
+        "zh": "▸  应用更改",
+    },
+    "overlay.plugin_manager": {
+        "en": "🧩  PLUGIN MANAGER",
+        "es": "🧩  GESTOR DE COMPLEMENTOS",
+        "pt": "🧩  GESTOR DE EXTENSÕES",
+        "fr": "🧩  GESTIONNAIRE D'EXTENSIONS",
+        "zh": "🧩  插件管理",
+    },
+    "overlay.no_plugins": {
+        "en": "No plugins found in /plugins.",
+        "es": "No se encontraron complementos en /plugins.",
+        "pt": "Não foram encontradas extensões em /plugins.",
+        "fr": "Aucune extension trouvée dans /plugins.",
+        "zh": "在 /plugins 中没有找到插件。",
+    },
+    "overlay.broken": {
+        "en": "BROKEN",
+        "es": "ROTO",
+        "pt": "PARTIDO",
+        "fr": "CASSÉ",
+        "zh": "损坏",
+    },
+    "overlay.on": {
+        "en": "ON",
+        "es": "SÍ",
+        "pt": "SIM",
+        "fr": "OUI",
+        "zh": "开",
+    },
+    "overlay.off": {
+        "en": "OFF",
+        "es": "NO",
+        "pt": "NÃO",
+        "fr": "NON",
+        "zh": "关",
+    },
+    "overlay.confirm_title": {
+        "en": "⚠  CONFIRM",
+        "es": "⚠  CONFIRMAR",
+        "pt": "⚠  CONFIRMAR",
+        "fr": "⚠  CONFIRMER",
+        "zh": "⚠  确认",
+    },
+    "overlay.confirm_go": {
+        "en": "▸  CONFIRM",
+        "es": "▸  CONFIRMAR",
+        "pt": "▸  CONFIRMAR",
+        "fr": "▸  CONFIRMER",
+        "zh": "▸  确认",
+    },
+    "overlay.audio_devices": {
+        "en": "🎧  AUDIO DEVICES",
+        "es": "🎧  DISPOSITIVOS DE AUDIO",
+        "pt": "🎧  DISPOSITIVOS DE ÁUDIO",
+        "fr": "🎧  PÉRIPHÉRIQUES AUDIO",
+        "zh": "🎧  音频设备",
+    },
+    "overlay.microphone_caption": {
+        "en": "MICROPHONE — what the assistant hears you with",
+        "es": "MICRÓFONO — con lo que el asistente te oye",
+        "pt": "MICROFONE — com o que o assistente ouve você",
+        "fr": "MICRO — ce avec quoi l'assistant vous entend",
+        "zh": "麦克风——助手用它听你说话",
+    },
+    "overlay.speakers_caption": {
+        "en": "SPEAKERS — what the assistant talks through",
+        "es": "ALTAVOCES — por donde habla el asistente",
+        "pt": "COLUNAS — por onde fala o assistente",
+        "fr": "ENCEINTES — par où parle l'assistant",
+        "zh": "扬声器——助手用它说话",
+    },
+    "overlay.test": {
+        "en": "TEST",
+        "es": "PROBAR",
+        "pt": "TESTAR",
+        "fr": "TESTER",
+        "zh": "测试",
+    },
+    "overlay.not_connected": {
+        "en": "(not connected)",
+        "es": "(sin conectar)",
+        "pt": "(não ligado)",
+        "fr": "(non connecté)",
+        "zh": "（未连接）",
+    },
+    "overlay.output_volume": {
+        "en": "OUTPUT VOLUME",
+        "es": "VOLUMEN DE SALIDA",
+        "pt": "VOLUME DE SAÍDA",
+        "fr": "VOLUME DE SORTIE",
+        "zh": "输出音量",
+    },
+    "overlay.apply_reconnects": {
+        "en": "Applying reconnects the session. Your conversation is kept.",
+        "es": "Aplicar reconecta la sesión. Tu conversación se conserva.",
+        "pt": "Aplicar reconecta a sessão. A sua conversa é mantida.",
+        "fr": "L'application reconnecte la session. Votre conversation est conservée.",
+        "zh": "应用后会重新连接。您的对话会保留。",
+    },
+    "overlay.apply": {
+        "en": "▸  APPLY",
+        "es": "▸  APLICAR",
+        "pt": "▸  APLICAR",
+        "fr": "▸  APPLIQUER",
+        "zh": "▸  应用",
+    },
+    "overlay.speak_now": {
+        "en": "Speak now…",
+        "es": "Habla ahora…",
+        "pt": "Fale agora…",
+        "fr": "Parlez maintenant…",
+        "zh": "请说话…",
+    },
+    "overlay.playing_tone": {
+        "en": "Playing a tone…",
+        "es": "Reproduciendo un tono…",
+        "pt": "A tocar um tom…",
+        "fr": "Lecture d'un signal…",
+        "zh": "正在播放提示音…",
+    },
+    "overlay.memory_title": {
+        "en": "🧠  WHAT THE ASSISTANT REMEMBERS",
+        "es": "🧠  LO QUE RECUERDA EL ASISTENTE",
+        "pt": "🧠  O QUE O ASSISTENTE LEMBRA",
+        "fr": "🧠  CE QUE L'ASSISTANT RETIENT",
+        "zh": "🧠  助手记得的内容",
+    },
+    "overlay.memory_caption": {
+        "en": "{count} stored facts — newest first. Nothing here is sent anywhere; "
+              "it lives in memory/long_term.json on this machine.",
+        "es": "{count} datos guardados: los más recientes primero. Nada de esto "
+              "se envía a ninguna parte; vive en memory/long_term.json en este "
+              "equipo.",
+        "pt": "{count} factos guardados — os mais recentes primeiro. Nada disto "
+              "é enviado para lado nenhum; vive em memory/long_term.json nesta "
+              "máquina.",
+        "fr": "{count} faits enregistrés — les plus récents d'abord. Rien de tout "
+              "cela n'est envoyé ailleurs ; ils vivent dans memory/long_term.json "
+              "sur cette machine.",
+        "zh": "已保存 {count} 条记忆——最新的在前。这里的内容不会发送到任何地方，"
+              "它保存在本机的 memory/long_term.json 中。",
+    },
+    "overlay.memory_empty": {
+        "en": "Nothing stored yet.",
+        "es": "Todavía no hay nada guardado.",
+        "pt": "Nada guardado ainda.",
+        "fr": "Rien d'enregistré pour l'instant.",
+        "zh": "尚未保存任何内容。",
+    },
+    "overlay.forget_this": {
+        "en": "Forget this",
+        "es": "Olvidar esto",
+        "pt": "Esquecer isto",
+        "fr": "Oublier ceci",
+        "zh": "忘掉这条",
+    },
+    "overlay.clipboard_detected": {
+        "en": "◈  CLIPBOARD DETECTED",
+        "es": "◈  PORTAPAPELES DETECTADO",
+        "pt": "◈  CLIPBOARD DETECTADO",
+        "fr": "◈  PRESSE-PAPIERS DÉTECTÉ",
+        "zh": "◈  检测到剪贴板内容",
+    },
+    "overlay.translate": {
+        "en": "TRANSLATE",
+        "es": "TRADUCIR",
+        "pt": "TRADUZIR",
+        "fr": "TRADUIRE",
+        "zh": "翻译",
+    },
+    "overlay.summarise": {
+        "en": "SUMMARISE",
+        "es": "RESUMIR",
+        "pt": "RESUMIR",
+        "fr": "RÉSUMER",
+        "zh": "总结",
+    },
+    "overlay.explain": {
+        "en": "EXPLAIN",
+        "es": "EXPLICAR",
+        "pt": "EXPLICAR",
+        "fr": "EXPLIQUER",
+        "zh": "解释",
+    },
+    "overlay.fix": {
+        "en": "FIX",
+        "es": "CORREGIR",
+        "pt": "CORRIGIR",
+        "fr": "CORRIGER",
+        "zh": "修正",
+    },
+    "overlay.plugin_settings": {
+        "en": "⚙  PLUGIN SETTINGS",
+        "es": "⚙  AJUSTES DE COMPLEMENTOS",
+        "pt": "⚙  CONFIGURAÇÃO DE EXTENSÕES",
+        "fr": "⚙  RÉGLAGES DES EXTENSIONS",
+        "zh": "⚙  插件设置",
+    },
+    "overlay.no_configurable_plugins": {
+        "en": "No configurable plugins are installed.\nDrop a plugin that needs "
+              "settings (like the 3D-printer suite) into the plugins folder and "
+              "it will show up here.",
+        "es": "No hay complementos configurables instalados.\nColoca en la "
+              "carpeta de complementos uno que necesite ajustes (como el suite "
+              "de impresión 3D) y aparecerá aquí.",
+        "pt": "Não há extensões configuráveis instaladas.\nColoque na pasta de "
+              "extensões uma que precise de definições (como o conjunto de "
+              "impressora 3D) e ela aparecerá aqui.",
+        "fr": "Aucune extension configurable n'est installée.\nDéposez dans le "
+              "dossier des extensions une extension qui a besoin de réglages "
+              "(comme la suite d'impression 3D) et elle apparaîtra ici.",
+        "zh": "尚未安装可配置的插件。\n把需要设置的插件（例如 3D 打印套件）放进插件文件夹，"
+              "它就会出现在这里。",
+    },
+    "overlay.saved_check": {
+        "en": "Saved ✓",
+        "es": "Guardado ✓",
+        "pt": "Salvo ✓",
+        "fr": "Enregistré ✓",
+        "zh": "已保存 ✓",
+    },
+    "overlay.testing": {
+        "en": "Testing…",
+        "es": "Probando…",
+        "pt": "A testar…",
+        "fr": "Test en cours…",
+        "zh": "正在测试…",
+    },
+    "overlay.new_key": {
+        "en": "NEW KEY",
+        "es": "NUEVA CLAVE",
+        "pt": "NOVA CHAVE",
+        "fr": "NOUVELLE CLÉ",
+        "zh": "新密钥",
+    },
+    "overlay.dismiss": {
+        "en": "DISMISS",
+        "es": "DESCARTAR",
+        "pt": "DISPENSAR",
+        "fr": "IGNORER",
+        "zh": "关闭",
+    },
+    "overlay.key_expires": {
+        "en": "Key expires in  {minutes}:{seconds}",
+        "es": "La clave caduca en  {minutes}:{seconds}",
+        "pt": "A chave expira em  {minutes}:{seconds}",
+        "fr": "La clé expire dans  {minutes}:{seconds}",
+        "zh": "密钥将在 {minutes}:{seconds} 后过期",
+    },
+    "overlay.connected": {
+        "en": "CONNECTED",
+        "es": "CONECTADO",
+        "pt": "LIGADO",
+        "fr": "CONNECTÉ",
+        "zh": "已连接",
+    },
+    "overlay.phone_connected": {
+        "en": "Phone connected — assistant ready",
+        "es": "Teléfono conectado: asistente listo",
+        "pt": "Telefone ligado — assistente pronto",
+        "fr": "Téléphone connecté — assistant prêt",
+        "zh": "手机已连接——助手已就绪",
+    },
+    "overlay.remote_access": {
+        "en": "◈  REMOTE ACCESS",
+        "es": "◈  ACCESO REMOTO",
+        "pt": "◈  ACESSO REMOTO",
+        "fr": "◈  ACCÈS À DISTANCE",
+        "zh": "◈  远程访问",
+    },
+    "overlay.scan_with_phone": {
+        "en": "Scan with phone camera to connect instantly",
+        "es": "Escanea con la cámara del teléfono para conectarte al instante",
+        "pt": "Digitalize com a câmara do telemóvel para ligar de imediato",
+        "fr": "Scannez avec l'appareil photo du téléphone pour vous connecter "
+              "instantanément",
+        "zh": "用手机相机扫码即可立即连接",
+    },
+    "overlay.firewall_blocked": {
+        "en": "⚠  Windows is blocking incoming connections to this copy of "
+              "Python, so your phone cannot reach this page. Restart the "
+              "assistant and accept the Windows prompt, or remove the rules "
+              "named {rules} under Windows Defender Firewall → Inbound Rules.",
+        "es": "⚠  Windows está bloqueando las conexiones entrantes a esta copia "
+              "de Python, así que tu teléfono no puede llegar a esta página. "
+              "Reinicia el asistente y acepta el aviso de Windows, o quita las "
+              "reglas llamadas {rules} en Firewall de Windows Defender → Reglas "
+              "de entrada.",
+        "pt": "⚠  O Windows está a bloquear ligações de entrada para esta cópia "
+              "do Python, por isso o seu telemóvel não consegue chegar a esta "
+              "página. Reinicie o assistente e aceite o aviso do Windows, ou "
+              "remova as regras chamadas {rules} em Firewall do Windows "
+              "Defender → Regras de Entrada.",
+        "fr": "⚠  Windows bloque les connexions entrantes vers cette copie de "
+              "Python : votre téléphone ne peut pas atteindre cette page. "
+              "Redémarrez l'assistant et acceptez l'invite de Windows, ou "
+              "supprimez les règles nommées {rules} dans Pare-feu Windows "
+              "Defender → Règles de connexion entrante.",
+        "zh": "⚠  Windows 正在阻止连入这份 Python 副本，因此您的手机无法访问此页面。"
+              "请重启助手并接受 Windows 提示，或在「Windows Defender 防火墙 → "
+              "入站规则」中删除名为 {rules} 的规则。",
+    },
+    "overlay.enter_manually": {
+        "en": "Or enter manually:",
+        "es": "O escríbelo a mano:",
+        "pt": "Ou escreva manualmente:",
+        "fr": "Ou saisissez à la main :",
+        "zh": "或手动输入：",
+    },
+
+    # -- files --------------------------------------------------------------
+    "file.choose_file": {
+        "en": "📄  Choose a file…",
+        "es": "📄  Elegir un archivo…",
+        "pt": "📄  Escolher um ficheiro…",
+        "fr": "📄  Choisir un fichier…",
+        "zh": "📄  选择文件…",
+    },
+    "file.choose_folder": {
+        "en": "📁  Choose a folder…  (for coding)",
+        "es": "📁  Elegir una carpeta…  (para programar)",
+        "pt": "📁  Escolher uma pasta…  (para programar)",
+        "fr": "📁  Choisir un dossier…  (pour coder)",
+        "zh": "📁  选择文件夹…（用于编程）",
+    },
+    "file.select_project_folder": {
+        "en": "Select a project folder for T.E.E.M.O.",
+        "es": "Selecciona una carpeta de proyecto para T.E.E.M.O.",
+        "pt": "Selecione uma pasta de projeto para o T.E.E.M.O.",
+        "fr": "Choisissez un dossier de projet pour T.E.E.M.O.",
+        "zh": "为 T.E.E.M.O. 选择项目文件夹",
+    },
+    "file.select_file": {
+        "en": "Select a file for T.E.E.M.O.",
+        "es": "Selecciona un archivo para T.E.E.M.O.",
+        "pt": "Selecione um ficheiro para o T.E.E.M.O.",
+        "fr": "Choisissez un fichier pour T.E.E.M.O.",
+        "zh": "为 T.E.E.M.O. 选择文件",
+    },
+    "file.filter_all": {
+        "en": "All Files (*.*)",
+        "es": "Todos los archivos (*.*)",
+        "pt": "Todos os ficheiros (*.*)",
+        "fr": "Tous les fichiers (*.*)",
+        "zh": "所有文件 (*.*)",
+    },
+    "file.filter_images": {
+        "en": "Image Files (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.svg)",
+        "es": "Archivos de imagen (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.svg)",
+        "pt": "Ficheiros de imagem (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.svg)",
+        "fr": "Images (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.svg)",
+        "zh": "图片文件 (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.svg)",
+    },
+    "file.filter_documents": {
+        "en": "Document Files (*.pdf *.docx *.txt *.md *.pptx)",
+        "es": "Archivos de documento (*.pdf *.docx *.txt *.md *.pptx)",
+        "pt": "Ficheiros de documento (*.pdf *.docx *.txt *.md *.pptx)",
+        "fr": "Documents (*.pdf *.docx *.txt *.md *.pptx)",
+        "zh": "文档文件 (*.pdf *.docx *.txt *.md *.pptx)",
+    },
+    "file.filter_data": {
+        "en": "Data Files (*.csv *.xlsx *.json *.xml)",
+        "es": "Archivos de datos (*.csv *.xlsx *.json *.xml)",
+        "pt": "Ficheiros de dados (*.csv *.xlsx *.json *.xml)",
+        "fr": "Données (*.csv *.xlsx *.json *.xml)",
+        "zh": "数据文件 (*.csv *.xlsx *.json *.xml)",
+    },
+    "file.filter_code": {
+        "en": "Source Files (*.py *.js *.ts *.html *.css *.java *.cpp *.go)",
+        "es": "Archivos de código (*.py *.js *.ts *.html *.css *.java *.cpp *.go)",
+        "pt": "Ficheiros de código (*.py *.js *.ts *.html *.css *.java *.cpp *.go)",
+        "fr": "Code (*.py *.js *.ts *.html *.css *.java *.cpp *.go)",
+        "zh": "源文件 (*.py *.js *.ts *.html *.css *.java *.cpp *.go)",
+    },
+    "file.filter_audio": {
+        "en": "Audio Files (*.mp3 *.wav *.ogg *.m4a *.aac *.flac)",
+        "es": "Archivos de audio (*.mp3 *.wav *.ogg *.m4a *.aac *.flac)",
+        "pt": "Ficheiros de áudio (*.mp3 *.wav *.ogg *.m4a *.aac *.flac)",
+        "fr": "Audio (*.mp3 *.wav *.ogg *.m4a *.aac *.flac)",
+        "zh": "音频文件 (*.mp3 *.wav *.ogg *.m4a *.aac *.flac)",
+    },
+    "file.filter_video": {
+        "en": "Video Files (*.mp4 *.avi *.mov *.mkv *.wmv *.webm)",
+        "es": "Archivos de vídeo (*.mp4 *.avi *.mov *.mkv *.wmv *.webm)",
+        "pt": "Ficheiros de vídeo (*.mp4 *.avi *.mov *.mkv *.wmv *.webm)",
+        "fr": "Vidéos (*.mp4 *.avi *.mov *.mkv *.wmv *.webm)",
+        "zh": "视频文件 (*.mp4 *.avi *.mov *.mkv *.wmv *.webm)",
+    },
+    "file.filter_archives": {
+        "en": "Archive Files (*.zip *.rar *.tar *.gz *.7z)",
+        "es": "Archivos comprimidos (*.zip *.rar *.tar *.gz *.7z)",
+        "pt": "Ficheiros comprimidos (*.zip *.rar *.tar *.gz *.7z)",
+        "fr": "Archives (*.zip *.rar *.tar *.gz *.7z)",
+        "zh": "压缩文件 (*.zip *.rar *.tar *.gz *.7z)",
+    },
+    "file.drop_hint": {
+        "en": "DROP A FILE OR FOLDER  ·  OR CLICK",
+        "es": "SUELTA UN ARCHIVO O UNA CARPETA  ·  O HAZ CLIC",
+        "pt": "SOLTE UM FICHEIRO OU UMA PASTA  ·  OU CLIQUE",
+        "fr": "DÉPOSEZ UN FICHIER OU UN DOSSIER  ·  OU CLIQUEZ",
+        "zh": "拖放文件或文件夹  ·  或点击",
+    },
+    "file.release_to_load": {
+        "en": "RELEASE TO LOAD",
+        "es": "SUELTA PARA CARGAR",
+        "pt": "SOLTE PARA CARREGAR",
+        "fr": "DÉPOSEZ POUR CHARGER",
+        "zh": "松开以加载",
+    },
+    "file.kind_file": {
+        "en": "FILE",
+        "es": "ARCHIVO",
+        "pt": "FICHEIRO",
+        "fr": "FICHIER",
+        "zh": "文件",
+    },
+    "file.kind_folder": {
+        "en": "FOLDER",
+        "es": "CARPETA",
+        "pt": "PASTA",
+        "fr": "DOSSIER",
+        "zh": "文件夹",
+    },
+    "file.count": {
+        "en": "{n} files",
+        "es": "{n} archivos",
+        "pt": "{n} ficheiros",
+        "fr": "{n} fichiers",
+        "zh": "{n} 个文件",
+    },
+    "file.count_more": {
+        "en": "{n}+ files",
+        "es": "{n}+ archivos",
+        "pt": "{n}+ ficheiros",
+        "fr": "{n}+ fichiers",
+        "zh": "{n}+ 个文件",
+    },
+
+    # -- the activity log ----------------------------------------------------
+    # The "SYS:", "ERR:", "FILE:", "QUIZ:" prefixes stay as they are: the log
+    # is read by machines as well as by people. What follows them is prose, and
+    # prose a person reads.
+    "log.video_unavailable": {
+        "en": "Video playback is not available in this Qt install.",
+        "es": "La reproducción de vídeo no está disponible en esta instalación de Qt.",
+        "pt": "A reprodução de vídeo não está disponível nesta instalação do Qt.",
+        "fr": "La lecture vidéo n'est pas disponible dans cette installation de Qt.",
+        "zh": "此 Qt 安装不支持视频播放。",
+    },
+    "log.image_format": {
+        "en": "'{name}' could not be shown — this Qt build does not read that "
+              "image format.",
+        "es": "No se pudo mostrar «{name}»: esta compilación de Qt no lee ese "
+              "formato de imagen.",
+        "pt": "Não foi possível mostrar «{name}» — esta compilação do Qt não lê "
+              "esse formato de imagem.",
+        "fr": "« {name} » n'a pas pu être affiché — cette version de Qt ne lit "
+              "pas ce format d'image.",
+        "zh": "无法显示「{name}」——此 Qt 版本不支持该图片格式。",
+    },
+    "log.video_failed": {
+        "en": "The video could not be played{error}.",
+        "es": "No se pudo reproducir el vídeo{error}.",
+        "pt": "Não foi possível reproduzir o vídeo{error}.",
+        "fr": "La vidéo n'a pas pu être lue{error}.",
+        "zh": "无法播放该视频{error}。",
+    },
+    "log.shortcut_created": {
+        "en": "Desktop shortcut created.",
+        "es": "Acceso directo del escritorio creado.",
+        "pt": "Atalho na área de trabalho criado.",
+        "fr": "Raccourci de bureau créé.",
+        "zh": "已创建桌面快捷方式。",
+    },
+    "log.remote_unavailable": {
+        "en": "Dashboard not running — remote unavailable.",
+        "es": "El panel no está en marcha: control remoto no disponible.",
+        "pt": "O painel não está a correr — remoto indisponível.",
+        "fr": "Tableau de bord inactif — accès à distance indisponible.",
+        "zh": "面板未运行——远程不可用。",
+    },
+    "log.remote_key_failed": {
+        "en": "Could not generate remote key.",
+        "es": "No se pudo generar la clave remota.",
+        "pt": "Não foi possível gerar a chave remota.",
+        "fr": "Impossible de générer la clé distante.",
+        "zh": "无法生成远程密钥。",
+    },
+    "log.remote_key_generated": {
+        "en": "Remote key generated — manual: {manual}",
+        "es": "Clave remota generada — manual: {manual}",
+        "pt": "Chave remota gerada — manual: {manual}",
+        "fr": "Clé distante générée — manuelle : {manual}",
+        "zh": "远程密钥已生成——手动地址：{manual}",
+    },
+    "log.autostart_enabled": {
+        "en": "Auto-start enabled.",
+        "es": "Inicio automático activado.",
+        "pt": "Início automático ativado.",
+        "fr": "Démarrage automatique activé.",
+        "zh": "已启用开机自启。",
+    },
+    "log.autostart_disabled": {
+        "en": "Auto-start disabled.",
+        "es": "Inicio automático desactivado.",
+        "pt": "Início automático desativado.",
+        "fr": "Démarrage automatique désactivé.",
+        "zh": "已关闭开机自启。",
+    },
+    "log.hud_face": {
+        "en": "HUD switched to the animated face.",
+        "es": "El HUD pasó a la cara animada.",
+        "pt": "O HUD passou para o rosto animado.",
+        "fr": "Le HUD est passé au visage animé.",
+        "zh": "HUD 已切换为动画头像。",
+    },
+    "log.hud_core": {
+        "en": "HUD switched to the reactor core.",
+        "es": "El HUD pasó al núcleo del reactor.",
+        "pt": "O HUD passou para o núcleo do reator.",
+        "fr": "Le HUD est passé au cœur du réacteur.",
+        "zh": "HUD 已切换为反应堆核心。",
+    },
+    "log.push_to_talk_failed": {
+        "en": "Push-to-talk failed — {error}",
+        "es": "El modo pulsa-para-hablar falló: {error}",
+        "pt": "O modo pressione-para-falar falhou — {error}",
+        "fr": "Le mode parler-maintenu a échoué — {error}",
+        "zh": "按住说话失败——{error}",
+    },
+    "log.wake_word_ready": {
+        "en": "Wake word ready.",
+        "es": "La frase de activación está lista.",
+        "pt": "A frase de ativação está pronta.",
+        "fr": "La phrase d'activation est prête.",
+        "zh": "唤醒短语已就绪。",
+    },
+    "log.wake_word_failed": {
+        "en": "Wake word setup failed: {message}",
+        "es": "No se pudo configurar la frase de activación: {message}",
+        "pt": "Não foi possível configurar a frase de ativação: {message}",
+        "fr": "Échec de la configuration de la phrase d'activation : {message}",
+        "zh": "唤醒短语设置失败：{message}",
+    },
+    "log.identity_updated": {
+        "en": "Identity updated — {name}",
+        "es": "Identidad actualizada: {name}",
+        "pt": "Identidade atualizada — {name}",
+        "fr": "Identité mise à jour — {name}",
+        "zh": "身份已更新——{name}",
+    },
+    "log.ui_colour_applied": {
+        "en": "UI colour applied — {colour}",
+        "es": "Color de la interfaz aplicado: {colour}",
+        "pt": "Cor da interface aplicada — {colour}",
+        "fr": "Couleur de l'interface appliquée — {colour}",
+        "zh": "已应用界面颜色——{colour}",
+    },
+    "log.voice_set": {
+        "en": "Voice set — {voice}",
+        "es": "Voz establecida: {voice}",
+        "pt": "Voz definida — {voice}",
+        "fr": "Voix définie — {voice}",
+        "zh": "声音已设置——{voice}",
+    },
+    "log.audio_devices_updated": {
+        "en": "Audio devices updated.",
+        "es": "Dispositivos de audio actualizados.",
+        "pt": "Dispositivos de áudio atualizados.",
+        "fr": "Périphériques audio mis à jour.",
+        "zh": "音频设备已更新。",
+    },
+    "log.engine_settings_saved": {
+        "en": "Engine settings saved — reconnecting.",
+        "es": "Ajustes del motor guardados: reconectando.",
+        "pt": "Definições do motor guardadas — a reconectar.",
+        "fr": "Réglages du moteur enregistrés — reconnexion.",
+        "zh": "引擎设置已保存——正在重新连接。",
+    },
+    "log.providers_missing": {
+        "en": "The providers folder is not installed — the assistant runs on "
+              "Gemini Live.",
+        "es": "La carpeta de proveedores no está instalada: el asistente "
+              "funciona con Gemini Live.",
+        "pt": "A pasta de provedores não está instalada — o assistente "
+              "funciona com o Gemini Live.",
+        "fr": "Le dossier des fournisseurs n'est pas installé — l'assistant "
+              "fonctionne avec Gemini Live.",
+        "zh": "未安装服务商文件夹——助手将使用 Gemini Live 运行。",
+    },
+    "log.mic_muted": {
+        "en": "Microphone muted.",
+        "es": "Micrófono silenciado.",
+        "pt": "Microfone mudo.",
+        "fr": "Micro coupé.",
+        "zh": "麦克风已静音。",
+    },
+    "log.mic_active": {
+        "en": "Microphone active.",
+        "es": "Micrófono activo.",
+        "pt": "Microfone ativo.",
+        "fr": "Micro actif.",
+        "zh": "麦克风已开启。",
+    },
+    "log.initialised": {
+        "en": "Initialised. Windows. {name} online.",
+        "es": "Inicializado. Windows. {name} en línea.",
+        "pt": "Inicializado. Windows. {name} online.",
+        "fr": "Initialisé. Windows. {name} en ligne.",
+        "zh": "已初始化。Windows。{name} 已上线。",
+    },
+    "log.video_sound_on": {
+        "en": "The video's sound is on — silence it, close it, or press F4 to "
+              "talk. Typing still works.",
+        "es": "El sonido del vídeo está encendido: siléncialo, ciérralo o pulsa "
+              "F4 para hablar. Escribir sigue funcionando.",
+        "pt": "O som do vídeo está ligado — silencie-o, feche-o ou prima F4 "
+              "para falar. Escrever continua a funcionar.",
+        "fr": "Le son de la vidéo est activé — coupez-le, fermez-la ou appuyez "
+              "sur F4 pour parler. La saisie fonctionne toujours.",
+        "zh": "视频的声音已打开——请静音、关闭视频，或按 F4 说话。打字仍然可用。",
+    },
+    "log.video_quiet_again": {
+        "en": "The video is quiet again.",
+        "es": "El vídeo vuelve a estar en silencio.",
+        "pt": "O vídeo está novamente em silêncio.",
+        "fr": "La vidéo est de nouveau silencieuse.",
+        "zh": "视频又安静下来了。",
+    },
+    "log.err_shortcut": {
+        "en": "Shortcut failed — {error}",
+        "es": "No se pudo crear el acceso directo: {error}",
+        "pt": "Não foi possível criar o atalho — {error}",
+        "fr": "Échec de la création du raccourci — {error}",
+        "zh": "创建快捷方式失败——{error}",
+    },
+    "log.err_autostart": {
+        "en": "Auto-start failed — {error}",
+        "es": "El inicio automático falló: {error}",
+        "pt": "O início automático falhou — {error}",
+        "fr": "Échec du démarrage automatique — {error}",
+        "zh": "开机自启失败——{error}",
+    },
+    "log.err_confirmation": {
+        "en": "Confirmation failed — {error}",
+        "es": "La confirmación falló: {error}",
+        "pt": "A confirmação falhou — {error}",
+        "fr": "Échec de la confirmation — {error}",
+        "zh": "确认失败——{error}",
+    },
+    "log.err_config_save": {
+        "en": "Config save failed — {error}",
+        "es": "No se pudieron guardar los ajustes: {error}",
+        "pt": "Não foi possível guardar as definições — {error}",
+        "fr": "Échec de l'enregistrement des réglages — {error}",
+        "zh": "保存设置失败——{error}",
+    },
+    "log.provider_settings_unavailable": {
+        "en": "Provider settings unavailable: {error}",
+        "es": "Ajustes de proveedores no disponibles: {error}",
+        "pt": "Definições de provedores indisponíveis: {error}",
+        "fr": "Réglages des fournisseurs indisponibles : {error}",
+        "zh": "无法使用服务商设置：{error}",
+    },
+    "log.routine_not_changed": {
+        "en": "Routine not changed — {error}",
+        "es": "La rutina no cambió: {error}",
+        "pt": "A rotina não foi alterada — {error}",
+        "fr": "La routine n'a pas été modifiée — {error}",
+        "zh": "例行任务未更改——{error}",
+    },
+    "log.quiz_score": {
+        "en": "{topic} — {right}/{total} correct",
+        "es": "{topic} — {right}/{total} correctos",
+        "pt": "{topic} — {right}/{total} corretas",
+        "fr": "{topic} — {right}/{total} correctes",
+        "zh": "{topic} — 答对 {right}/{total}",
+    },
+    "log.file_loaded": {
+        "en": "{name} ({size}) loaded",
+        "es": "{name} ({size}) cargado",
+        "pt": "{name} ({size}) carregado",
+        "fr": "{name} ({size}) chargé",
+        "zh": "已加载 {name}（{size}）",
+    },
+    "log.folder_loaded": {
+        "en": "{name} ({count} files) loaded",
+        "es": "{name} ({count} archivos) cargado",
+        "pt": "{name} ({count} ficheiros) carregado",
+        "fr": "{name} ({count} fichiers) chargé",
+        "zh": "已加载 {name}（{count} 个文件）",
+    },
+}
+
+CATALOG.update(_GUI_CATALOG)
+
+
+# ── Translating ─────────────────────────────────────────────────────────────
+
+class _MissingPlaceholder:
+    """A placeholder the caller did not fill in.
+
+    The ordinary behaviour of `str.format` is to raise. Here the missing
+    name stays visible, because a sentence with a visible "{city}" is a
+    sentence a human can still read, and a crash in the middle of drawing
+    the window is not.
+    """
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __str__(self) -> str:
+        return "{" + self.name + "}"
+
+    def __repr__(self) -> str:
+        return self.__str__()
+
+    def __format__(self, spec: str) -> str:
+        return self.__str__()
+
+    def __getitem__(self, item: str) -> "_MissingPlaceholder":
+        return self
+
+
+class _SafeValues(dict):
+    """The mapping handed to `format_map`: unknown names stay as they are."""
+
+    def __missing__(self, key):
+        return _MissingPlaceholder(str(key))
+
+
+def _safe_format(template: str, values: dict) -> str:
+    """Substitute what we can, keep the rest, and never raise."""
+    try:
+        return str(template).format_map(_SafeValues(values))
+    except Exception:
+        return str(template)
+
+
+def t(key: str, lang: str | None = None, /, **kwargs) -> str:
+    """The text of a catalog key, in the given language.
+
+    An unknown language falls back to English and an unknown key falls back
+    to the key itself, so a missing translation shows up as a missing
+    translation and not as a crash in the middle of the interface.
+    """
+    name = str(key or "")
+    entry = CATALOG.get(name)
+    if not entry:
+        return name
+    if lang is None:
+        code = get_language()
+    else:
+        code = _normalize_lang(lang) or DEFAULT_LANGUAGE
+    template = entry.get(code) or entry.get(DEFAULT_LANGUAGE) or ""
+    if not template:
+        return name
+    if not kwargs:
+        return template
+    return _safe_format(template, kwargs)
+
+
+def translate(text: str, lang: str | None = None) -> str:
+    """Translate a WHOLE string, when that string is in the catalog.
+
+    A tool that answers with a fixed sentence cannot ask for a key, so it
+    sends the sentence itself; if that sentence is in the catalog it comes
+    back translated, and if it is not it comes back unchanged.
+    """
+    raw = str(text or "")
+    entry = CATALOG.get(raw)
+    if not entry:
+        return raw
+    if lang is None:
+        code = get_language()
+    else:
+        code = _normalize_lang(lang) or DEFAULT_LANGUAGE
+    return entry.get(code) or entry.get(DEFAULT_LANGUAGE) or raw
+
+
+def catalog_keys() -> list[str]:
+    """Every key of the catalog."""
+    return list(CATALOG.keys())
+
+
+def missing_translations(lang: str) -> list[str]:
+    """The keys that have no text in that language."""
+    code = _normalize_lang(lang) or ""
+    return [
+        key for key, entry in CATALOG.items()
+        if not str(entry.get(code) or "").strip()
+    ]
+
+
+# ── The stored language ──────────────────────────────────────────────────────
+
+def _stored_language() -> str:
+    """The language the user CHOSE, as a code — or "" when they chose none.
+
+    The RAW value, not `config_manager.get_language()`: that one answers
+    "en" when nothing is stored, and a default that looks like a decision
+    is exactly what has to be told apart from one.
+    """
+    try:
+        raw = config_manager.load_api_keys().get("language") or ""
+    except Exception:
+        raw = ""
+    return str(raw).strip().lower()
+
+
+def get_language() -> str:
+    """The language the product speaks, or the default one.
+
+    THE ORDER MATTERS
+        1. What the user CHOSE in the settings. That is a decision.
+        2. The language they were last heard speaking, when nothing has been
+           chosen yet. The owner of this machine speaks Spanish, and a
+           product that greets them in English until somebody opens a
+           settings panel has made the wrong assumption about who it is
+           talking to.
+        3. English, when neither is available.
+    """
+    stored = _stored_language()
+    if stored in _LANGUAGE_CODES:
+        return stored
+    remembered = _remembered_language()
+    if remembered:
+        return remembered
+    return DEFAULT_LANGUAGE
+
+
+# The names the memory records the language under, and the code each one
+# means. The memory stores the ENGLISH name of the language ("Spanish"), so
+# this is the bridge from what the assistant noticed to what the interface
+# and the catalogue speak.
+_LANGUAGE_BY_NAME = {
+    "english": "en",
+    "spanish": "es", "español": "es", "espanol": "es", "castellano": "es",
+    "portuguese": "pt", "português": "pt", "portugues": "pt", "português (Brasil)": "pt",
+    "french": "fr", "français": "fr", "francais": "fr",
+    "chinese": "zh", "mandarin": "zh", "中文": "zh", "简体中文": "zh",
+}
+
+
+def _remembered_language() -> str:
+    """The language this person was last heard speaking, as a code."""
+    try:
+        from memory.memory_manager import load_memory
+        memory = load_memory() or {}
+        entry = (memory.get("identity") or {}).get("language")
+        if isinstance(entry, dict):
+            value = str(entry.get("value") or "").strip().lower()
+        else:
+            value = str(entry or "").strip().lower()
+        return _LANGUAGE_BY_NAME.get(value, "")
+    except Exception:
+        return ""
+
+
+def set_language(code: str) -> bool:
+    """Store the language. True when it changed, False when it did not.
+
+    The comparison is against the STORED value, not against the effective
+    one: choosing the language the person was already speaking is still a
+    choice — it is the difference between "the assistant noticed" and "the
+    user asked for this".
+    """
+    normalized = str(code or "").strip().lower()
+    if normalized not in _LANGUAGE_CODES:
+        return False
+    current = _stored_language()
+    config_manager.save_language(normalized)
+    return normalized != current
+
+
+# ── The region ───────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Region:
+    """Where the user is: a city, its country and, when we know it, where
+    exactly that city is."""
+
+    city: str
+    country: str
+    country_code: str
+    latitude: float
+    longitude: float
+
+
+DEFAULT_REGION = Region("Lima", "Peru", "PE", -12.0464, -77.0428)
+
+REGIONS: tuple[Region, ...] = (
+    Region("Tacna", "Peru", "PE", -18.0146, -70.2536),
+    Region("Lima", "Peru", "PE", -12.0464, -77.0428),
+    Region("La Libertad", "Peru", "PE", -8.1089, -78.9594),
+    Region("Arequipa", "Peru", "PE", -16.4090, -71.5375),
+    Region("La Paz", "Bolivia", "BO", -16.4897, -68.1193),
+    Region("Bogota", "Colombia", "CO", 4.7110, -74.0721),
+    Region("Medellin", "Colombia", "CO", 6.2442, -75.5812),
+    Region("Arica", "Chile", "CL", -18.4783, -70.3126),
+    Region("Santiago", "Chile", "CL", -33.4489, -70.6693),
+    Region("Paris", "France", "FR", 48.8566, 2.3522),
+    Region("Madrid", "Spain", "ES", 40.4168, -3.7038),
+    Region("London", "United Kingdom", "GB", 51.5074, -0.1278),
+    Region("Mexico City", "Mexico", "MX", 19.4326, -99.1332),
+    Region("Buenos Aires", "Argentina", "AR", -34.6037, -58.3816),
+    Region("Sao Paulo", "Brazil", "BR", -23.5505, -46.6333),
+    Region("Lisbon", "Portugal", "PT", 38.7223, -9.1393),
+    Region("Berlin", "Germany", "DE", 52.5200, 13.4050),
+    Region("New York", "United States", "US", 40.7128, -74.0060),
+    Region("Tokyo", "Japan", "JP", 35.6762, 139.6503),
+)
+
+
+def regions() -> list[Region]:
+    """Every region the product knows."""
+    return list(REGIONS)
+
+
+def _fold(text: str) -> str:
+    """A comparable form of a name: no accents, no case, no spaces.
+
+    "Perú", "peru" and "PERU" are the same country to a person typing in
+    a hurry, and the same country to the weather.
+    """
+    decomposed = unicodedata.normalize("NFKD", str(text or ""))
+    without_accents = "".join(
+        ch for ch in decomposed if not unicodedata.combining(ch)
+    )
+    return "".join(ch for ch in without_accents.casefold() if ch.isalnum())
+
+
+def _country_matches(region: Region, folded_country: str) -> bool:
+    """Whether that folded name is this region's country."""
+    if not folded_country:
+        return True
+    if folded_country == _fold(region.country):
+        return True
+    return bool(region.country_code) and folded_country == _fold(region.country_code)
+
+
+def _match_region(city: str, country: str | None) -> Region | None:
+    """The region of that table that answers to that city and country."""
+    city_key = _fold(city)
+    if not city_key:
+        return None
+    country_key = _fold(country) if country else ""
+    for region in REGIONS:
+        if _fold(region.city) != city_key:
+            continue
+        if not _country_matches(region, country_key):
+            continue
+        return region
+    return None
+
+
+def get_region() -> Region:
+    """The region the user chose, or the default one."""
+    try:
+        stored = config_manager.get_region() or {}
+    except Exception:
+        stored = {}
+    city = str(stored.get("city") or "").strip()
+    country = str(stored.get("country") or "").strip()
+    if not city and not country:
+        return DEFAULT_REGION
+    matched = _match_region(city, country or None)
+    if matched is not None:
+        return matched
+    return Region(city=city, country=country, country_code="",
+                  latitude=0.0, longitude=0.0)
+
+
+def set_region(city: str, country: str | None = None) -> Region:
+    """Store the region and return it.
+
+    A city that is not in the table is still accepted: the person may live
+    somewhere the product has never heard of, and refusing their answer
+    would leave the product with a region that is not theirs.
+    """
+    name = str(city or "").strip()
+    country_name = str(country or "").strip()
+    matched = _match_region(name, country_name or None)
+    if matched is not None:
+        region = matched
+    else:
+        region = Region(city=name, country=country_name, country_code="",
+                        latitude=0.0, longitude=0.0)
+    config_manager.save_region(region.city, region.country)
+    return region
+
+
+def region_label(region: Region | None = None) -> str:
+    """The region as it is shown to a person: "Tacna, Peru"."""
+    target = region if region is not None else get_region()
+    city = str(target.city or "").strip()
+    country = str(target.country or "").strip()
+    if city and country:
+        return f"{city}, {country}"
+    return city or country
+
+
+def region_prompt_line() -> str:
+    """One English sentence for the model: the language, and the place.
+
+    It is written for the MODEL, which reads English prompts, so it names
+    the language in its own language and the region in its own label.
+    """
+    language = _language_object(get_language())
+    region = get_region()
+    return (
+        f"The user has chosen {language.name_native} as the interface and "
+        f"conversation language. The user's region is {region_label(region)}: "
+        "use it for local weather, national and regional news."
+    )
+
+
+def language_prompt_line() -> str:
+    """One English sentence for the model: answer in one language only."""
+    language = _language_object(get_language())
+    return (
+        f"The user's region is {region_label()}. Reply entirely in "
+        f"{language.name_native}, in every message, and never mix languages."
+    )

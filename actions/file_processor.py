@@ -810,15 +810,15 @@ from core import outcome
 
 
 def file_processor(parameters: dict, player=None, speak=None) -> str:
-    file_path_str = parameters.get("file_path", "").strip()
+    file_path_str = (parameters.get("file_path") or "").strip()
     if not file_path_str:
-        return "No file path provided."
+        return outcome.failed("file_processor", "no file path was given")
 
     path = Path(file_path_str)
     if not path.exists():
-        return f"File not found: {file_path_str}"
+        return outcome.failed("file_processor", f"the file does not exist: {file_path_str}")
     if not path.is_file():
-        return f"Path is not a file: {file_path_str}"
+        return outcome.failed("file_processor", f"that path is not a file: {file_path_str}")
 
     file_type   = _detect_type(path)
     action      = (parameters.get("action") or "").lower().strip()
@@ -836,9 +836,13 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
             model   = _gemini_client()
             prompt  = f"File: {path.name}\nContent preview:\n{content}\n\nTask: {action or instruction or 'Describe what this file contains and what can be done with it.'}"
             response = model.generate_content(prompt)
-            return response.text.strip()
+            return _report(path, action, response.text.strip())
         except Exception as e:
-            return f"Unknown file type ({path.suffix}). Could not process: {e}"
+            return outcome.failed(
+                "file_processor",
+                f"the file type is not one this machine can read and it could not be read as text: {e}",
+                file=path.name,
+            )
 
     dispatch = {
         "image":   _process_image,
@@ -848,7 +852,7 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
         "csv":     lambda p, a, pm, s: _process_data(p, "csv",   a, pm, s),
         "excel":   lambda p, a, pm, s: _process_data(p, "excel", a, pm, s),
         "json":    _process_json,
-        "xml":     lambda p, a, pm, s: _process_json(p, a, pm, s),  
+        "xml":     lambda p, a, pm, s: _process_json(p, a, pm, s),
         "code":    _process_code,
         "audio":   _process_audio,
         "video":   _process_video,
@@ -858,21 +862,46 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
 
     handler = dispatch.get(file_type)
     if not handler:
-        return f"Unsupported file type: {file_type}"
+        return outcome.failed("file_processor",
+                              f"files of type '{file_type}' are not supported")
 
     try:
         result = handler(path, action, params, speak)
-        # A document's contents are not the user speaking. A PDF, a spreadsheet
-        # or a text file can carry anything its author put there, including a
-        # sentence addressed to whatever reads it — so what comes out of one
-        # goes to the model marked as data. See core/outcome.untrusted().
-        return outcome.untrusted(f"file:{path.suffix.lstrip('.') or 'text'}",
-                                 result) if result else outcome.done(
-            "file_processor", file=path.name, note="nothing to report", verified=True)
+        return _report(path, action, result)
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return f"Processing failed: {e}"
+        return outcome.failed("file_processor", f"the file could not be processed: {e}",
+                              file=path.name)
+
+
+def _report(path: Path, action: str, result: str) -> str:
+    """Say what happened, in the shape the model reads, and keep the payload.
+
+    WHY THE STATUS LINE IS NOT OPTIONAL
+        The dispatcher normalises every action's reply. A reply with no status
+        in it was read as "unverified — NOT confirmed, tell the user you
+        asked and cannot confirm it worked". For a tool that READS a document
+        and PRODUCES a summary that is the opposite of the truth: the summary
+        was written, in eleven seconds, and the model was told it could not be
+        trusted. It called the tool again, got the same answer, called it a
+        third time, and the turn ended with "Tool budget spent" and the user
+        holding a summary nobody had read out loud.
+
+        So a tool whose OUTPUT is the answer states that it produced one, and
+        the payload travels with it. The content still travels as untrusted
+        data: a document's contents are not the user speaking.
+    """
+    if not result:
+        return outcome.done("file_processor", file=path.name,
+                            operation=action or "auto",
+                            note="nothing to report", verified=True)
+    return (
+        outcome.done("file_processor", file=path.name,
+                     operation=action or "auto", verified=True)
+        + "\n"
+        + outcome.untrusted(f"file:{path.suffix.lstrip('.') or 'text'}", result)
+    )
 
 
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────

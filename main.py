@@ -392,6 +392,118 @@ def _render_prompt(template: str, values: dict) -> str:
     return out
 
 
+def _system_status_result(report: dict) -> str:
+    """The machine's numbers, in the shape the model reads.
+
+    WHY NOT `str(report)`
+        It returned a Python repr — single quotes, underscores, `None` — and
+        the model had to rebuild a sentence out of a format no human ever
+        writes. The facts are now named the way they are asked for, the
+        heavy programs are named with their weight, and the facts the machine
+        does not expose are listed as `unavailable` instead of being absent,
+        so the model can say "I could not read the temperature" instead of
+        quietly leaving it out.
+    """
+    from core import outcome
+    report = report if isinstance(report, dict) else {}
+
+    def _entry(item, field, unit=""):
+        try:
+            value = item.get(field)
+        except Exception:
+            return ""
+        if value is None:
+            return ""
+        return f"{item.get('name', '?')} {value}{unit}"
+
+    top_ram = report.get("top_ram_processes") or []
+    top_cpu = report.get("top_cpu_processes") or []
+    facts = {
+        "cpu_percent": report.get("cpu_percent"),
+        "ram_percent": report.get("ram_percent"),
+        "ram_used_gb": report.get("ram_used_gb"),
+        "ram_total_gb": report.get("ram_total_gb"),
+        "temperature_c": report.get("temperature_c"),
+        "gpu_percent": report.get("gpu_percent"),
+        "uptime": report.get("uptime"),
+        "process_count": report.get("process_count"),
+        "wifi_ssid": report.get("wifi_ssid"),
+        "top_ram": "; ".join(_entry(p, "memory_mb", " MB") for p in top_ram) or None,
+        "top_cpu": "; ".join(_entry(p, "cpu_percent", "%") for p in top_cpu) or None,
+        "unavailable": ", ".join(report.get("unavailable") or []) or None,
+        "verified": True,
+    }
+    facts = {key: value for key, value in facts.items() if value is not None}
+    return outcome.done("system_status", **facts)
+
+
+def _news_topic_for_region() -> str:
+    """The news topic for the morning briefing, built from the region.
+
+    WHY IT IS NOT A CONSTANT
+        "top world news today" is a topic that ignores where the person is.
+        The user in Peru got a story about a doping ban in athletics; the
+        country's own news — and the region's — come first, and the world
+        after them. Without a configured region there is nothing local to
+        ask for, so it falls back to the world rather than to a guess.
+    """
+    try:
+        from core.localization import get_region, region_label, DEFAULT_REGION
+        region = get_region()
+        if region is not None and region.city != DEFAULT_REGION.city:
+            return (f"the most important news today in {region.country} "
+                    f"(national news) and in {region.city} (regional and local "
+                    f"news), then the biggest world stories")
+    except Exception:
+        pass
+    return "top world news today"
+
+
+def _reply_language_line() -> str:
+    """The sentence that tells the model which language this installation speaks.
+
+    WHY IT IS DERIVED, NOT WRITTEN IN prompt.txt
+        The user chooses the language in the settings, and the choice must
+        reach the model — otherwise the interface says "Guardar" and the
+        assistant says "Done" in the same conversation. The line is written in
+        English because the prompt is read in English, and it NAMES the
+        language in its own name, because "Spanish" is not "español" to
+        somebody who thinks in Spanish.
+    """
+    try:
+        from core.localization import get_language, LANGUAGES
+        code = str(get_language() or "en").strip().lower()
+        chosen = next((l for l in LANGUAGES if l.code == code), None)
+        native = chosen.name_native if chosen else "English"
+        return (f"The language of this installation is {native}. Speak it in every "
+                f"message, in every reply, whatever language the user writes in.")
+    except Exception:
+        return ("The language of this installation is English. Speak it in every "
+                "message, in every reply, whatever language the user writes in.")
+
+
+def _region_line() -> str:
+    """The sentence that tells the model where the user is.
+
+    The region is what turns "the news" into national and regional news, and
+    "the weather" into the weather of the place the user actually lives in.
+    """
+    try:
+        from core.localization import get_region, region_label, DEFAULT_REGION
+        region = get_region()
+        label = region_label(region)
+        if region is None or region.city == DEFAULT_REGION.city:
+            return ("No region is configured on this machine, so you do not know "
+                    "where the user is. Ask for the city when the answer depends "
+                    "on it, rather than assuming a country.")
+        return (f"The user lives in {label}. Use that place for the weather, for "
+                f"national and regional news, and for anything local: the city's "
+                f"own news, its country, and its region before the world.")
+    except Exception:
+        return ("No region is configured on this machine, so you do not know where "
+                "the user is. Ask for the city when the answer depends on it.")
+
+
 def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
@@ -450,13 +562,37 @@ TOOL_DECLARATIONS = [
     {
         "name": "system_status",
         "description": (
-            "Returns real-time system metrics: CPU usage, RAM, GPU load, CPU temperature, "
-            "uptime, and process count. Use when the user asks about computer performance, "
-            "temperature, memory, or resource usage."
+            "Returns real-time system metrics read from this machine: CPU usage, "
+            "RAM used and free, GPU load, CPU temperature, uptime, process count, "
+            "the three programs using the most RAM, the three using the most CPU, "
+            "and the name of the Wi-Fi network this computer is connected to. "
+            "Use it when the user asks about performance, temperature, memory, "
+            "resource usage, which programs are heavy, or which Wi-Fi they are on. "
+            "A fact the machine does not expose comes back as 'unavailable' with "
+            "the reason — say so plainly instead of guessing a number."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {},
+        }
+    },
+    {
+        "name": "assistant_state",
+        "description": (
+            "Reports your OWN current state, read from the running application: "
+            "whether you are awake or asleep, how long you stay awake without "
+            "hearing the user, whether the microphone is muted, whether "
+            "push-to-talk is on, which language this installation is set to, "
+            "and which region the user lives in. Call this whenever the user "
+            "asks about you — whether you are asleep, why you did not hear "
+            "them, how long you wait before sleeping, what language you speak, "
+            "or where they are. Never guess: this tool is the only source of "
+            "truth about your own body."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {},
+            "required": [],
         }
     },
     {
@@ -937,6 +1073,46 @@ class TeemoLive:
         # to the cheap on-disk model-file check (no Model construction).
         ready = bool(self._wake_detector and self._wake_detector.ready) or wake_is_ready()
         return {"enabled": self._wake_enabled, "awake": self._awake, "ready": ready}
+
+    def _assistant_state_result(self) -> str:
+        """Your own body, read from the running application.
+
+        WHY A TOOL AND NOT A PROMPT
+            The user asked whether the assistant was asleep, and how long it
+            stayed awake without hearing them. The assistant answered that it
+            had no sleep timeout and never slept — while the application log
+            said "Sleeping — no speech for 2 minutes" a moment earlier.
+
+            A prompt cannot carry a fact that changes every minute: the sleep
+            state, the mute, the push-to-talk, the language and the region all
+            move while the conversation is going on. So the fact is read at
+            the moment it is asked for, and the model is told to read it
+            rather than to remember it.
+
+            The answer is FACTS, not a sentence: the model has to speak it in
+            the user's language, and a finished English sentence handed to a
+            model is a sentence that comes back in English.
+        """
+        from core import outcome
+        state = self._wake_state()
+        asleep = bool(state["enabled"] and not state["awake"])
+        facts = {
+            "asleep": asleep,
+            "awake": not asleep,
+            "wake_gating_on": bool(state["enabled"]),
+            "detector_ready": bool(state["ready"]),
+            "mic_muted": bool(getattr(self.ui, "muted", False)),
+            "push_to_talk_on": bool(getattr(self, "_ptt_enabled", False)),
+            "sleep_timeout_seconds": int(self._wake_sleep_timeout),
+            "verified": True,
+        }
+        try:
+            from core.localization import get_language, get_region, region_label
+            facts["language"] = get_language()
+            facts["region"] = region_label(get_region())
+        except Exception:
+            pass
+        return outcome.done("assistant_state", **facts)
 
     def _ensure_wake_detector(self) -> bool:
         """Load the detector once (model loads on first start). Idempotent.
@@ -1654,6 +1830,8 @@ class TeemoLive:
                 has_vision="screen_process" in _names,
                 has_mic=True,
             ),
+            "reply_language": _reply_language_line(),
+            "region": _region_line(),
         })
 
         parts = [time_ctx, identity_ctx]
@@ -1850,7 +2028,10 @@ class TeemoLive:
 
             elif name == "system_status":
                 r = await loop.run_in_executor(None, get_system_status)
-                result = str(r)
+                result = _system_status_result(r)
+
+            elif name == "assistant_state":
+                result = self._assistant_state_result()
 
             elif name == "manage_monitor":
                 action = args.get("action", "").lower().strip()
@@ -2484,13 +2665,36 @@ class TeemoLive:
         name = _val("name")
         time_str = datetime.now().strftime("%H:%M")
 
+        # THE CHOSEN LANGUAGE WINS OVER THE REMEMBERED ONE.
+        #
+        # The language in the settings is what the user picked for this
+        # installation; the one in memory is what the assistant guessed from
+        # past conversations. A guess that was right yesterday is not a
+        # setting, and the greeting is the first thing the user hears.
+        try:
+            from core.localization import get_language, LANGUAGES
+            _code = str(get_language() or "").strip().lower()
+            _chosen = next((l for l in LANGUAGES if l.code == _code), None)
+            if _chosen is not None:
+                lang = _chosen.name_en
+        except Exception:
+            pass
+
         # What the briefing covers is the routine's to say (core/routines): the
         # news and its topic, and anything the user added to it. No options is
         # the briefing as it always was.
         options   = options or {}
         want_news = options.get("news", True) is not False
-        topic     = str(options.get("news_topic") or "").strip() or "top world news today"
+        topic     = str(options.get("news_topic") or "").strip()
         extra     = str(options.get("extra") or "").strip()
+
+        # THE REGION DECIDES THE NEWS.
+        #
+        # "Top world news today" gave a doping ban in athletics to a man in
+        # Peru. The world does not stop mattering, but the country's own news
+        # comes first, then its region, then the world.
+        if not topic:
+            topic = _news_topic_for_region()
 
         # Start fetching news immediately — runs in parallel while phase 1 plays
         loop = asyncio.get_event_loop()

@@ -72,10 +72,12 @@ _FILE_EXTENSIONS = frozenset({
 # says "open WA" and waits; they do not wait for a hard drive scan.
 _SEARCH_BUDGET_S = 2.5
 
-# How deep into a folder tree the search may go. One level of subfolders is
-# enough for "Desktop\\Informes\\report.xlsx" and stops the search from
-# walking a whole user profile.
-_SEARCH_DEPTH = 2
+# How deep into a folder tree the search may go. Three levels is what a
+# OneDrive desktop actually needs: the file the user named was in
+# `OneDrive\Escritorio\nueva carpeta\actas verificadas 28 de julio\`, which is
+# three levels down from the OneDrive root and one level down from the
+# OneDrive desktop. The budget below is what keeps that from being slow.
+_SEARCH_DEPTH = 3
 
 # How many directory entries are read in one folder before moving on.
 _SCAN_LIMIT = 4000
@@ -178,6 +180,112 @@ def _same(a: str, b: str) -> bool:
     return a.casefold() == b.casefold()
 
 
+def _fold(text: str) -> str:
+    """A name written any way at all, compared with any other.
+
+    Accents and case are noise: "Escritorio" is "escritorio", and a folder
+    called "Actas Verificadas" is the folder somebody called "actas verificadas
+    28 de julio" once the date is part of the name they said out loud.
+    """
+    import unicodedata
+    decomposed = unicodedata.normalize("NFKD", str(text or "").casefold())
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).strip()
+
+
+def _segments(text: str) -> list[str]:
+    """The parts of a spoken path: "OneDrive, escritorio, nueva carpeta"."""
+    import re
+    parts = re.split(r"[\\/,:;|]+", str(text or ""))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _search_child(folder: str, name: str, rest: list[str],
+                  deadline: float, depth: int) -> Optional[str]:
+    """A subfolder called `name` somewhere under `folder`, then the rest.
+
+    The direct child is tried first — that is the common case and it is
+    cheap. Only if there is no direct child does the search go one level
+    deeper, which is what makes "actas verificadas" findable when the user
+    names a folder that is two levels down from the desktop.
+    """
+    if time.monotonic() > deadline or depth <= 0:
+        return None
+    wanted = _fold(name)
+    try:
+        with os.scandir(folder) as entries:
+            children = list(entries)
+    except (OSError, PermissionError):
+        return None
+
+    for entry in children:
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            if _fold(entry.name) != wanted:
+                continue
+            if not rest:
+                return entry.path
+            found = _search_child(entry.path, rest[0], rest[1:], deadline, depth)
+            if found:
+                return found
+        except OSError:
+            continue
+
+    for entry in children:
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            found = _search_child(entry.path, name, rest, deadline, depth - 1)
+            if found:
+                return found
+        except OSError:
+            continue
+    return None
+
+
+def _find_folder(segments: list[str], deadline: float) -> Optional[str]:
+    """Walk down from the user's own folders, matching one segment at a time.
+
+    WHY A WALK AND NOT A STRING MATCH
+        The user says "la ruta es OneDrive, escritorio, nueva carpeta, actas
+        verificadas 28 de julio" and then "abre el archivo ELS2022". Joining
+        those into one string and searching the disk for it fails, because the
+        separators a person uses are commas and the folder names do not line
+        up with the search roots. Walking down — root by root, segment by
+        segment — is what the words actually describe.
+    """
+    if not segments:
+        return None
+    for root in search_roots():
+        if time.monotonic() > deadline:
+            return None
+        found = _search_child(root, segments[0], segments[1:], deadline, 3)
+        if found:
+            return found
+    return None
+
+
+def _match_in_folder(folder: str, wanted: str, deadline: float) -> Optional[str]:
+    """The file called `wanted` inside `folder`, by exact name or by stem."""
+    stem, ext = os.path.splitext(wanted)
+    exact: Optional[str] = None
+    by_stem: Optional[str] = None
+    for path in _walk(folder, _SEARCH_DEPTH, max(0.1, deadline - time.monotonic())):
+        name = os.path.basename(path)
+        if ext:
+            if _same(name, wanted):
+                exact = path
+                break
+            if by_stem is None and _fold(os.path.splitext(name)[0]) == _fold(stem):
+                by_stem = path
+        elif _fold(os.path.splitext(name)[0]) == _fold(stem):
+            by_stem = path
+            break
+        if time.monotonic() > deadline:
+            break
+    return exact or by_stem
+
+
 def resolve(text: str) -> Optional[str]:
     """The path a spoken file name refers to, or None.
 
@@ -198,10 +306,23 @@ def resolve(text: str) -> Optional[str]:
         if os.path.isfile(relative):
             return os.path.abspath(relative)
 
-    # 2. The name alone, found in the user's own folders.
+    deadline = time.monotonic() + _SEARCH_BUDGET_S
+
+    # 2. The user gave a FOLDER and a file: "OneDrive, escritorio, nueva
+    #    carpeta" + "ELS2022". The folder is walked down and the file is
+    #    looked for inside it, which is what the words mean.
+    parts = _segments(raw)
+    if len(parts) >= 2:
+        last = parts[-1]
+        folder = _find_folder(parts[:-1], deadline)
+        if folder:
+            found = _match_in_folder(folder, last, deadline)
+            if found:
+                return os.path.abspath(found)
+
+    # 3. The name alone, found in the user's own folders.
     wanted = os.path.basename(raw)
     stem, ext = os.path.splitext(wanted)
-    deadline = time.monotonic() + _SEARCH_BUDGET_S
     exact: list[str] = []
     by_stem: list[str] = []
     for root in search_roots():

@@ -78,6 +78,7 @@ _ROUTINE_CONTROL_ACTIONS = {
     },
 }
 _STANDARD_TOOLS = {
+    "assistant_state",
     "close_camera",
     "manage_monitor",
     "open_app",

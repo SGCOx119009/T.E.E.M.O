@@ -467,7 +467,16 @@ def discover_plugins(plugins_dir: Path, core_tool_names: set[str],
 
     plugins: dict[str, PluginRecord] = {}
     records: list[PluginRecord] = []
-    for rec in list(valid.values()) + list(all_records):
+    # `all_records` ALREADY HOLDS THE VALID ONES.
+    #
+    # This used to walk `valid.values()` and then `all_records` as well, so
+    # every plugin that loaded fine was counted twice — two plugins produced
+    # "2 active, 2 rejected, 4 total", and the activity log told the user
+    # "2 plugin(s) could not be loaded" on every single launch, when nothing
+    # had failed at all. A warning that is always wrong is worse than no
+    # warning: the user learns to ignore the one line that would have been
+    # true.
+    for rec in all_records:
         item = PluginRecord(
             name=rec.name,
             description=rec.description,

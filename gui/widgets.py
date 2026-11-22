@@ -37,6 +37,8 @@ from gui.theme import (
     qcol,
 )
 
+from core.localization import t as _t
+
 from collections import deque
 
 from PyQt6.QtGui import QPolygonF, QTextBlockFormat, QTextCharFormat
@@ -361,27 +363,29 @@ class FileDropZone(QWidget):
             f"border: 1px solid {C.BORDER_B}; }}"
             f"QMenu::item {{ padding: 6px 18px; }}"
             f"QMenu::item:selected {{ background: {C.PRI_GHO}; }}")
-        pick_file = menu.addAction("📄  Choose a file…")
-        pick_dir = menu.addAction("📁  Choose a folder…  (for coding)")
+        pick_file = menu.addAction(_t("file.choose_file"))
+        pick_dir = menu.addAction(_t("file.choose_folder"))
         chosen = menu.exec(QCursor.pos())
         if chosen is pick_dir:
             path = QFileDialog.getExistingDirectory(
-                self, "Select a project folder for T.E.E.M.O.", str(Path.home()))
+                self, _t("file.select_project_folder"), str(Path.home()))
             if path:
                 self._set_file(path)
             return
         if chosen is not pick_file:
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select a file for T.E.E.M.O.", str(Path.home()),
-            "All Files (*.*);;"
-            "Images (*.jpg *.jpeg *.png *.gif *.webp *.bmp *.svg);;"
-            "Documents (*.pdf *.docx *.txt *.md *.pptx);;"
-            "Data (*.csv *.xlsx *.json *.xml);;"
-            "Code (*.py *.js *.ts *.html *.css *.java *.cpp *.go);;"
-            "Audio (*.mp3 *.wav *.ogg *.m4a *.aac *.flac);;"
-            "Video (*.mp4 *.avi *.mov *.mkv *.wmv *.webm);;"
-            "Archives (*.zip *.rar *.tar *.gz *.7z)",
+            self, _t("file.select_file"), str(Path.home()),
+            ";;".join(_t(key) for key in (
+                "file.filter_all",
+                "file.filter_images",
+                "file.filter_documents",
+                "file.filter_data",
+                "file.filter_code",
+                "file.filter_audio",
+                "file.filter_video",
+                "file.filter_archives",
+            )),
         )
         if path:
             self._set_file(path)
@@ -439,13 +443,14 @@ class _DropCanvas(QWidget):
         p.setFont(px_font(11, QFont.Weight.DemiBold, spacing=1.4))
         p.setPen(QPen(qcol(C.TEXT) if hover else qcol(C.TEXT_MED)))
         p.drawText(QRectF(36, 0, W - 44, H), Qt.AlignmentFlag.AlignVCenter,
-                   p.fontMetrics().elidedText("DROP A FILE OR FOLDER  ·  OR CLICK",
+                   p.fontMetrics().elidedText(_t("file.drop_hint"),
                                               Qt.TextElideMode.ElideRight, int(W - 44)))
 
     def _paint_drag_over(self, p, W, H):
         p.setFont(px_font(12, QFont.Weight.DemiBold, spacing=2))
         p.setPen(QPen(qcol(C.PRI)))
-        p.drawText(QRectF(0, 0, W, H), Qt.AlignmentFlag.AlignCenter, "RELEASE TO LOAD")
+        p.drawText(QRectF(0, 0, W, H), Qt.AlignmentFlag.AlignCenter,
+                   _t("file.release_to_load"))
 
     def _paint_file(self, p, W, H):
         path = Path(self._z._current_file)
@@ -455,10 +460,11 @@ class _DropCanvas(QWidget):
             size_str = _fmt_size(path.stat().st_size)
         except OSError:
             size_str = "?"
-        ext_str = path.suffix.upper().lstrip(".") or "FILE"
+        ext_str = path.suffix.upper().lstrip(".") or _t("file.kind_file")
         if cat == "folder":
             n = self._z._folder_files
-            ext_str, size_str = "FOLDER", f"{n}{'+' if n >= 5000 else ''} files"
+            ext_str = _t("file.kind_folder")
+            size_str = _t("file.count_more" if n >= 5000 else "file.count", n=n)
 
         # The emoji face. This product runs on Windows, and Windows is what
         # has the emoji font; the other branch it used to carry could never
@@ -514,7 +520,7 @@ class _CameraPreview(QWidget):
         lay.setSpacing(4)
 
         hdr = QHBoxLayout()
-        title = QLabel("◈  VISUAL INPUT")
+        title = QLabel(_t("hud.visual_input"))
         title.setFont(hud_font(7, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         hdr.addWidget(title)
@@ -692,6 +698,13 @@ class RingGauge(QWidget):
         self._v, self._text = 0.0, "--"
         self.setMinimumSize(70, 74)
 
+    def set_label(self, label: str) -> None:
+        """Put a new word on the gauge's open mouth (the language changed)."""
+        label = str(label or "")
+        if label != self._label:
+            self._label = label
+            self.update()
+
     def set_value(self, pct: float, text: str) -> None:
         v = max(0.0, min(100.0, float(pct)))
         if v == self._v and text == self._text:
@@ -810,6 +823,13 @@ class DataRow(QWidget):
         super().__init__(parent)
         self._key, self._value, self._colour = key, value, colour
         self.setFixedHeight(20)
+
+    def set_label(self, key: str) -> None:
+        """Put a new word in front of the dots (the language changed)."""
+        key = str(key or "")
+        if key != self._key:
+            self._key = key
+            self.update()
 
     def set_value(self, value: str, colour: str | None = None) -> None:
         if value == self._value and colour == self._colour:
@@ -1003,6 +1023,17 @@ class StateChip(QWidget):
     _COLOURS = {"LISTENING": "GREEN", "SPEAKING": "ACC", "THINKING": "ACC2",
                 "PROCESSING": "ACC2", "MUTED": "MUTED_C"}
 
+    # The state token itself is an internal word; what the user reads is the
+    # translated one. A state this table does not know about is shown as it
+    # came, rather than swallowed.
+    _TEXT = {"LISTENING": "hud.state.listening",
+             "SPEAKING": "hud.state.speaking",
+             "THINKING": "hud.state.thinking",
+             "PROCESSING": "hud.state.processing",
+             "MUTED": "hud.state.muted",
+             "IDLE": "hud.state.idle",
+             "INITIALISING": "hud.state.initialising"}
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state = "INITIALISING"
@@ -1013,6 +1044,10 @@ class StateChip(QWidget):
         if state != self._state:
             self._state = state
             self.update()
+
+    def _label(self) -> str:
+        key = self._TEXT.get(self._state)
+        return _t(key) if key else str(self._state)
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -1035,7 +1070,8 @@ class StateChip(QWidget):
         p.setFont(px_font(12, QFont.Weight.DemiBold, spacing=2.6))
         p.setPen(QPen(col))
         p.drawText(QRectF(38, 0, W - 44, H), Qt.AlignmentFlag.AlignVCenter,
-                   p.fontMetrics().elidedText(self._state, Qt.TextElideMode.ElideRight, int(W - 44)))
+                   p.fontMetrics().elidedText(self._label(),
+                                              Qt.TextElideMode.ElideRight, int(W - 44)))
         p.end()
 
 

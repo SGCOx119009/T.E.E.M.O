@@ -731,13 +731,30 @@ def call(contents, tier: str = FAST, config=None,
     if ladder is None:
         ladder = (tier,) + tuple(m for m in _LADDERS[SMART] if m != tier)
 
+    # ── THE ROUTER ──────────────────────────────────────────────────────────
+    # Every call goes through the classifier and its destination is written
+    # down. A TRIVIAL request with a local model configured goes to the local
+    # model FIRST, whatever the side-call setting says: that setting is about
+    # which PROVIDER answers, and the router is about which MACHINE answers.
+    #
+    # The degradation is logged too, because going from local to cloud moves
+    # the data and that has to be visible, not inferred.
+    from core import router as _router
+    _decision = _router.decide(_router.request_text(contents), provider=provider)
+    _router.record(_decision)
+
     # A configured provider joins the ladder — behind Gemini by default, in
     # front of it when the user has asked for that. One config read; on an
     # install with no provider this is an empty tuple and nothing changes.
     rungs = _provider_rungs(tier)
     if rungs:
-        ladder = (rungs + tuple(ladder)) if _provider_first() \
-            else (tuple(ladder) + rungs)
+        _local_first = (_decision.destination == _router.LOCAL
+                        and _router.provider_is_local(
+                            rungs[0][len(PROVIDER_PREFIX):]))
+        if _local_first or _provider_first():
+            ladder = rungs + tuple(ladder)
+        else:
+            ladder = tuple(ladder) + rungs
 
     # A service the caller chose for THIS job — dev_agent's coding model — goes
     # in front of everything, because somebody picked it on purpose. The rest
@@ -773,9 +790,16 @@ def call(contents, tier: str = FAST, config=None,
     cl = None
     tried = usable_rungs(ladder)
     key_refused = False
+    previous = ""
     for model in tried:
         if key_refused and not model.startswith(PROVIDER_PREFIX):
             continue                     # same key, same answer — a provider does not use it
+        # Going from a local model to the cloud moves the data, and that has
+        # to be visible in the log rather than inferred from a delay.
+        if previous.startswith(PROVIDER_PREFIX) and not model.startswith(PROVIDER_PREFIX):
+            print(f"[Router] the local model did not answer — descending to "
+                  f"the cloud ({model})")
+        previous = model
         try:
             if model == LIVE:
                 reply = _live_call(contents, config, timeout_ms, resolved_key)

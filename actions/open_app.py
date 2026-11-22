@@ -257,6 +257,17 @@ def _launch_and_verify(player, spoken: str, launcher_name: str,
         )
         if appeared is not None:
             _log(player, f"T.E.E.M.O.: {appeared.label} is open.")
+            # The model has to be told, not just the screen.
+            #
+            # WHY: the tool answered "started" and the turn ended on that.
+            # The window appeared two seconds later and the fact went to the
+            # activity log, so the person could see "it is open" while the
+            # model — which never saw the confirmation — told them it could
+            # not confirm anything had opened. Two halves of one fact, and
+            # the model only had one of them.
+            _say(player, f"[TOOL_CONFIRMED] {appeared.label} IS open. Say in "
+                         f"one short sentence that it is open, in the user's "
+                         f"language. Do not call any tool.")
             return
 
         if not requested:
@@ -269,12 +280,12 @@ def _launch_and_verify(player, spoken: str, launcher_name: str,
                        f"installed under that name")
 
         _log(player, f"T.E.E.M.O.: {trouble}")
-        _say(player, "Tell the user, in one short sentence in their own "
-                     f"language: {trouble}")
+        _say(player, f"[TOOL_FAILED] Tell the user, in one short sentence in "
+                     f"their own language: {trouble}")
     except Exception as exc:
         print(f"[open_app] {type(exc).__name__}: {exc}")
-        _say(player, "Tell the user, in one short sentence in their own "
-                     f"language: opening {spoken} failed - {exc}")
+        _say(player, "[TOOL_FAILED] Tell the user, in one short sentence in "
+                     f"their own language: opening {spoken} failed - {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,6 +308,9 @@ def _verify_document(player, path: str, assoc, before: set[int]) -> None:
         title = fileopen.wait_for_document(path, timeout=_LAUNCH_TIMEOUT)
         if title:
             _log(player, f"T.E.E.M.O.: {name} is open — {title}")
+            _say(player, f"[TOOL_CONFIRMED] {name} IS open — the window title "
+                         f"is '{title}'. Say in one short sentence that it is "
+                         f"open, in the user's language. Do not call any tool.")
             return
 
         if assoc and assoc.name:
@@ -304,18 +318,22 @@ def _verify_document(player, path: str, assoc, before: set[int]) -> None:
                 assoc.name, before, timeout=2.0)
             if appeared is not None:
                 _log(player, f"T.E.E.M.O.: {name} is open in {appeared.label}.")
+                _say(player, f"[TOOL_CONFIRMED] {name} IS open in "
+                             f"{appeared.label}. Say in one short sentence that "
+                             f"it is open, in the user's language. Do not call "
+                             f"any tool.")
                 return
 
         trouble = (f"{name} was handed to Windows but no window showing it "
                    f"appeared within {int(_LAUNCH_TIMEOUT)} seconds, so it is "
                    f"NOT confirmed open")
         _log(player, f"T.E.E.M.O.: {trouble}")
-        _say(player, "Tell the user, in one short sentence in their own "
-                     f"language: {trouble}")
+        _say(player, f"[TOOL_FAILED] Tell the user, in one short sentence in "
+                     f"their own language: {trouble}")
     except Exception as exc:
         print(f"[open_app] {type(exc).__name__}: {exc}")
-        _say(player, "Tell the user, in one short sentence in their own "
-                     f"language: opening the file failed - {exc}")
+        _say(player, "[TOOL_FAILED] Tell the user, in one short sentence in "
+                     f"their own language: opening the file failed - {exc}")
 
 
 def _open_document(spoken: str, player) -> str:

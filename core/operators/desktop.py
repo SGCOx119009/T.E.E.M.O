@@ -40,6 +40,12 @@ class DesktopOperator(Operator):
         "task_planner",
         "background_tasks",
         "system_status",
+        # The assistant's own body: whether it is asleep, whether the
+        # microphone is muted, the language it speaks and the region the user
+        # lives in. It sits beside system_status because it is the same kind
+        # of question — "what is this machine doing right now" — asked of the
+        # part of the machine that answers.
+        "assistant_state",
         "shutdown_teemo",
         "undo",
     )
