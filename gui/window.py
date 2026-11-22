@@ -4290,20 +4290,32 @@ class MainWindow(QMainWindow):
         signals are blocked while it fills: the app sets the item itself
         after the user picks one, and a signal firing on that would ask for
         another reconnect for a change the user did not make.
+
+        AN EMPTY DROPDOWN SAYS NOTHING.
+        ------------------------------
+        When there are no contexts — the engine has not offered any yet —
+        the selector was left with nothing in it, and a dropdown with
+        nothing in it looks like a control that broke. Now it says that
+        there are no tools yet, and it cannot be opened.
         """
         combo = getattr(self, "_ctx_combo", None)
-        if combo is None or not self.get_tool_contexts:
+        if combo is None:
             return
-        try:
-            contexts = list(self.get_tool_contexts() or [])
-        except Exception:
-            return
-        if not contexts:
-            return
+        contexts: list[str] = []
+        if self.get_tool_contexts:
+            try:
+                contexts = list(self.get_tool_contexts() or [])
+            except Exception:
+                contexts = []
         current = combo.currentText()
         combo.blockSignals(True)
         try:
             combo.clear()
+            if not contexts:
+                combo.addItem(_t("controls.context_none"))
+                combo.setEnabled(False)
+                return
+            combo.setEnabled(True)
             combo.addItems(contexts)
             index = combo.findText(current)
             combo.setCurrentIndex(index if index >= 0 else 0)

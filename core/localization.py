@@ -1645,6 +1645,13 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
               "petit et évite que le modèle saisisse le mauvais.",
         "zh": "给助手的工具。缩小这个范围会让提示更短，模型也更不容易拿错工具。",
     },
+    "controls.context_none": {
+        "en": "No tools yet",
+        "es": "Todavía no hay herramientas",
+        "pt": "Ainda não há ferramentas",
+        "fr": "Pas encore d'outils",
+        "zh": "还没有工具",
+    },
     "controls.ptt_on": {
         "en": "🎚  PUSH-TO-TALK: {chord}",
         "es": "🎚  PULSA PARA HABLAR: {chord}",
