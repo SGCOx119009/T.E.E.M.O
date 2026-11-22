@@ -46,9 +46,9 @@ def window(qt_app, tmp_path_factory):
     """One real MainWindow for the whole module.
 
     One, not one per test: every window brings its own timers, its own
-    tray icon and its own scene canvas, and a dozen of them alive at once
-    is a dozen times the chance of the interpreter tripping over something
-    that has nothing to do with what is being tested.
+    media player and its own scene canvas, and a dozen of them alive at
+    once is a dozen times the chance of the interpreter tripping over
+    something that has nothing to do with what is being tested.
     """
     config_dir = tmp_path_factory.mktemp("config")
     from memory import config_manager as cm
@@ -60,6 +60,15 @@ def window(qt_app, tmp_path_factory):
     from gui.window import MainWindow
     win = MainWindow(str(BASE / "core" / "face_model.obj"))
     yield win
+
+    # THE TEARDOWN, AND IT IS EXACTLY THE ONE test_appearance.py USES.
+    #
+    # The window is closed and its destruction is *scheduled*; the event
+    # loop is deliberately NOT pumped afterwards. Destroying a full window
+    # with its scene, its media player and its floating panel under the
+    # offscreen platform takes the interpreter down with an access
+    # violation about half the time — and the window that is scheduled
+    # for deletion is not destroyed, so nothing is left half-open.
     win._quitting = True
     try:
         win.close()
@@ -115,16 +124,19 @@ def test_the_scrambled_text_keeps_the_start_and_the_end():
 
 
 def test_the_resolving_label_ends_up_being_the_text(qt_app):
+    """The text resolves, one character at a time, until it is the text.
+
+    The timer is driven by hand instead of by an event loop: a test that
+    spins the Qt loop for a second and a half is a test that keeps the
+    whole interface repainting while the rest of the suite is trying to
+    run, and the repainting is not what this test is about.
+    """
     from gui.decode import DecodeLabel
 
-    label = DecodeLabel("T.E.E.M.O.")
+    label = DecodeLabel("")
     label.set_text("HOLA")
-    for _ in range(60):
-        qt_app.processEvents()
-        import time
-        time.sleep(0.02)
-        if label.resolved():
-            break
+    for _ in range(20):
+        label._tick()
     assert label.resolved()
     assert label.text() == "HOLA"
 
@@ -145,7 +157,7 @@ def test_the_ignition_checks_are_real_and_say_so():
     """Every row is a state we know how to report."""
     from gui import boot
 
-    checks = boot.collect_checks()
+    checks = boot.collect_checks(probe_audio=False)
     assert checks, "the ignition has to check something"
     allowed = {boot.OK, boot.FAIL, boot.PENDING}
     for label, state, detail in checks:
@@ -154,14 +166,28 @@ def test_the_ignition_checks_are_real_and_say_so():
         assert detail, f"{label}: una fila sin detalle no dice nada"
 
 
-def test_the_ignition_says_pending_when_it_cannot_check(qt_app):
+def test_the_ignition_says_pending_when_it_cannot_check():
     """A row that was not checked must not be a row that passed."""
     from gui import boot
 
-    checks = boot.collect_checks()
+    checks = boot.collect_checks(probe_audio=False)
     states = {label: state for label, state, _ in checks}
     # The network is never probed at ignition, so it must never be ticked.
     assert states.get("RED") == boot.PENDING
+
+
+def test_the_ignition_can_leave_the_microphone_unchecked():
+    """Looking at the sound card loads PortAudio; it can be left alone.
+
+    A test process that loads a native audio library it is not going to
+    use is a test process with one more way to fall over, and the row
+    says EN ESPERA instead of pretending.
+    """
+    from gui import boot
+
+    checks = boot.collect_checks(probe_audio=False)
+    states = {label: state for label, state, _ in checks}
+    assert states.get("AUDIO") == boot.PENDING
 
 
 def test_the_ignition_goes_away_by_itself(qt_app):
@@ -170,19 +196,25 @@ def test_the_ignition_goes_away_by_itself(qt_app):
     overlay = boot.BootOverlay(brand="T.E.E.M.O.")
     overlay._checks = [("PRUEBA", boot.OK, "bien")]
     overlay.start()
-    assert overlay.isVisible()
+    assert not overlay.isHidden()
     overlay.skip()
-    assert not overlay.isVisible()
+    assert overlay.isHidden()
 
 
 def test_the_ignition_shows_itself_over_the_whole_interface(window):
-    """The ignition has to cover the interface, not sit in a corner of it."""
-    window.show()
+    """The ignition has to cover the interface, not sit in a corner of it.
+
+    The window is NOT shown to prove it. Showing a full window under the
+    offscreen platform and then closing it takes the interpreter down with
+    an access violation about half the time, and the thing being proved
+    here — that the ignition covers the whole interface — is already in
+    the geometry.
+    """
     window._start_boot()
     boot = window._boot
     central = window.centralWidget()
-    assert boot.isVisible()
-    assert boot.geometry() == central.rect()
+    assert not boot.isHidden(), "el arranque no se enseñó"
+    assert boot.geometry() == central.rect(), "el arranque no cubre toda la interfaz"
     boot.skip()
 
 
@@ -265,11 +297,9 @@ def test_the_floating_panel_carries_the_state_and_the_line(window):
     panel.set_state("SPEAKING")
     assert panel.state_text() == "SPEAKING"
     panel.set_line("El viento del sur sopla a 14 km/h.", "NOTICIAS")
-    assert panel.isVisible() is False or True     # showing it is the caller's job
-    panel.hide()
-    panel.show()
-    assert panel.isVisible()
-    panel.hide()
+    # It does not show itself: appearing on its own would be a panel
+    # that pops up over whatever the user is doing.
+    assert panel.isHidden()
 
 
 def test_the_floating_panel_stays_on_the_screen(window):
@@ -288,22 +318,59 @@ def test_the_floating_panel_is_toggled_from_the_window(window):
     panel = window._floating
     panel.hide()
     window._toggle_floating()
-    assert panel.isVisible()
+    assert not panel.isHidden()
     window._toggle_floating()
-    assert not panel.isVisible()
+    assert panel.isHidden()
 
 
 # ── the hand ────────────────────────────────────────────────────────────────
 
-def test_the_pointer_can_be_pressed_and_released():
-    """Pressing and letting go is what turns a pinch into a drag."""
-    from gui.gesture import PointerDriver
+def test_the_pinch_presses_the_pointer_and_releases_it():
+    """A pinch has to press the button and let it go again.
 
-    driver = PointerDriver()
-    if not driver.available():
-        pytest.skip("no hay interfaz de usuario en esta maquina")
-    assert driver.press() is True
-    assert driver.release() is True
+    The real driver is replaced by a spy: pressing the actual mouse
+    button in a test would click on whatever the user has in front of
+    them, which is not something a test is allowed to do.
+    """
+    from gui.gesture import GestureService
+
+    class _Spy:
+        def __init__(self):
+            self.down = 0
+            self.up = 0
+
+        def available(self):
+            return True
+
+        def move(self, x, y):
+            return True
+
+        def press(self):
+            self.down += 1
+            return True
+
+        def release(self):
+            self.up += 1
+            return True
+
+    class _FakeHand:
+        def __init__(self, pinched):
+            self.closeness = 1.0 if pinched else 0.0
+            self.x = 0.5
+            self.y = 0.5
+            self.pinched = pinched
+
+    service = GestureService()
+    spy = _Spy()
+    service._driver = spy
+    service._drive_pointer = True
+
+    service._steer([_FakeHand(pinched=True)])
+    assert spy.down == 1, "el pinzamiento no pulsó"
+    assert spy.up == 0, "el botón subió antes de tiempo"
+
+    service._steer([_FakeHand(pinched=False)])
+    assert spy.up == 1, "al abrir los dedos el botón tiene que subir"
 
 
 def test_the_gesture_service_reports_whether_it_is_driving_the_pointer(window):
@@ -313,6 +380,20 @@ def test_the_gesture_service_reports_whether_it_is_driving_the_pointer(window):
     assert service.drives_pointer is True
     service.set_drives_pointer(False)
     assert service.drives_pointer is False
+
+
+def test_the_pointer_cannot_be_switched_on_while_nobody_is_watching(window):
+    """A switch that says ON while nothing happens is a lie.
+
+    The camera has to be watching the hands before the hand can take the
+    pointer; otherwise the button would promise something that is not
+    happening.
+    """
+    service = window._gesture
+    service.stop()
+    service.set_drives_pointer(False)
+    window._toggle_gesture_pointer()
+    assert service.drives_pointer is False, "el puntero se activó sin cámara"
 
 
 def test_the_hand_draws_itself_on_the_glass(window):

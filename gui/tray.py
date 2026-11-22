@@ -30,9 +30,16 @@ def available() -> bool:
     """Is there a notification area to put an icon in?
 
     Not on every desktop: a headless session has no tray, and asking for
-    one there is a warning on every start.
+    one there is a warning on every start. The offscreen and minimal
+    platforms are counted as headless even when the machine behind them
+    has a shell: those platforms are what a test process and a render
+    farm use, and an icon that nobody can click is not an icon.
     """
     try:
+        from PyQt6.QtGui import QGuiApplication
+        platform = str(QGuiApplication.platformName() or "").lower()
+        if platform in ("offscreen", "minimal", "vnc"):
+            return False
         return bool(QSystemTrayIcon.isSystemTrayAvailable())
     except Exception:
         return False

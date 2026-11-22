@@ -3081,6 +3081,13 @@ class MainWindow(QMainWindow):
         service = getattr(self, "_gesture", None)
         if service is None:
             return
+        if not service.drives_pointer and not service.enabled:
+            # The pointer cannot be driven by hands that nobody is
+            # watching. Letting the switch say "ON" anyway would be a
+            # button that claims something that is not happening.
+            self._log_sig.emit(f"SYS: {_t('controls.gesture_pointer_needs_watch')}")
+            self._refresh_gesture_btn()
+            return
         service.set_drives_pointer(not service.drives_pointer)
         self._refresh_gesture_btn()
 

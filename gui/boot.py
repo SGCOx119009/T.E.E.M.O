@@ -61,11 +61,17 @@ FADE_MS = 420           # how long the overlay takes to go away
 MAX_MS = 5200           # it gives up on itself after this long
 
 
-def collect_checks() -> list[tuple[str, str, str]]:
+def collect_checks(probe_audio: bool = True) -> list[tuple[str, str, str]]:
     """Run the real checks and return them as (label, state, detail).
 
     Nothing here touches the network and nothing here takes long: the
     ignition has to be over before the user gets bored of it.
+
+    `probe_audio` asks the sound card what it has, and that loads
+    PortAudio — a native library. A program that only wanted to look at
+    the microphone does not need it loaded for that, and a test process
+    that loads a native audio library it is not going to use is a test
+    process with one more way to fall over.
     """
     checks: list[tuple[str, str, str]] = []
 
@@ -108,15 +114,18 @@ def collect_checks() -> list[tuple[str, str, str]]:
         checks.append(("PANTALLA", FAIL, type(exc).__name__))
 
     # 4. The microphone.
-    try:
-        import sounddevice as sd
-        inputs = [d for d in sd.query_devices() if d.get("max_input_channels", 0) > 0]
-        if inputs:
-            checks.append(("AUDIO", OK, f"{len(inputs)} entradas"))
-        else:
-            checks.append(("AUDIO", FAIL, "sin micrófono"))
-    except Exception as exc:                                   # noqa: BLE001
-        checks.append(("AUDIO", PENDING, type(exc).__name__))
+    if not probe_audio:
+        checks.append(("AUDIO", PENDING, "no se ha comprobado"))
+    else:
+        try:
+            import sounddevice as sd
+            inputs = [d for d in sd.query_devices() if d.get("max_input_channels", 0) > 0]
+            if inputs:
+                checks.append(("AUDIO", OK, f"{len(inputs)} entradas"))
+            else:
+                checks.append(("AUDIO", FAIL, "sin micrófono"))
+        except Exception as exc:                                   # noqa: BLE001
+            checks.append(("AUDIO", PENDING, type(exc).__name__))
 
     # 5. The camera — the eye of the gesture control.
     try:

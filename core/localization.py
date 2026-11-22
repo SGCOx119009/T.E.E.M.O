@@ -2609,6 +2609,13 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "MAINS : la main bouge le pointeur *",
         "zh": "手势：手来移动指针 *",
     },
+    "controls.gesture_pointer_needs_watch": {
+        "en": "the camera is not watching the hands yet — turn that on first",
+        "es": "la cámara todavía no está mirando las manos — activa eso primero",
+        "pt": "a câmara ainda não está a ver as mãos — ativa isso primeiro",
+        "fr": "la caméra ne regarde pas encore les mains — activez d'abord cela",
+        "zh": "摄像头还没有在看手——先打开那个",
+    },
     "controls.gesture_pointer_tip": {
         "en": "The hand takes the real pointer and the pinch clicks it. "
               "Marked with a star because it should only take the pointer "
