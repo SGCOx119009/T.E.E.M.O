@@ -139,6 +139,8 @@ class MainWindow(QMainWindow):
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
     _review_sig     = pyqtSignal(str, str, object, object)  # document review payload
+    # The user asked to leave. Whoever owns the event loop stops it.
+    quit_requested  = pyqtSignal()
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1145,10 +1147,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Appearance — the three faces of the assistant
     # ------------------------------------------------------------------
-    def apply_appearance(self, mode: str) -> str:
-        """Put the window into a mode: 'dashboard', 'core' or 'tray'."""
+    def apply_appearance(self, mode: str, persist: bool = True) -> str:
+        """Put the window into a mode: 'dashboard', 'core' or 'tray'.
+
+        `persist` says whether the mode is a PREFERENCE or a moment. The
+        three faces are not all preferences: going to the tray because
+        the window was closed is a moment, and writing it down means the
+        next start has no window at all — which is how an assistant ends
+        up running with nothing to click.
+        """
         try:
-            applied = self._appearance.set_mode(mode)
+            applied = self._appearance.set_mode(mode, persist=persist)
         except Exception as exc:                   # noqa: BLE001
             print(f"[window] the appearance could not be changed: {type(exc).__name__}")
             return self._appearance.mode()
@@ -1177,6 +1186,19 @@ class MainWindow(QMainWindow):
 
         The tray icon goes first: an icon left behind after the app has
         gone is a dead icon that has to be cleaned by hand.
+
+        AND THEN THE EVENT LOOP IS TOLD. Closing the window is not
+        enough: when the window was already hidden — which is the case
+        when the exit is asked for from the tray, the assistant being
+        nothing but an icon — the closing does not reach Qt's "the last
+        window is gone", so the loop keeps running and the process stays
+        behind with no window and no icon. Measured: the loop was still
+        alive eight seconds after "Exit".
+
+        The window does not stop the loop itself: it says so, and whoever
+        owns the loop (ui.py) stops it. A window that calls
+        `QApplication.quit()` from inside a test would take the test
+        process with it.
         """
         self._quitting = True
         if getattr(self, "_tray", None) is not None:
@@ -1184,7 +1206,22 @@ class MainWindow(QMainWindow):
                 self._tray.hide()
             except Exception:
                 pass
-        self.close()
+        # The panel that floats over somebody else's window is a window of
+        # its own, and it has to go with the rest.
+        floating = getattr(self, "_floating", None)
+        if floating is not None:
+            try:
+                floating.hide()
+            except Exception:
+                pass
+        try:
+            self.close()
+        except Exception:
+            pass
+        try:
+            self.quit_requested.emit()
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         """Closing the window puts the assistant in the tray.
@@ -1197,13 +1234,28 @@ class MainWindow(QMainWindow):
         The taskbar button disappears with the window, which is the point:
         in the tray there is one place to find the assistant, and it is the
         tray.
+
+        TWO THINGS THAT ARE NOT OBVIOUS.
+
+        One: going to the tray is NOT written down. It is a moment, not a
+        preference. Writing it down meant that the next start had no
+        window at all — no interface, no ignition, nothing to click — and
+        the user had to go looking for the icon to find out why.
+
+        Two: if there is no tray —a machine with no notification area—
+        hiding the window would leave the assistant running with no way of
+        being found. So in that case closing the window means leaving.
         """
         if getattr(self, "_quitting", False):
             event.accept()
             return
         event.ignore()
+        if getattr(self, "_tray", None) is None:
+            # No icon to go to: staying hidden would be a lost program.
+            self.quit_application()
+            return
         try:
-            self.apply_appearance("tray")
+            self.apply_appearance("tray", persist=False)
         except Exception:
             pass
 
@@ -1315,12 +1367,18 @@ class MainWindow(QMainWindow):
         gpu = snap["gpu"]
         if gpu >= 0:
             self._g_gpu.set_value(gpu, f"{gpu:.0f}%")
+        elif str(snap.get("gpu_state") or "") == "pending":
+            # Not read yet, not missing. The GPU counters take seconds, and
+            # a meter that says N/A while it is counting looks broken.
+            self._g_gpu.set_value(0, "…")
         else:
             self._g_gpu.set_value(0, "N/A")
 
         tmp = snap["tmp"]
         if tmp >= 0:
             self._g_tmp.set_value(min(100.0, tmp), f"{tmp:.0f}°")
+        elif str(snap.get("tmp_state") or "") == "pending":
+            self._g_tmp.set_value(0, "…")
         else:
             self._g_tmp.set_value(0, "N/A")
 
@@ -3573,7 +3631,11 @@ class MainWindow(QMainWindow):
         stat() every couple of seconds and nothing at all the rest of the time.
         """
         try:
-            mtime = Path(API_FILE).stat().st_mtime
+            # The file the configuration manager watches — the same one it
+            # writes, so the window never watches a path that is not the
+            # one in use.
+            from memory.config_manager import CONFIG_FILE as _cfg_file
+            mtime = Path(_cfg_file).stat().st_mtime
         except Exception:
             return
         if mtime == getattr(self, "_identity_mtime", None):

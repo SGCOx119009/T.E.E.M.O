@@ -73,7 +73,25 @@ API_FILE   = CONFIG_DIR / "api_keys.json"
 
 
 def _read_full_config() -> dict:
-    """Read api_keys.json config dict. Returns {} on any error."""
+    """The whole configuration, read the one way there is to read it.
+
+    THROUGH `memory/config_manager.py`, and not by opening the file here.
+    The file is written in one place —the configuration manager— and it
+    must be READ in the same place, for one reason: a reader that opens
+    the file by its own path ignores the manager, and the manager is what
+    the tests move to a temporary folder. A reader that ignores it reads
+    the owner's real settings while the test thinks it is reading its
+    own — and the test then passes or fails depending on whether the
+    owner happens to have a key saved.
+
+    Returns {} on any error.
+    """
+    try:
+        from memory.config_manager import load_api_keys
+        data = load_api_keys()
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
     try:
         return json.loads(API_FILE.read_text(encoding="utf-8"))
     except Exception:

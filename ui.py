@@ -22,6 +22,7 @@ import psutil
 # Before any Qt import: Qt's video backend prints signed stream URLs otherwise.
 os.environ.setdefault("QT_LOGGING_RULES", "qt.multimedia.*=false")
 
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
 
 from gui import hud as _gui_hud
@@ -103,6 +104,20 @@ class TeemoUI:
         self._app.setStyle("Fusion")
         self._win = MainWindow(face_path)
         self.root = _RootShim(self._app)
+        # THE LOOP STOPS WHEN THE USER SAYS SO.
+        #
+        # The window says "leave"; the loop is stopped here, because the
+        # loop is ours. Closing the window is not enough on its own: when
+        # the window was already hidden — which is what happens when the
+        # exit is asked for from the tray — the closing never reaches Qt's
+        # "the last window is gone", and the process stays behind with no
+        # window and no icon. Measured: the loop was still alive eight
+        # seconds after "Exit".
+        #
+        # The quit is DEFERRED one turn of the loop on purpose: the exit
+        # usually arrives from a menu, and a menu runs its own little loop
+        # inside ours.
+        self._win.quit_requested.connect(lambda: QTimer.singleShot(0, self._app.quit))
         self._win.show()
         # The face the user chose last time: the whole dashboard, only the
         # core in a corner, or nothing but the icon in the tray.

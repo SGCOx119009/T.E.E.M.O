@@ -132,16 +132,77 @@ def test_the_saved_appearance_is_read_back(window):
 
 # ── closing is not leaving ─────────────────────────────────────────────────
 
+class _FakeTray:
+    """A notification area, for the tests that need one.
+
+    The tests run on the offscreen platform, where there is no system
+    tray, and the window behaves differently without one: a window that
+    hides itself with no icon to go to is a lost program. So the tests
+    that are about the tray put one there.
+    """
+
+    def __init__(self):
+        self.hidden = False
+
+    def hide(self):
+        self.hidden = True
+
+    def show(self):
+        self.hidden = False
+
+    def set_state(self, _state):
+        pass
+
+
 def test_closing_the_window_puts_the_assistant_in_the_tray(window):
+    window._tray = _FakeTray()
     window.apply_appearance("dashboard")
     window.close()
     assert window.appearance_mode() == "tray"
+
+
+def test_closing_the_window_does_not_choose_the_tray_for_the_next_start(window):
+    """Going to the tray is a MOMENT, not a preference.
+
+    Writing it down meant that the next start had no window at all — no
+    interface, no ignition, nothing to click — and the user had to go
+    looking for the icon to find out why. Measured on the owner's
+    machine: the mode was 'tray' and the program came up with nothing.
+    """
+    window._tray = _FakeTray()
+    window.apply_appearance("dashboard")
+    window.close()
+    assert window.appearance_mode() == "tray"
+    assert config_manager.get_appearance_mode() == "dashboard"
+
+
+def test_without_a_tray_closing_the_window_leaves(window):
+    """With no icon to go to, hiding the window would lose the program."""
+    window._tray = None
+    window.apply_appearance("dashboard")
+    window.close()
+    assert window._quitting is True
 
 
 def test_leaving_is_leaving(window):
     window.apply_appearance("dashboard")
     window.quit_application()
     assert window._quitting is True
+
+
+def test_leaving_asks_the_loop_to_stop(window):
+    """The window says 'leave'; whoever owns the loop stops it.
+
+    Closing the window is not enough: when the window was already hidden
+    — which is what happens when the exit is asked for from the tray —
+    the closing never reaches Qt's 'the last window is gone', and the
+    process stays behind with no window and no icon.
+    """
+    asked = []
+    window.quit_requested.connect(lambda: asked.append(True))
+    window.apply_appearance("dashboard")
+    window.quit_application()
+    assert asked == [True]
 
 
 # ── the tray icon ──────────────────────────────────────────────────────────
