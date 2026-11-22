@@ -1425,3 +1425,58 @@ def save_region(city: str, country: str) -> None:
         "city": str(city or "").strip(),
         "country": str(country or "").strip(),
     })
+
+
+# Which player a music request goes to. 'auto' means "Spotify when it is
+# installed on this machine, YouTube otherwise", and it is the default
+# because YouTube needs no account, no client id and no token.
+DEFAULT_MUSIC_SERVICE = "auto"
+
+
+def get_music_service() -> str:
+    """The stored music route: 'auto', 'spotify' or 'youtube'."""
+    value = str(load_api_keys().get("music_service") or "").strip().lower()
+    return value if value in ("auto", "spotify", "youtube") else DEFAULT_MUSIC_SERVICE
+
+
+def save_music_service(service: str) -> None:
+    """Persist the music route."""
+    value = str(service or "").strip().lower()
+    _patch_config(music_service=value if value in ("auto", "spotify", "youtube")
+                  else DEFAULT_MUSIC_SERVICE)
+
+
+# How the assistant shows itself: the whole dashboard, only the core in a
+# corner, or nothing but the icon in the tray. And the corner the core sits
+# in. Both are remembered between runs, because a face that forgets where
+# it was put is a face that has to be placed again every morning.
+DEFAULT_APPEARANCE_MODE = "dashboard"
+DEFAULT_CORE_CORNER = "bottom-right"
+_APPEARANCE_MODES = ("dashboard", "core", "tray")
+_CORE_CORNERS = ("bottom-right", "bottom-left", "top-right", "top-left")
+
+
+def get_appearance_mode() -> str:
+    """The saved appearance: 'dashboard', 'core' or 'tray'."""
+    value = str(load_api_keys().get("appearance_mode") or "").strip().lower()
+    return value if value in _APPEARANCE_MODES else DEFAULT_APPEARANCE_MODE
+
+
+def save_appearance_mode(mode: str) -> None:
+    """Persist the appearance."""
+    value = str(mode or "").strip().lower()
+    _patch_config(appearance_mode=value if value in _APPEARANCE_MODES
+                  else DEFAULT_APPEARANCE_MODE)
+
+
+def get_core_corner() -> str:
+    """The saved corner for the core."""
+    value = str(load_api_keys().get("core_corner") or "").strip().lower()
+    return value if value in _CORE_CORNERS else DEFAULT_CORE_CORNER
+
+
+def save_core_corner(corner: str) -> None:
+    """Persist the corner for the core."""
+    value = str(corner or "").strip().lower()
+    _patch_config(core_corner=value if value in _CORE_CORNERS
+                  else DEFAULT_CORE_CORNER)

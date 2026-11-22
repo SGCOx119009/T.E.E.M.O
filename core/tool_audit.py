@@ -81,6 +81,7 @@ _STANDARD_TOOLS = {
     "assistant_state",
     "close_camera",
     "manage_monitor",
+    "music_player",
     "open_app",
     "recall_memory",
     "system_status",

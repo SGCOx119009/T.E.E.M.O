@@ -33,5 +33,6 @@ class MediaOperator(Operator):
     tools = (
         "video_player",
         "youtube_video",
+        "music_player",
         "spotify_control",
     )
