@@ -519,6 +519,11 @@ class MainWindow(QMainWindow):
         # dragged by the mouse and by the hand.
         self._floating = FloatingPanel()
         self._floating.hide()
+        # The floating panel is a window of its own, so it does not die with
+        # this window. It is destroyed here, in the thread that owns its
+        # timer, instead of being left for the garbage collector to pick up
+        # wherever it happens to be running.
+        self.destroyed.connect(lambda *_: self._destroy_floating())
 
         self._overlay: SetupOverlay | None = None
         self._ready = self._check_config()
@@ -1208,18 +1213,48 @@ class MainWindow(QMainWindow):
                 pass
         # The panel that floats over somebody else's window is a window of
         # its own, and it has to go with the rest.
-        floating = getattr(self, "_floating", None)
-        if floating is not None:
-            try:
-                floating.hide()
-            except Exception:
-                pass
+        self._destroy_floating()
         try:
             self.close()
         except Exception:
             pass
         try:
             self.quit_requested.emit()
+        except Exception:
+            pass
+
+    def _destroy_floating(self) -> None:
+        """The floating panel dies with the window — and it dies in the Qt thread.
+
+        IT IS A WINDOW OF ITS OWN, so it does not die with the window that
+        owns it. It stays alive with nobody pointing at it, and the garbage
+        collector takes it — in whichever thread happens to be running the
+        collector, which is not necessarily the one that owns the timer.
+
+        A widget with a running timer destroyed from another thread cannot kill
+        that timer, so the timer stays in the event loop pointing at an object
+        that is gone: the next event that arrives crashes the program with an
+        access violation.
+
+        That is not a theory. Measured on the owner's machine: the test suite
+        died in the middle of the event loop with exactly that violation, and
+        the same suite with the collector switched off did not. The fix is to
+        destroy the panel here, in the thread that owns it, and to let the
+        event loop do it.
+        """
+        panel = getattr(self, "_floating", None)
+        if panel is None:
+            return
+        try:
+            from PyQt6.QtCore import sip
+
+            if sip.isdeleted(panel):
+                return
+        except Exception:
+            pass
+        try:
+            panel.hide()
+            panel.deleteLater()
         except Exception:
             pass
 
