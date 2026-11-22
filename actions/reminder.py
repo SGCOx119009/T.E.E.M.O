@@ -7,6 +7,11 @@ from pathlib import Path
 
 _CNW: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
 
+# The longest text a reminder may carry. The same limit the sanitiser
+# applies, and it is checked BEFORE anything is written: a text that is
+# too long is refused, not truncated.
+_MAX_MESSAGE = 200
+
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -19,7 +24,7 @@ def _scripts_dir() -> Path:
     return d
 
 
-def _sanitise(text: str, max_len: int = 200) -> str:
+def _sanitise(text: str, max_len: int = _MAX_MESSAGE) -> str:
     return (
         text.replace("\\", "")
             .replace('"', "")
@@ -46,7 +51,14 @@ except Exception:
 
 if not notified:
     try:
-        from win10toast import ToastNotifier
+        # The package that draws the toast on Windows announces itself
+        # with a deprecation warning about pkg_resources, and that
+        # warning is the only thing that was ever seen on the console of
+        # the reminder. The toast is what the owner asked for.
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from win10toast import ToastNotifier
         ToastNotifier().show_toast("T.E.E.M.O. Reminder", message, duration=15, threaded=False)
         notified = True
     except Exception:
@@ -55,7 +67,14 @@ if not notified:
 if not notified:
     try:
         import subprocess
-        subprocess.run(["msg", "*", "/TIME:30", message], check=False)
+        # `msg.exe` is a console program: launched without this flag it
+        # opens a black window on the desktop for a fraction of a second,
+        # and the reminder is not the place for a window to appear.
+        subprocess.run(
+            ["msg", "*", "/TIME:30", message],
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     except Exception:
         pass
 
@@ -73,7 +92,13 @@ import sys, os, pathlib
 {notify_block}
 # Self-delete after firing
 try:
-    pathlib.Path(__file__).unlink(missing_ok=True)
+    _self = pathlib.Path(__file__)
+    _self.unlink(missing_ok=True)
+    # And the launcher that started it, if there was one. Only this
+    # task's own launcher: another reminder may be waiting for it.
+    _launcher = _self.with_name(_self.stem + "_launcher.vbs")
+    if _launcher.exists():
+        _launcher.unlink(missing_ok=True)
 except Exception:
     pass
 """
@@ -85,8 +110,34 @@ def _schedule_windows(target_dt: datetime, task_name: str,
                       script_path: Path, message: str) -> str:
     python_exe = Path(sys.executable)
     pythonw = python_exe.parent / "pythonw.exe"
+
+    # THE RECORDATOR DOES NOT OPEN A CONSOLE.
+    #
+    # There are two ways to run a program without a window of its own:
+    # `pythonw.exe`, which is a copy of python that has no console at all,
+    # and `wscript.exe`, which is a host of scripts that has none either.
+    #
+    # This Python has no `pythonw.exe` next to it — there are installs
+    # that do not — so the task was launched with `python.exe` and every
+    # reminder opened a black window on the desktop, with a warning from
+    # a package that has nothing to do with the reminder in it. That is
+    # the window the owner kept seeing.
+    #
+    # So: `pythonw.exe` when it is there, and a VBScript launcher that
+    # runs python hidden when it is not. The Windows Script Host has been
+    # in the system since Windows 95.
     if pythonw.exists():
-        python_exe = pythonw
+        command = str(pythonw)
+        arguments = f'"{script_path}"'
+    else:
+        launcher_path = _scripts_dir() / f"{task_name}_launcher.vbs"
+        vbs = (
+            'Set sh = CreateObject("WScript.Shell")\r\n'
+            f'sh.Run """{python_exe}"" ""{script_path}""", 0, False\r\n'
+        )
+        launcher_path.write_text(vbs, encoding="utf-8")
+        command = "wscript.exe"
+        arguments = f'"{launcher_path}"'
 
     xml_path = _scripts_dir() / f"{task_name}.xml"
     xml_content = (
@@ -98,8 +149,8 @@ def _schedule_windows(target_dt: datetime, task_name: str,
         '    <Enabled>true</Enabled>\n'
         '  </TimeTrigger></Triggers>\n'
         '  <Actions><Exec>\n'
-        f'    <Command>{python_exe}</Command>\n'
-        f'    <Arguments>"{script_path}"</Arguments>\n'
+        f'    <Command>{command}</Command>\n'
+        f'    <Arguments>{arguments}</Arguments>\n'
         '  </Exec></Actions>\n'
         '  <Settings>\n'
         '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n'
@@ -158,6 +209,24 @@ def reminder(
 
     if target_dt <= datetime.now():
         return "That time has already passed — I can't set a reminder in the past."
+
+    # THE TEXT IS CHECKED BEFORE ANYTHING IS WRITTEN.
+    #
+    #     A text that is too long is refused, not truncated: a reminder that
+    #     says less than it was told is worse than no reminder at all. And it
+    #     is refused BEFORE the script is written and BEFORE the task is
+    #     registered, because a task that is registered and then abandoned
+    #     is a task that fires later and shows a message that nobody asked
+    #     for.
+    #
+    #     It also happened here, and it was not the tests' fault alone: a
+    #     rejected reminder still left a real scheduled task on the machine
+    #     of whoever ran the suite — one per run — and those tasks went on
+    #     firing long after the tests were over. That is where the console
+    #     windows that appeared every now and then came from.
+    if len(message) > _MAX_MESSAGE:
+        return (f"status=failed: the reminder text is too long "
+                f"({len(message)} characters; the maximum is {_MAX_MESSAGE}).")
 
     safe_msg   = _sanitise(message)
     task_name  = f"TEEMOReminder_{target_dt.strftime('%Y%m%d_%H%M%S')}"
