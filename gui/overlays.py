@@ -47,6 +47,13 @@ from core.localization import t as _t
 class SetupOverlay(QWidget):
     done = pyqtSignal(str)
 
+    # The size of the form. It is written down here and nowhere else,
+    # because the window places this overlay by these numbers and a second
+    # copy of them somewhere else is a form that jumps when the window
+    # is resized.
+    _OW = 460
+    _OH = 440
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)

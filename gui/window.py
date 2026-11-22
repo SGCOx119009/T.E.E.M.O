@@ -1222,17 +1222,47 @@ class MainWindow(QMainWindow):
                 overlay.setGeometry(self.hud.rect())
         return super().eventFilter(obj, event)
 
+    def showEvent(self, event):
+        """The window appears: the form's field takes the focus.
+
+        The form is built before the window is shown, and a window that is
+        shown later gives the focus to whatever had it — a scroll area of
+        the panel behind the form, which swallows letters without a sound.
+        So the field is focused again here, when the window really
+        appears.
+        """
+        super().showEvent(event)
+        overlay = getattr(self, "_overlay", None)
+        if overlay is not None and overlay.isVisible():
+            # The form was placed when the central panel still had the size it
+            # had before the window was laid out — measured: it sat 170 px to
+            # the left of the centre. So it is centred again here, when the
+            # window really has its final size.
+            self._centre_setup_overlay()
+            try:
+                overlay._key_input.setFocus(Qt.FocusReason.OtherFocusReason)
+            except Exception:
+                pass
+
+    def _centre_setup_overlay(self):
+        """Puts the setup form in the middle of the panel, by its own size."""
+        overlay = getattr(self, "_overlay", None)
+        if overlay is None:
+            return
+        cw = self.centralWidget()
+        ow, oh = SetupOverlay._OW, SetupOverlay._OH
+        overlay.setGeometry(
+            (cw.width()  - ow) // 2,
+            (cw.height() - oh) // 2,
+            ow, oh,
+        )
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_side_columns()
         cw = self.centralWidget()
         if self._overlay and self._overlay.isVisible():
-            ow, oh = 460, 390
-            self._overlay.setGeometry(
-                (cw.width()  - ow) // 2,
-                (cw.height() - oh) // 2,
-                ow, oh,
-            )
+            self._centre_setup_overlay()
         if self._remote_overlay and self._remote_overlay.isVisible():
             ow, oh = RemoteKeyOverlay._OW, RemoteKeyOverlay._OH
             self._remote_overlay.setGeometry(
@@ -3663,6 +3693,9 @@ class MainWindow(QMainWindow):
         self._log.append_log("SYS: Engine settings saved — reconnecting.")
         if self.on_audio_device_change:
             self.on_audio_device_change()
+        # The engine panel the user has just used is the one overlay that
+        # must not stop the assistant from saying hello.
+        QTimer.singleShot(600, lambda: self._start_boot(ignore=("_providers_overlay",)))
 
     # ── Memory panel ─────────────────────────────────────────────────────────
 
@@ -3834,15 +3867,37 @@ class MainWindow(QMainWindow):
 
     # ── the ignition ────────────────────────────────────────────────────────
 
-    def _start_boot(self) -> None:
+    def _start_boot(self, ignore: tuple = ()) -> None:
         """Put the ignition up.
 
         It does not run in the corner mode: a checklist of subsystems is
         for the moment the assistant comes up in front of you, and in the
         corner there is nothing to come up in front of.
+
+        And it does not run while ANYTHING ELSE is on screen. The
+        ignition covers the whole interface and swallows what is typed
+        into it, so a user who is being asked for a key, or who is
+        choosing an engine, would be typing into a splash screen. The
+        form is the priority; the ignition waits for it.
+
+        `ignore` names the overlays that do not count as "something else
+        is on screen": the engine panel the user has just used is the one
+        thing that should not stop the assistant from saying hello.
         """
         if self._appearance.mode() != "dashboard":
             return
+        for name in ("_overlay", "_providers_overlay", "_remote_overlay",
+                     "_customize_overlay", "_audio_overlay", "_memory_overlay"):
+            if name in ignore:
+                continue
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            try:
+                if widget.isVisible():
+                    return
+            except Exception:
+                continue
         try:
             central = self.centralWidget()
             if central is not None:
@@ -3961,16 +4016,23 @@ class MainWindow(QMainWindow):
 
     def _show_setup(self):
         ov = SetupOverlay(self.centralWidget())
-        cw = self.centralWidget()
-        ow, oh = 460, 440
-        ov.setGeometry(
-            (cw.width()  - ow) // 2,
-            (cw.height() - oh) // 2,
-            ow, oh,
-        )
         ov.done.connect(self._on_setup_done)
-        ov.show()
         self._overlay = ov
+        self._centre_setup_overlay()
+        ov.show()
+        ov.raise_()
+        # THE FIELD GETS THE FOCUS.
+        #
+        # Nobody wants to click a box before they can write in it, and a
+        # form whose field is not focused does not even show the cursor
+        # in it: the user types and the letters go to whatever else had
+        # the focus — a scroll area of the panel behind, which swallows
+        # them without a sound. The field is focused here, when the form
+        # appears, so the first key the user presses is already in it.
+        try:
+            ov._key_input.setFocus(Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
 
     def _on_setup_done(self, key: str):
         # Merged into the settings, never written over them. This used to replace
@@ -3993,6 +4055,12 @@ class MainWindow(QMainWindow):
         if self._overlay:
             self._overlay.hide()
             self._overlay = None
+        # THE IGNITION PLAYS NOW.
+        #
+        # The form was the priority while it was on screen; now that the
+        # assistant is really coming up, this is the moment the ignition
+        # was written for.
+        QTimer.singleShot(500, self._start_boot)
         self._apply_state("LISTENING")
         self._assistant_name = _read_full_config().get("assistant_name", "T.E.E.M.O.") or "T.E.E.M.O."
         self._log.append_log(f"SYS: Initialised. Windows. {self._assistant_name} online.")
