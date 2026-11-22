@@ -115,6 +115,63 @@ class Hand:
 
 # ── the tracker ────────────────────────────────────────────────────────────
 
+# THE ONE TRACKER OF THE PROCESS.
+#
+# The MediaPipe tracker is a native object with threads of its own, and it
+# sits on a shared library. Two trackers in the same process — two windows,
+# two panels, a test and the program — meant that closing one of them took
+# the library out from under the other, and the process died with an access
+# violation instead of a goodbye.
+#
+# So there is ONE tracker, opened the first time it is asked for, and it is
+# NOT closed while the program runs. The operating system reclaims it when
+# the program ends; until then it is the same object for everybody, and
+# closing a window can never pull the ground from under another one.
+#
+# It is also faster: the model is loaded once, not once per window.
+_SHARED_LOCK = threading.Lock()
+_SHARED_LANDMARKER = None
+
+# The timestamps handed to the tracker must rise, always. Two trackers — or
+# two cameras — in the same millisecond would otherwise be told that time
+# stood still, and the tracker would refuse the frame.
+_STAMP_LOCK = threading.Lock()
+_LAST_STAMP = 0
+
+
+def _next_stamp() -> int:
+    """A timestamp that rises, even when the clock does not."""
+    global _LAST_STAMP
+    with _STAMP_LOCK:
+        stamp = int(time.time() * 1000)
+        if stamp <= _LAST_STAMP:
+            stamp = _LAST_STAMP + 1
+        _LAST_STAMP = stamp
+        return stamp
+
+
+def _shared_landmarker(model_path: Path):
+    """The one native tracker of the process, or None."""
+    global _SHARED_LANDMARKER
+    with _SHARED_LOCK:
+        if _SHARED_LANDMARKER is not None:
+            return _SHARED_LANDMARKER
+        from mediapipe.tasks.python import BaseOptions
+        from mediapipe.tasks.python.vision import (
+            HandLandmarker, HandLandmarkerOptions, RunningMode,
+        )
+        options = HandLandmarkerOptions(
+            base_options=BaseOptions(
+                model_asset_path=str(model_path)),
+            running_mode=RunningMode.VIDEO,
+            num_hands=2,
+            min_hand_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        _SHARED_LANDMARKER = HandLandmarker.create_from_options(options)
+        return _SHARED_LANDMARKER
+
+
 class HandTracker:
     """Finds the hands in a frame.
 
@@ -132,20 +189,8 @@ class HandTracker:
 
     def _open(self) -> None:
         try:
-            from mediapipe.tasks.python import BaseOptions
-            from mediapipe.tasks.python.vision import (
-                HandLandmarker, HandLandmarkerOptions, RunningMode,
-            )
             if self.model_path.exists():
-                options = HandLandmarkerOptions(
-                    base_options=BaseOptions(
-                        model_asset_path=str(self.model_path)),
-                    running_mode=RunningMode.VIDEO,
-                    num_hands=2,
-                    min_hand_detection_confidence=0.5,
-                    min_tracking_confidence=0.5,
-                )
-                self._landmarker = HandLandmarker.create_from_options(options)
+                self._landmarker = _shared_landmarker(self.model_path)
                 self.backend = "mediapipe"
                 return
             self.error = f"the hand model is missing: {self.model_path}"
@@ -187,8 +232,13 @@ class HandTracker:
         image = mp.Image(image_format=mp.ImageFormat.SRGB,
                          data=frame_bgr[:, :, ::-1].copy())
         # The new API wants a monotonically rising timestamp.
-        stamp = int(time.time() * 1000)
-        result = self._landmarker.detect_for_video(image, stamp)
+        stamp = _next_stamp()
+        # The tracker is the one of the whole process, so two cameras
+        # cannot be inside it at the same time: it is asked one frame at a
+        # time, and the frame that is left out is the frame nobody was
+        # looking at anyway.
+        with _SHARED_LOCK:
+            result = self._landmarker.detect_for_video(image, stamp)
         hands: list[Hand] = []
         landmarks = getattr(result, "hand_landmarks", None) or []
         handedness = getattr(result, "handedness", None) or []
@@ -275,9 +325,21 @@ class HandTracker:
         return hands
 
     def close(self) -> None:
+        """Release this tracker. Calling it twice is not a mistake.
+
+        The native tracker is NOT closed here: it is the one of the whole
+        process, and closing it would take the library out from under
+        anybody else who is still using it. What is closed is the legacy
+        OpenCV tracker, which belongs to this object alone, and the
+        reference to the shared one, which is dropped so that nobody asks
+        for a tracker that has stopped working.
+        """
+        self._landmarker = None
+        legacy = self._legacy
+        self._legacy = None
         try:
-            if self._landmarker is not None:
-                self._landmarker.close()
+            if legacy is not None:
+                legacy.close()
         except Exception:
             pass
 
@@ -373,6 +435,21 @@ class GestureService(QObject):
         self._drive_pointer = False
         self._last_click = 0.0
         self._pointer_down = False
+        # THE WINDOW IS GOING AWAY.
+        #
+        # The service is a child of the window, so when the window dies the
+        # service dies with it — and the thread that is watching the camera
+        # would be left holding a tracker whose native memory is about to be
+        # freed underneath it. The `destroyed` signal is the last moment at
+        # which the thread can still be stopped in an orderly way.
+        self.destroyed.connect(self._shutdown)
+
+    def _shutdown(self) -> None:
+        """Stop the thread before the tracker is freed."""
+        try:
+            self.stop()
+        except Exception:
+            pass
 
     # -- the switches --------------------------------------------------------
 
@@ -408,8 +485,30 @@ class GestureService(QObject):
         return "watching the camera for hands"
 
     def stop(self) -> str:
+        """Stop watching — and WAIT until the thread is really gone.
+
+        The thread holds a tracker, and the tracker holds native memory
+        that the tracking library frees when the Python object dies. If
+        the window goes away while the thread is still inside
+        `detect_for_video`, that free lands on memory the native code is
+        still using, and the process dies with an access violation instead
+        of a goodbye.
+
+        So the order is fixed and it is not negotiable: the thread is
+        asked to stop, the thread is WAITED for, and only then is the
+        tracker released.
+        """
         self._stop.set()
-        self._thread = None
+        thread = self._thread
+        if thread is not None:
+            if thread.is_alive():
+                thread.join(timeout=5.0)
+            self._thread = None
+        with self._lock:
+            tracker = self._tracker
+            self._tracker = None
+        if tracker is not None:
+            tracker.close()
         return "the camera is no longer being watched"
 
     def toggle(self) -> str:
@@ -426,18 +525,19 @@ class GestureService(QObject):
         tracker = HandTracker()
         with self._lock:
             self._tracker = tracker
-        if not tracker.available():
-            self.state_sig.emit(f"no hand tracker: {tracker.error}")
-            return
-        self.state_sig.emit(f"the hands are tracked with {tracker.backend}")
-
-        cam = cv2.VideoCapture(0)
-        if not cam.isOpened():
-            self.state_sig.emit("the camera could not be opened")
-            return
-        self._enabled = True
-        last_frame = 0
+        cam = None
         try:
+            if not tracker.available():
+                self.state_sig.emit(f"no hand tracker: {tracker.error}")
+                return
+            self.state_sig.emit(f"the hands are tracked with {tracker.backend}")
+
+            cam = cv2.VideoCapture(0)
+            if not cam.isOpened():
+                self.state_sig.emit("the camera could not be opened")
+                return
+            self._enabled = True
+            last_frame = 0
             while not self._stop.is_set():
                 ok, frame = cam.read()
                 if not ok:
@@ -456,8 +556,25 @@ class GestureService(QObject):
         except Exception as exc:                       # noqa: BLE001
             self.state_sig.emit(f"the hand tracking stopped: {type(exc).__name__}")
         finally:
-            cam.release()
+            # THE TRACKER IS ALWAYS CLOSED.
+            #
+            # It used to be closed only at the end of a successful watch,
+            # so a machine with no camera — or with no hand model, or with
+            # no OpenCV — kept the native library loaded and let the
+            # garbage collector free it whenever it pleased. That free
+            # landed on memory the library was still using, and the
+            # process died with an access violation instead of a goodbye.
+            if cam is not None:
+                try:
+                    cam.release()
+                except Exception:
+                    pass
             tracker.close()
+            with self._lock:
+                # The service must forget this tracker: it is closed, and
+                # whoever asks for it next must not find a dead one.
+                if self._tracker is tracker:
+                    self._tracker = None
             self._enabled = False
             # A button left down is a button the user cannot get rid of:
             # if the hand disappeared while it was pinched, the button has
