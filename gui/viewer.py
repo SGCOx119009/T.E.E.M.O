@@ -200,13 +200,19 @@ class CameraWatcher(QObject):
             if index is not None:
                 hub.set_index(index)
             hub.subscribe(self._on_frame)
-            self.state_sig.emit("the camera is open")
+            # A KEY, NOT A SENTENCE.
+            #
+            # The state used to be an English sentence written here, and it
+            # was shown in the panel as it was: "the camera is open", in a
+            # product whose language is Spanish. The sentence now comes
+            # from the catalog, in the language of the user.
+            self.state_sig.emit("viewer.camera_open")
             while not self._stop.is_set():
                 time.sleep(0.05)
                 if hub.error:
                     self.state_sig.emit(hub.error)
         except Exception as exc:                           # noqa: BLE001
-            self.state_sig.emit(f"the camera stopped: {type(exc).__name__}")
+            self.state_sig.emit(f"viewer.camera_stopped:{type(exc).__name__}")
         finally:
             try:
                 from core.camera import unsubscribe as _unsubscribe
@@ -402,9 +408,21 @@ class ViewerPanel(QWidget):
         self._screen.set_caption(text)
 
     def _on_camera_state(self, text: str) -> None:
+        """Say what the camera is doing, in the language of the user.
+
+        A key of the catalog comes back translated; anything else — the
+        words the driver itself uses — is shown as it is, because a
+        technical message that is mistranslated is worse than one that is
+        in English.
+        """
+        raw = str(text or "")
+        key, sep, detail = raw.partition(":")
+        shown = _t(key) if key.startswith("viewer.") else raw
+        if sep and detail.strip():
+            shown = f"{shown} · {detail.strip()}"
         if not self._camera.is_live():
-            self._camera.set_placeholder(text)
-        self._code.setText(text[:28])
+            self._camera.set_placeholder(shown)
+        self._code.setText(shown[:28])
 
     # -- the hands -----------------------------------------------------------
 

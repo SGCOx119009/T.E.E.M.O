@@ -874,6 +874,20 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "La caméra s'ouvre",
         "zh": "摄像头正在打开",
     },
+    "viewer.camera_open": {
+        "en": "The camera is open",
+        "es": "La cámara está abierta",
+        "pt": "A câmera está aberta",
+        "fr": "La caméra est ouverte",
+        "zh": "摄像头已打开",
+    },
+    "viewer.camera_stopped": {
+        "en": "The camera stopped",
+        "es": "La cámara se detuvo",
+        "pt": "A câmera parou",
+        "fr": "La caméra s'est arrêtée",
+        "zh": "摄像头已停止",
+    },
     "viewer.screen": {
         "en": "SCREEN",
         "es": "PANTALLA",
@@ -1464,11 +1478,11 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
 
     # -- the two drawers ----------------------------------------------------
     "controls.fullscreen": {
-        "en": "⛶  FULLSCREEN  [F11]",
-        "es": "⛶  PANTALLA COMPLETA  [F11]",
-        "pt": "⛶  ECRÃ INTEIRO  [F11]",
-        "fr": "⛶  PLEIN ÉCRAN  [F11]",
-        "zh": "⛶  全屏  [F11]",
+        "en": "⛶  FULLSCREEN",
+        "es": "⛶  PANTALLA COMPLETA",
+        "pt": "⛶  ECRÃ INTEIRO",
+        "fr": "⛶  PLEIN ÉCRAN",
+        "zh": "⛶  全屏",
     },
     "controls.remote": {
         "en": "◉  REMOTE CONTROL",
