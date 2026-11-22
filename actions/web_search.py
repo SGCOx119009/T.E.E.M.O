@@ -253,6 +253,36 @@ def _search(query: str) -> str:
         return _format_ddg(query, results)
 
 
+def _region_terms() -> str:
+    """The place the user is in, as it goes into a search."""
+    try:
+        from memory.config_manager import get_region
+        region = get_region() or {}
+    except Exception:
+        return ""
+    city = str(region.get("city") or "").strip()
+    country = str(region.get("country") or "").strip()
+    if city and country:
+        return f"{city} {country}"
+    return city or country
+
+
+def _names_a_place(query: str, place: str) -> bool:
+    """Does the request already name the place, or another one?
+
+    "noticias de Tacna" names it. "noticias del mundo" names another. Either
+    way the search is left alone: the place the user asked about wins over
+    the place they live.
+    """
+    text = str(query or "").casefold()
+    if not text:
+        return False
+    for word in str(place or "").split():
+        if len(word) > 2 and word.casefold() in text:
+            return True
+    return False
+
+
 def _news(query: str) -> str:
     """
     DDG first, Gemini as backup.
@@ -267,7 +297,16 @@ def _news(query: str) -> str:
     DDG news returns in well under a second and gives raw headlines, which is
     exactly what the briefing wants, so it goes first and Gemini is only touched
     when DDG comes back empty.
+
+    AND THE NEWS IS THE NEWS OF THE PLACE THE USER IS IN. "noticias
+    recientes" is not a place: the search answered with the news of the world
+    and the user asked for the news of Peru. The region that is configured goes
+    into the search — unless the request already names a place of its own,
+    which is what happens when the user asks about one.
     """
+    place = _region_terms()
+    if place and not _names_a_place(query, place):
+        query = f"{query} {place}".strip() if query else place
     gemini_query = f"latest news today: {query}" if query else "top world news today"
     ddg_query    = query if query else "world news today"
 
