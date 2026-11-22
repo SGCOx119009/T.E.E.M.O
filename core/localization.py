@@ -177,6 +177,47 @@ CATALOG: dict[str, dict[str, str]] = {
         "fr": "Langue",
         "zh": "语言",
     },
+    # ── Which player a music request goes to ─────────────────────────────────
+    "music.service": {
+        "en": "MUSIC PLAYER",
+        "es": "REPRODUCTOR DE MÚSICA",
+        "pt": "REPRODUTOR DE MÚSICA",
+        "fr": "LECTEUR DE MUSIQUE",
+        "zh": "音乐播放器",
+    },
+    "music.service_auto": {
+        "en": "Automatic",
+        "es": "Automático",
+        "pt": "Automático",
+        "fr": "Automatique",
+        "zh": "自动",
+    },
+    "music.service_spotify": {
+        "en": "Spotify",
+        "es": "Spotify",
+        "pt": "Spotify",
+        "fr": "Spotify",
+        "zh": "Spotify",
+    },
+    "music.service_youtube": {
+        "en": "YouTube",
+        "es": "YouTube",
+        "pt": "YouTube",
+        "fr": "YouTube",
+        "zh": "YouTube",
+    },
+    "music.service_tip": {
+        "en": "Where a song is opened. Automatic uses Spotify when it is "
+              "installed on this computer, and YouTube otherwise.",
+        "es": "Dónde se abre una canción. Automático usa Spotify si está "
+              "instalado en este equipo, y YouTube si no.",
+        "pt": "Onde uma música é aberta. Automático usa o Spotify se ele "
+              "estiver instalado neste computador, e o YouTube caso contrário.",
+        "fr": "Où un morceau est ouvert. Automatique utilise Spotify s'il "
+              "est installé sur cet ordinateur, et YouTube sinon.",
+        "zh": "歌曲在哪里打开。自动：安装了 Spotify 就用 Spotify，"
+              "否则用 YouTube。",
+    },
     "settings.language_help": {
         "en": "The language used in the interface and in every answer.",
         "es": "El idioma de la interfaz y de todas las respuestas.",

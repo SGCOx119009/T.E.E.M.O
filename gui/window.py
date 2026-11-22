@@ -2141,6 +2141,40 @@ class MainWindow(QMainWindow):
         self._corner_combo.currentIndexChanged.connect(self._save_corner)
         lay.addWidget(self._corner_combo)
 
+        # ── WHERE A SONG IS OPENED ───────────────────────────────────────────
+        #
+        # Spotify or YouTube, and the user picks which one. Automatic means
+        # "Spotify when it is really installed here, YouTube otherwise" —
+        # and the tool used to try Spotify first on a machine where Spotify
+        # was not installed at all, which cost half a minute and opened the
+        # wrong player on the way to the right one.
+        self._music_caption = QLabel(_t("music.service"))
+        self._music_caption.setFont(px_font(9))
+        self._music_caption.setStyleSheet(
+            f"color: {C.TEXT_DIM}; background: transparent;")
+        lay.addWidget(self._music_caption)
+
+        self._music_combo = QComboBox()
+        self._music_combo.setFixedHeight(30)
+        self._music_combo.setFont(px_font(11))
+        self._music_combo.addItem(_t("music.service_auto"), "auto")
+        self._music_combo.addItem(_t("music.service_spotify"), "spotify")
+        self._music_combo.addItem(_t("music.service_youtube"), "youtube")
+        self._music_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 4px 7px;
+            }}
+            QComboBox QAbstractItemView {{
+                background: {C.PANEL2}; color: {C.WHITE};
+                selection-background-color: {C.PRI_DIM};
+            }}
+        """)
+        self._music_combo.setToolTip(_t("music.service_tip"))
+        self._music_combo.currentIndexChanged.connect(self._save_music_service)
+        lay.addWidget(self._music_combo)
+        self._load_music_service()
+
         # ── THE HANDS ───────────────────────────────────────────────────────
         #
         # The cursor you steer with: the camera watches, the skeleton of
@@ -3174,6 +3208,41 @@ class MainWindow(QMainWindow):
         if not corner or corner == self._appearance.corner():
             return
         self.set_core_corner(corner)
+
+    def _load_music_service(self):
+        """Show the player that is really in force."""
+        combo = getattr(self, "_music_combo", None)
+        if combo is None:
+            return
+        try:
+            from memory.config_manager import get_music_service
+            current = get_music_service()
+        except Exception:
+            current = "auto"
+        index = combo.findData(current)
+        if index >= 0:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+
+    def _save_music_service(self, *_args):
+        """Where a song is opened from now on."""
+        combo = getattr(self, "_music_combo", None)
+        if combo is None:
+            return
+        service = str(combo.currentData() or "auto")
+        try:
+            from memory.config_manager import save_music_service
+            save_music_service(service)
+        except Exception as exc:
+            self._log.append_log(f"ERR: the music player could not be saved "
+                                 f"({type(exc).__name__})")
+            return
+        try:
+            self._log.append_log(
+                f"SYS: Music player: {_t('music.service_' + service)}.")
+        except Exception:
+            pass
 
     def _refresh_appearance_combo(self):
         """Show the appearance that is actually in force.

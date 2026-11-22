@@ -35,7 +35,13 @@ _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 #     cualquier idioma.
 #   * "action.ok" es un prestamo corto que el espanol, el portugues y el
 #     frances escriben exactamente igual.
-_ANYAS_IGUALES = {"app.name", "action.ok"}
+#   * "music.service_spotify" y "music.service_youtube" son nombres de
+#     marca: se escriben igual en cualquier idioma, y traducirlos seria
+#     inventarse otro producto.
+_ANYAS_IGUALES = {
+    "app.name", "action.ok",
+    "music.service_spotify", "music.service_youtube",
+}
 
 # Las claves que el resto del producto va a pedir. Si una falta, quien la
 # pida recibe la propia clave en pantalla.

@@ -145,9 +145,14 @@ def _spotify_installed() -> bool:
     """Is there a Spotify on this machine to open?
 
     Three cheap checks, in order of cost: a running process, the URI
-    handler in the registry, and the usual install folders. The registry is
-    the honest one - it is what the operating system itself would use to
-    open a spotify: link.
+    handler in the registry, and the PROGRAM ITSELF.
+
+    THE PROGRAM, NOT ITS FOLDER. The folder is not the application: a machine
+    where Spotify was installed and then removed keeps the Spotify folder in
+    APPDATA forever, and asking for the folder said "yes, Spotify is here" on
+    a computer with no Spotify in it. The tool then spent half a minute trying
+    to drive a client that did not exist before falling back to YouTube, and
+    the user saw the wrong player open first every single time.
     """
     try:
         from core import appidentity
@@ -155,21 +160,20 @@ def _spotify_installed() -> bool:
             return True
     except Exception:
         pass
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "spotify"):
-            return True
-    except OSError:
-        pass
+    # The registry handler and the leftover folder BOTH survive an uninstall:
+    # a machine without Spotify in it still answers "yes" to either of them.
+    # Only the program itself proves that Spotify is here.
     candidates = []
     appdata = os.environ.get("APPDATA", "")
     localapp = os.environ.get("LOCALAPPDATA", "")
     if appdata:
-        candidates.append(os.path.join(appdata, "Spotify"))
+        candidates.append(os.path.join(appdata, "Spotify", "Spotify.exe"))
     if localapp:
-        candidates.append(os.path.join(localapp, "Spotify"))
-    candidates.append(os.path.join("C:", os.sep, "Program Files", "Spotify"))
-    return any(os.path.isdir(path) for path in candidates)
+        candidates.append(os.path.join(localapp, "Spotify", "Spotify.exe"))
+    candidates.append(os.path.join("C:", os.sep, "Program Files", "Spotify", "Spotify.exe"))
+    candidates.append(os.path.join("C:", os.sep, "Program Files (x86)", "Spotify",
+                                   "Spotify.exe"))
+    return any(os.path.isfile(path) for path in candidates)
 
 
 def _spotify_track_uri(track: dict) -> str:
@@ -253,6 +257,22 @@ def _spotify_playing(uri: str) -> bool:
         return False
 
 
+def _spotify_launch() -> bool:
+    """Ask Spotify to open itself.
+
+    The client was installed on this machine and was never started: the tool
+    looked for its window, found nothing and gave up, and the song never
+    played. Spotify knows its own URI, so it is asked to open itself — and
+    then the attempt is made again with its window on screen.
+    """
+    try:
+        os.startfile("spotify:")
+        return True
+    except OSError as exc:
+        print(f"[music] Spotify could not be opened ({type(exc).__name__})")
+        return False
+
+
 def _spotify_desktop_play(query: str, artist: str) -> str:
     """Drive the Spotify desktop client through the accessibility tree.
 
@@ -263,10 +283,26 @@ def _spotify_desktop_play(query: str, artist: str) -> str:
     if module is None:
         return ""
     try:
-        return str(module._desktop_play(query, artist) or "")
+        result = str(module._desktop_play(query, artist) or "")
     except Exception as exc:                       # noqa: BLE001
         print(f"[music] Spotify desktop control failed: {type(exc).__name__}")
-        return ""
+        result = ""
+    if result and "status=failed" not in result:
+        return result
+    # THE CLIENT WAS NOT ON SCREEN. It is opened, and the attempt is made
+    # again with its window there.
+    if not _spotify_launch():
+        return result
+    for _ in range(12):
+        time.sleep(1.0)
+        try:
+            again = str(module._desktop_play(query, artist) or "")
+        except Exception:
+            continue
+        if again and "status=failed" not in again:
+            return again
+        result = again or result
+    return result
 
 
 def _spotify_result_fields(result: str) -> dict:
@@ -278,29 +314,88 @@ def _spotify_result_fields(result: str) -> dict:
 
 # ── YouTube ────────────────────────────────────────────────────────────────
 
-def _youtube_resolve(query: str) -> tuple[str, str, str]:
-    """(video id, title, channel) for the first result, or empty strings."""
+def _match_score(title: str, query: str, artist: str) -> int:
+    """How much a video's title looks like the song that was asked for.
+
+    The title is folded the same way the request is, so accents and capital
+    letters do not count against a match.
+    """
+    t = _fold(title)
+    if not t:
+        return 0
+    score = 0
+    q = _fold(query)
+    if q:
+        if t == q:
+            score += 6
+        elif q in t:
+            score += 4
+        elif any(word in t for word in q.split() if len(word) > 2):
+            score += 1
+    a = _fold(artist)
+    if a:
+        if a in t:
+            score += 3
+        elif any(word in t for word in a.split() if len(word) > 2):
+            score += 1
+        else:
+            # The artist was named and the title does not carry them: this is
+            # a DIFFERENT song that happens to share a word with the request.
+            # "Mandarina" by Gian Marco came back as a video about Roblox
+            # that happened to have the word in its title.
+            score = 0
+    return score
+
+
+def _youtube_resolve(query: str, artist: str = "") -> tuple[str, str, str]:
+    """(video id, title, channel) for the result that IS the request.
+
+    THE FIRST RESULT IS NOT THE SONG. Asked for "Mandarina" by Gian Marco,
+    the search answered with a different song entirely, and the tool opened
+    it: the user asked for one song and heard another. So several results are
+    asked for and the one whose title carries the request — the title and,
+    when there is one, the artist — is the one that is opened. A result that
+    carries neither is not opened at all: the search page is, and the answer
+    says the song was not identified.
+    """
     try:
         import yt_dlp
     except Exception:
         return "", "", ""
+    # THE SEARCH IS FLAT. Asking for the full details of every result cost
+    # thirteen seconds per song — measured: 32 s for the first, 13 s and 20 s
+    # for the next ones — and the only thing needed from a result is its
+    # title and its id. The flat search answers in a fraction of that.
     options = {"quiet": True, "no_warnings": True, "skip_download": True,
-               "noplaylist": True}
+               "noplaylist": True, "extract_flat": True}
+    # THE ARTIST GOES INTO THE SEARCH. With the title alone, "Mandarina"
+    # brought a video about Roblox that happened to have the word in it; with
+    # the artist as well, the song comes first.
+    search = f"{query} {artist}".strip() if artist else query
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+            info = ydl.extract_info(f"ytsearch6:{search}", download=False)
     except Exception as exc:                       # noqa: BLE001
         print(f"[music] YouTube lookup failed: {type(exc).__name__}")
         return "", "", ""
-    if not info:
+    entries = []
+    if info:
+        entries = info.get("entries") or []
+    best = None
+    best_score = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        score = _match_score(str(entry.get("title") or ""), query, artist)
+        if score > best_score:
+            best, best_score = entry, score
+    if best is None or best_score < 2:
+        # Nothing that looks like the request: the search page is opened
+        # instead, and the user is told the song was not identified.
         return "", "", ""
-    if info.get("entries"):
-        info = info["entries"][0]
-    if not isinstance(info, dict):
-        return "", "", ""
-    video_id = str(info.get("id") or "")
-    title = str(info.get("title") or "")
-    channel = str(info.get("uploader") or info.get("channel") or "")
+    video_id = str(best.get("id") or "")
+    title = str(best.get("title") or "")
+    channel = str(best.get("uploader") or best.get("channel") or "")
     return video_id, title, channel
 
 
@@ -464,6 +559,27 @@ def _preferred_service(requested: str) -> str:
     return "spotify" if _spotify_installed() else "youtube"
 
 
+def _service_was_chosen(requested: str) -> bool:
+    """Has the user picked a player? Then the other one stays closed.
+
+    There are two ways to pick one, and the second one is the one that was
+    being ignored: the request can name the player, and the CONTROLS panel
+    can hold the choice for good. The choice in CONTROLS is the one the
+    user makes ONCE and expects to be obeyed, and it was being dropped on
+    the floor — so every song opened in Spotify and then in YouTube on top
+    of it, and the user saw the wrong player first every single time with
+    no way to say so.
+    """
+    if str(requested or "").strip().lower() in ("spotify", "youtube"):
+        return True
+    try:
+        from memory import config_manager
+        stored = str(config_manager.get_music_service() or "auto").lower()
+    except Exception:
+        stored = "auto"
+    return stored in ("spotify", "youtube")
+
+
 def _play_spotify(query: str, artist: str) -> tuple[str, bool]:
     """The Spotify route. -> (result, another route may still be tried)
 
@@ -532,10 +648,10 @@ def _play_spotify(query: str, artist: str) -> tuple[str, bool]:
         service="spotify", track=query), True
 
 
-def _play_youtube(query: str) -> str:
+def _play_youtube(query: str, artist: str = "") -> str:
     """The YouTube route: resolve, open in the default browser, make it
     play, and check."""
-    video_id, title, channel = _youtube_resolve(query)
+    video_id, title, channel = _youtube_resolve(query, artist)
     if not video_id:
         if not _open_in_default_browser(
                 _YT_SEARCH.format(query=quote(query, safe=""))):
@@ -655,12 +771,21 @@ def music_player(parameters: dict = None, response=None, player=None,
         result, may_fallback = _play_spotify(cleaned, artist)
         # Spotify is the preferred route, but it is not the only one: a
         # missing client or an unconnected account must not end the request.
-        if may_fallback:
-            fallback = _play_youtube(cleaned)
+        #
+        # UNLESS THE USER ASKED FOR SPOTIFY. Opening another player over the
+        # one they chose is not what they asked for, and it is what made every
+        # song open in Spotify first and then in YouTube: the user saw the
+        # wrong player first every single time and had no way to say so.
+        #
+        # AND THE CHOICE IN CONTROLS COUNTS AS THE USER HAVING ASKED. That is
+        # the whole point of the selector: the user picks a player once, and
+        # the assistant stops asking a different question every time.
+        if may_fallback and not _service_was_chosen(service):
+            fallback = _play_youtube(cleaned, artist)
             if "status=failed" not in fallback:
                 return fallback
         return result
-    return _play_youtube(cleaned)
+    return _play_youtube(cleaned, artist)
 
 
 TOOL = {

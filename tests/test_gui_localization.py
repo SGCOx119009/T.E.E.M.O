@@ -126,10 +126,15 @@ def test_every_catalog_key_has_all_five_languages():
 
 def test_the_non_english_languages_are_not_the_english_string():
     """A catalogue that says the same thing five times is not a translation."""
-    # Two keys are genuinely the same word everywhere: the product's own
-    # name, and "Ok", which is a loan word in Spanish, Portuguese and French
-    # and the standard rendering in a Chinese interface.
-    identical = {"app.name", "action.ok"}
+    # A few keys are genuinely the same word everywhere: the product's own
+    # name, "Ok", which is a loan word in Spanish, Portuguese and French
+    # and the standard rendering in a Chinese interface, and the two names
+    # of the music players, which are brands and are written the same way
+    # in every language.
+    identical = {
+        "app.name", "action.ok",
+        "music.service_spotify", "music.service_youtube",
+    }
     for key in localization.catalog_keys():
         if key in identical:
             continue
