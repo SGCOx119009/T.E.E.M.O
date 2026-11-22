@@ -116,7 +116,8 @@ def collect_checks(probe_audio: bool = True) -> list[tuple[str, str, str]]:
         from memory import config_manager as cm
         cfg = cm.load_api_keys() or {}
         providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
-        has_key = bool(cfg.get("gemini_api_key"))
+        # The key lives in the Credential Locker, not in the settings file.
+        has_key = cm.has_gemini_key()
         local = bool(cfg.get("local_only")) or str(providers.get("mode") or "").lower() == "pipeline"
         if has_key or local:
             checks.append(("NÚCLEO DE IA", OK, "clave en su sitio" if has_key else "motor local"))

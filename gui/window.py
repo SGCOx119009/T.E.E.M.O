@@ -4070,10 +4070,19 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _check_config(self) -> bool:
+        # A key in the Credential Locker counts, even though the settings file
+        # does not hold it — the file is not where the key lives. Reading only
+        # the file asked the user for a key they had already given: the form
+        # appeared on every single start.
+        try:
+            from memory.config_manager import has_gemini_key
+            keyed = has_gemini_key()
+        except Exception:
+            keyed = False
         d = _read_full_config()
         providers = d.get("providers") if isinstance(d.get("providers"), dict) else {}
         # A Gemini key, or a choice to run without one: a local engine needs no key.
-        return bool(d.get("gemini_api_key") or d.get("local_only")
+        return bool(keyed or d.get("local_only")
                     or str(providers.get("mode") or "").lower() == "pipeline")
 
     def _show_setup(self):
@@ -4097,15 +4106,37 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_setup_done(self, key: str):
-        # Merged into the settings, never written over them. This used to replace
-        # the whole file with these two keys, so re-entering a key after an
-        # "API key invalid" error erased every other setting — the wake word, the
-        # local engine, plugin credentials, the assistant's name.
-        from memory.config_manager import update_config
-        fields = {"local_only": not key}
+        # The key goes to the Credential Locker, never to the settings file: a
+        # key in a JSON file next to the program is one backup away from being
+        # exposed, and a key that never reaches the locker is a key the model
+        # never gets.
+        #
+        # Everything else is merged into the settings, never written over them.
+        # This used to replace the whole file with these two keys, so re-entering
+        # a key after an "API key invalid" error erased every other setting — the
+        # wake word, the local engine, plugin credentials, the assistant's name.
+        from memory.config_manager import save_api_keys, update_config
+        key = (key or "").strip()
         if key:
-            fields["gemini_api_key"] = key
-        update_config(**fields)
+            try:
+                save_api_keys(key)
+            except Exception as exc:
+                # Nothing is lost: the form stays on screen with the key still
+                # typed into it, and the user can try again. Swallowing this
+                # and carrying on would leave them with an app that has no key
+                # and no way to know it.
+                try:
+                    self._log.append_log(
+                        f"ERR: Gemini key not saved ({type(exc).__name__}) - "
+                        "type it again"
+                    )
+                except Exception:
+                    pass
+                return
+        else:
+            # Running without Gemini is a choice, not a deletion: a key that may
+            # already be in the locker stays there.
+            update_config(local_only=True)
         try:
             from core import gemini as _gemini
             _gemini.api_key(refresh=True)

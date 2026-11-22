@@ -376,16 +376,30 @@ def _cooling(model: str) -> bool:
 
 
 def api_key(refresh: bool = False) -> str:
-    """The Gemini key from config/api_keys.json. Cached; never raises."""
+    """The Gemini key, from the Credential Locker. Cached; never raises.
+
+    The locker is where the key is kept, so that is where it is read from. The
+    settings file is only a fallback for a key left there by an older version
+    — reading it here was how the engine ended up with no key at all while the
+    credential sat safe in the vault.
+    """
     global _cached_key
     with _key_lock:
         if _cached_key is not None and not refresh:
             return _cached_key
+        new_key = ""
         try:
-            data = json.loads(_KEY_FILE.read_text(encoding="utf-8"))
-            new_key = str(data.get("gemini_api_key") or "")
+            from memory.config_manager import read_gemini_key
+
+            new_key = read_gemini_key()
         except Exception:
             new_key = ""
+        if not new_key:
+            try:
+                data = json.loads(_KEY_FILE.read_text(encoding="utf-8"))
+                new_key = str(data.get("gemini_api_key") or "")
+            except Exception:
+                new_key = ""
         if _cached_key is not None and new_key != _cached_key:
             # What a model answered to the old key says nothing about the new one.
             with _cool_lock:
@@ -393,6 +407,19 @@ def api_key(refresh: bool = False) -> str:
                 _gone.clear()
         _cached_key = new_key
         return _cached_key
+
+
+def invalidate_api_key_cache() -> None:
+    """Forget the cached key, so the next call reads the store again.
+
+    Without this, a key that has just been saved keeps being served from the
+    cache: the store said the new key, and the engine went on using the old
+    one until the program was restarted. The configuration manager calls this
+    the moment a credential is written.
+    """
+    global _cached_key
+    with _key_lock:
+        _cached_key = None
 
 
 def client(timeout_ms: int = DEFAULT_TIMEOUT_MS, key: str = ""):

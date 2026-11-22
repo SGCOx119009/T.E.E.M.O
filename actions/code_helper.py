@@ -22,8 +22,11 @@ from core import gemini
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    # The Credential Locker, not the settings file: the key is not written in
+    # the file any more, so reading the file found nothing where there was
+    # everything.
+    from memory.config_manager import require_gemini_key
+    return require_gemini_key()
 
 
 def _get_gemini(tier: str = gemini.SMART):

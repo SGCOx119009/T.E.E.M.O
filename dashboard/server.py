@@ -119,10 +119,12 @@ def _make_uploads_dir() -> Path:
 UPLOADS_DIR = _make_uploads_dir()
 
 def _get_gemini_key() -> str | None:
+    # The Credential Locker, not the settings file: the key is not
+    # written in the file any more.
     try:
-        import json as _json
-        with open(BASE_DIR / "config" / "api_keys.json", "r", encoding="utf-8") as f:
-            return _json.load(f).get("gemini_api_key")
+        from memory.config_manager import read_gemini_key
+        key = read_gemini_key()
+        return key or None
     except Exception:
         return None
 

@@ -52,7 +52,13 @@ def _get_os() -> str:
 
 
 def _get_api_key() -> str:
-    return _load_config().get("gemini_api_key", "")
+    # The Credential Locker, not the settings file: the key is not
+    # written in the file any more.
+    try:
+        from memory.config_manager import read_gemini_key
+        return read_gemini_key()
+    except Exception:
+        return _load_config().get("gemini_api_key", "")
 
 _SAFE_SCREENSHOT_ROOTS = (
     Path.home(),

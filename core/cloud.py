@@ -2535,13 +2535,27 @@ class Runtime:
 
     def apply_sync(self, body: dict) -> dict:
         from core import gemini
-        from memory.config_manager import _patch_config, get_plugin_config, save_plugin_config
+        from memory.config_manager import (
+            _patch_config,
+            get_plugin_config,
+            save_api_keys,
+            save_plugin_config,
+        )
 
         s = body.get("settings") or {}
-        patch = {k: str(s[k]).strip() for k in ("assistant_name", "user_name", "gemini_api_key")
+        patch = {k: str(s[k]).strip() for k in ("assistant_name", "user_name")
                  if str(s.get(k) or "").strip()}
         if patch:
             _patch_config(**patch)
+        # The key goes to the Credential Locker. Writing it into the settings
+        # file would put a secret in plain text on disk, on a machine that
+        # could be anywhere but the user's desk.
+        remote_key = str(s.get("gemini_api_key") or "").strip()
+        if remote_key:
+            try:
+                save_api_keys(remote_key)
+            except Exception as exc:
+                return {"ok": False, "error": f"credential not stored ({type(exc).__name__})"}
             gemini.api_key(refresh=True)
         if s.get("tz_offset_min") is not None:
             self.set_tz(s["tz_offset_min"])

@@ -505,18 +505,22 @@ def _region_line() -> str:
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    # The Credential Locker, not the settings file: the key is not written in
+    # the file any more, so reading the file found nothing where there was
+    # everything.
+    from memory.config_manager import require_gemini_key
+    return require_gemini_key()
 
 
 def _gemini_usable() -> bool:
     """A Gemini key is stored, and the user has not chosen to run without Gemini."""
     try:
-        from memory.config_manager import load_api_keys
+        from memory.config_manager import has_gemini_key, load_api_keys
         cfg = load_api_keys()
+        keyed = has_gemini_key()
     except Exception:
         return False
-    return bool(str(cfg.get("gemini_api_key") or "").strip()) and not cfg.get("local_only")
+    return bool(keyed) and not cfg.get("local_only")
 
 
 def _load_system_prompt() -> str:

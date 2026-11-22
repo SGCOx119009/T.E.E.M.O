@@ -327,6 +327,23 @@ def save_api_keys(gemini_api_key: str) -> None:
         data = _read_api_config_for_update()
         previous = _read_secure_key()
         _store_secure_key(key)
+        # A write that was not read back is not a write. The locker has to
+        # CONFIRM the key before the caller is told it is saved — otherwise a
+        # store that quietly drops it would leave the user believing the
+        # credential is safe when it is gone.
+        try:
+            stored = _read_secure_key()
+        except Exception:
+            stored = None
+        if stored != key:
+            try:
+                _restore_secure_secret(_KEYRING_ACCOUNT, previous)
+            except Exception:
+                pass
+            raise RuntimeError(
+                "The secure credential store did not keep the key; it was not "
+                "saved."
+            )
         data.pop("gemini_api_key", None)
         if key:
             data.pop("local_only", None)  # a key given is a choice to use Gemini again
@@ -394,6 +411,22 @@ def get_gemini_key() -> str | None:
             return None
 
         _store_secure_key(legacy_key)
+        # The plaintext copy is only removed once the locker has PROVEN that it
+        # kept the key. A store that accepts a write and loses it would
+        # otherwise take the only copy of the user's credential with it, and a
+        # credential nobody can read is a credential nobody has.
+        try:
+            stored = _read_secure_key()
+        except Exception as exc:
+            raise RuntimeError(
+                "The secure credential store could not be verified; the "
+                "configuration file still holds the key."
+            ) from exc
+        if stored != legacy_key:
+            raise RuntimeError(
+                "The secure credential store did not keep the key; the "
+                "configuration file still holds it."
+            )
         data.pop("gemini_api_key", None)
         try:
             _write_api_config(data)
@@ -430,9 +463,51 @@ def delete_gemini_key() -> bool:
         return removed
 
 
+def read_gemini_key() -> str:
+    """The Gemini key, from the Credential Locker.
+
+    The locker is where the key lives. A copy left in the configuration file
+    by an older version is still read, but only as a fallback — and reading it
+    here never rewrites the file, so no caller can lose a key by merely
+    looking for one.
+
+    It never raises. A caller that only needs to know whether there IS a key
+    must not die because the locker is unavailable.
+    """
+    try:
+        secure = _read_secure_key()
+    except Exception:
+        secure = None
+    if isinstance(secure, str) and secure.strip():
+        return secure.strip()
+    try:
+        legacy = load_api_keys().get("gemini_api_key")
+    except Exception:
+        return ""
+    return legacy.strip() if isinstance(legacy, str) else ""
+
+
+def has_gemini_key() -> bool:
+    """Whether a Gemini key is available, wherever it is kept."""
+    return bool(read_gemini_key())
+
+
+def require_gemini_key() -> str:
+    """The Gemini key, or a KeyError.
+
+    The contract every private reader of the key has always had: no key is an
+    error, not an empty string to be passed on to a model that would reject it.
+    """
+    key = read_gemini_key()
+    if not key:
+        raise KeyError("gemini_api_key")
+    return key
+
+
 def is_configured() -> bool:
     key = get_gemini_key()
     return bool(key and len(key) > 15)
+
 
 
 def get_assistant_name() -> str:
