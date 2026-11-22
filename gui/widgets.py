@@ -22,8 +22,8 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QCursor, QDragEnterEvent, QDropEvent, QFont,
-    QFontDatabase, QKeySequence, QLinearGradient, QPainter, QPainterPath,
-    QPen, QPixmap, QRadialGradient, QShortcut, QTransform,
+    QFontDatabase, QFontMetrics, QKeySequence, QLinearGradient, QPainter,
+    QPainterPath, QPen, QPixmap, QRadialGradient, QShortcut, QTransform,
 )
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
@@ -676,6 +676,111 @@ class SegmentedRail(QWidget):
         return self._keys[index] if 0 <= index < len(self._keys) else ""
 
 
+class GroupRail(QWidget):
+    """A column of names, one of them lit: the index of the controls drawer.
+
+    WHY IT STANDS UP
+    -----------------
+    The rail used to lie down: seven names in a row across three hundred
+    pixels. Seven names need about five hundred and forty, so Qt — which
+    would rather clip than overflow — gave each one thirty-six pixels and
+    every name came out cut in half: "IDIOMA" was read as "I]OM",
+    "HERRAMIENTAS" as "4MIE". The index was there, and it was unreadable.
+
+    A column can be as tall as it needs to be. Every name is written whole,
+    the lit one says which group is open, and the column reads top to bottom
+    the way a list of settings does.
+
+    It is drawn with the accent edge on the left of the lit name, because a
+    column of words with no mark on the active one is a list, not an index.
+    """
+
+    changed = pyqtSignal(str)
+
+    _ROW_H = 26
+
+    def __init__(self, items=None, parent=None):
+        super().__init__(parent)
+        self._keys: list[str] = []
+        self._labels: list[str] = []
+        self._buttons: list[QPushButton] = []
+        self._current = ""
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        lay.addStretch(1)
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {C.TEXT_DIM};
+                border: none;
+                border-left: 2px solid {C.BORDER};
+                padding: 3px 8px;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                color: {C.WHITE};
+                background: {C.PANEL2};
+                border-left: 2px solid {C.BORDER_B};
+            }}
+            QPushButton:checked {{
+                color: {C.PRI};
+                background: {C.PRI_GHO};
+                border-left: 2px solid {C.PRI};
+            }}
+        """)
+        for key, label in (items or []):
+            self.add_group(key, label)
+
+    def add_group(self, key: str, label: str) -> None:
+        """Append one name to the column."""
+        btn = QPushButton(str(label))
+        btn.setCheckable(True)
+        btn.setFont(px_font(9.5, QFont.Weight.DemiBold, spacing=1.0))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setFixedHeight(self._ROW_H)
+        btn.setToolTip(str(label))
+        btn.clicked.connect(lambda _=False, k=str(key): self.set_current(k, emit=True))
+        self._buttons.append(btn)
+        self._keys.append(str(key))
+        self._labels.append(str(label))
+        self.layout().insertWidget(self.layout().count() - 1, btn)
+        self._fit_width()
+        if not self._current:
+            self.set_current(str(key))
+
+    def _fit_width(self) -> None:
+        """The column is exactly as wide as the longest name it carries."""
+        widest = 0
+        for btn in self._buttons:
+            widest = max(widest, QFontMetrics(btn.font()).horizontalAdvance(btn.text()))
+        # 2 px of accent, 8 px of padding on the left and 8 on the right.
+        self.setFixedWidth(widest + 22)
+
+    def set_current(self, key: str, emit: bool = False) -> None:
+        """Light one name and put the others out."""
+        key = str(key)
+        if key not in self._keys:
+            return
+        self._current = key
+        for btn, k in zip(self._buttons, self._keys):
+            btn.setChecked(k == key)
+        if emit:
+            self.changed.emit(key)
+
+    @property
+    def current(self) -> str:
+        return self._current
+
+    def key_at(self, index: int) -> str:
+        return self._keys[index] if 0 <= index < len(self._keys) else ""
+
+    def labels(self) -> list[str]:
+        """Every name in the column, in order."""
+        return list(self._labels)
+
+
 class ObservationCanvas(QWidget):
     """What the assistant is looking at, drawn.
 
@@ -686,7 +791,10 @@ class ObservationCanvas(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(120)
+        # A hundred pixels is enough for a picture that can be seen and
+        # small enough that the panel it lives in fits under the head
+        # without pushing the last row of readings out of the panel.
+        self.setMinimumHeight(100)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
         self._pix: QPixmap | None = None
@@ -823,6 +931,14 @@ class GestureReadout(QWidget):
         rows = [(str(a), str(b), str(c)) for a, b, c in (rows or [])]
         if rows != self._rows:
             self._rows = rows
+            # THE PANEL IS AS TALL AS ITS ROWS.
+            #
+            # The rows are painted, not laid out, so the widget had a fixed
+            # height of fifty-eight pixels and the third row was painted
+            # below its own edge — the panel was cut in half, and the half
+            # that went missing was the one that says what the hands are
+            # doing. The height follows the rows now.
+            self.setMinimumHeight(max(58, 24 + 18 * len(rows)))
             self.update()
 
     def paintEvent(self, _):

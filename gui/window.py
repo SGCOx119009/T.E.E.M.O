@@ -112,7 +112,7 @@ from PyQt6.QtWidgets import QGridLayout
 
 from gui.style import DISPLAY_CSS, MONO_CSS, btn_css, hud_font, px_font, scroll_css
 from gui.widgets import (ArcLogo, CommandFrame, CountdownBar, DataRow, GestureReadout,
-                         HeaderBar, HoloPanel, IconButton, ObservationCanvas,
+                         GroupRail, HeaderBar, HoloPanel, IconButton, ObservationCanvas,
                          PanelText, RingGauge, RoutineRow, SegmentedRail, Sparkline,
                          StateChip, StatusStrip, TaskRow)
 
@@ -503,6 +503,9 @@ class MainWindow(QMainWindow):
         # that could be mistaken for a copy of each other.
         self._ctrl_drawer = self._build_controls_drawer()
         self._quick_drawer = self._ctrl_drawer
+        # Whether the drawer is standing in the room under the head or
+        # hanging from the button that opened it.
+        self._ctrl_in_zone = False
         self._warm_wake_state()
         self._update_autostart_btn(self._check_autostart())
         from memory.config_manager import get_brief_enabled as _gbe
@@ -1878,10 +1881,19 @@ class MainWindow(QMainWindow):
     def _build_quick_access(self) -> QWidget:
         """The switches that are used every day, in the column the eye goes to.
 
-        The controls drawer holds forty things, and the eight that are
+        The controls drawer holds forty things, and the ten that are
         touched every day were buried in it behind a group of five other
         groups. They are here now, one press away, and the drawer keeps
         the rest.
+
+        THE BLOCK IS FIVE BY TWO
+        ------------------------
+        It used to be two by five, and the column was not tall enough for
+        it: the panel wanted two hundred and forty-one pixels and had
+        a hundred and ninety-two, so the last row of switches hung half
+        outside the panel and the two bottom ones could not be pressed.
+        Five across and two down fits the column whole, and a block of
+        small squares in the corner of the eye reads like a keypad.
         """
         panel = HoloPanel(_t("panel.quick"), "")
         grid = QWidget()
@@ -1908,10 +1920,11 @@ class MainWindow(QMainWindow):
             ("sliders", _t("window.controls_drawer_tip"), self._open_controls),
             ("gear", _t("window.setup_drawer_tip"), self._open_tools),
         )
+        _COLS = 5
         for _i, (_kind, _tip, _slot) in enumerate(_buttons):
-            gl.addWidget(_icon(_kind, _tip, _slot), _i // 2, _i % 2)
-        gl.setColumnStretch(0, 1)
-        gl.setColumnStretch(1, 1)
+            gl.addWidget(_icon(_kind, _tip, _slot), _i // _COLS, _i % _COLS)
+        for _c in range(_COLS):
+            gl.setColumnStretch(_c, 1)
         panel.body.addWidget(grid)
         self._quick_panel = panel
         return panel
@@ -2212,6 +2225,14 @@ class MainWindow(QMainWindow):
 
     _GROUPS = ("voice", "language", "look", "hand", "session", "system", "tools")
 
+    # HOW WIDE THE DRAWER IS.
+    #
+    # The column of names needs about a hundred pixels and the page needs
+    # the rest: the widest group of switches asks for three hundred and
+    # three, so the drawer is four hundred and fifty. Wide enough for the
+    # longest sentence a control has to carry, and never wider than that.
+    _DRAWER_W = 450
+
     def _build_controls_drawer(self) -> QWidget:
         """The switches, in groups. One drawer, two doors."""
         self._BTN_PRI, self._BTN_DIM = btn_css("primary"), btn_css("dim")
@@ -2222,8 +2243,14 @@ class MainWindow(QMainWindow):
         lay = w.body
         lay.setSpacing(6)
 
-        # THE RAIL.
-        self._group_rail = SegmentedRail([
+        # THE RAIL, STANDING UP.
+        #
+        # It used to lie down: seven names in a row, and seven names do not
+        # fit in three hundred pixels. Every one of them came out cut in
+        # half — "IDIOMA" read as "I]OM", "HERRAMIENTAS" as "4MIE" — so the
+        # index of the drawer was unreadable. A column has the height it
+        # needs, and every name is written whole.
+        self._group_rail = GroupRail([
             ("voice", _t("group.voice")),
             ("language", _t("group.language")),
             ("look", _t("group.look")),
@@ -2233,7 +2260,6 @@ class MainWindow(QMainWindow):
             ("tools", _t("group.tools")),
         ])
         self._group_rail.changed.connect(self._select_group)
-        lay.addWidget(self._group_rail)
 
         self._group_stack = QStackedWidget()
         self._group_stack.setStyleSheet("background: transparent;")
@@ -2248,7 +2274,43 @@ class MainWindow(QMainWindow):
             self._group_pages[_key] = _page
             self._group_layouts[_key] = _pl
             self._group_stack.addWidget(_page)
-        lay.addWidget(self._group_stack, stretch=1)
+
+        # THE PAGE SCROLLS.
+        #
+        # The groups are not the same height, and the drawer is not as tall
+        # as the tallest one: the voice group has more switches than the
+        # language group has lines. A list that does not fit is a list that
+        # is cut in half, and the half that is missing is the half nobody
+        # complained about — which is how a setting goes missing for ever.
+        # So the page scrolls instead of hiding.
+        self._group_scroll = QScrollArea()
+        self._group_scroll.setWidget(self._group_stack)
+        self._group_scroll.setWidgetResizable(True)
+        self._group_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._group_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # THE BACKGROUND OF THE PAGE IS THE BACKGROUND OF THE DRAWER.
+        #
+        # The viewport of a scroll area that has no sheet of its own keeps
+        # the grey of the system palette, and it shows between the controls
+        # like a stripe of dust across the panel. The sheet has to name the
+        # widget and the viewport: a bare declaration is not a rule, and a
+        # rule that does not parse leaves the grey exactly where it was.
+        self._group_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }\n"
+            "QScrollArea > QWidget > QWidget { background: transparent; }\n"
+            + scroll_css())
+        self._group_scroll.viewport().setStyleSheet(
+            "background: transparent;")
+
+        # The column on the left, the page on the right: the drawer reads
+        # the way a settings dialog reads.
+        _split = QHBoxLayout()
+        _split.setContentsMargins(0, 0, 0, 0)
+        _split.setSpacing(8)
+        _split.addWidget(self._group_rail)
+        _split.addWidget(self._group_scroll, stretch=1)
+        lay.addLayout(_split, stretch=1)
 
         def _row(layout, button, style=None):
             button.setFixedHeight(30)
@@ -2469,6 +2531,7 @@ class MainWindow(QMainWindow):
         self._maximize_btn.clicked.connect(self._maximize_window)
         self._fullscreen_btn = _row(look, QPushButton(_t("controls.fullscreen")),
                                     self._BTN_DIM)
+        self._fullscreen_btn.setToolTip(_t("window.fullscreen_tip"))
         self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
         self._restore_btn = _row(look, QPushButton(_t("window.restore")),
                                  self._BTN_DIM)
@@ -2699,27 +2762,83 @@ class MainWindow(QMainWindow):
             self._ctrl_btn.setChecked(False)
 
     def _place_drawer(self, drawer, left: int):
-        # Wide enough for the rail of groups and for a sentence of help
-        # underneath it.
-        _W = 300
-        drawer.setFixedWidth(_W)
+        # Wide enough for the column of names and for a sentence of help
+        # underneath them.
+        drawer.setFixedWidth(self._DRAWER_W)
         drawer.adjustSize()
         top = self._header.height() + 2 if hasattr(self, "_header") else 60
-        drawer.setGeometry(left, top, _W, drawer.sizeHint().height())
+        drawer.setGeometry(left, top, self._DRAWER_W, drawer.sizeHint().height())
 
     def _position_quick_drawer(self):
-        if hasattr(self, "_quick_drawer"):
-            self._place_drawer(self._quick_drawer, 12)
+        # There is only ONE drawer. The two buttons of the header are two
+        # doors to it, so placing it in the old corner would move it away
+        # from under the door that was used — and it would fight with
+        # _position_ctrl_drawer over the same widget.
+        quick = getattr(self, "_quick_drawer", None)
+        ctrl = getattr(self, "_ctrl_drawer", None)
+        if quick is None or quick is ctrl:
+            return
+        self._place_drawer(quick, 12)
+
+    def _drawer_zone(self):
+        """The empty room under the head, when it is empty.
+
+        Under the face of the assistant there is a panel that stays blank
+        until there is something to put in it: a notification, a search
+        result, the viewer, the questions. While it is blank it is a room
+        with nothing in it, and the drawer of the controls can stand there
+        without covering a thing.
+
+        The answer is None when that room is taken — the drawer then hangs
+        from the button that opened it, the way a menu does.
+        """
+        stack = getattr(self, "_lower_stack", None)
+        blank = getattr(self, "_lower_blank", None)
+        central = self.centralWidget()
+        if stack is None or blank is None or central is None:
+            return None
+        try:
+            if stack.currentWidget() is not blank:
+                return None
+            if not stack.isVisible():
+                return None
+            top_left = stack.mapTo(central, QPoint(0, 0))
+            rect = QRect(top_left.x(), top_left.y(),
+                         stack.width(), stack.height())
+        except Exception:
+            return None
+        # A room too small for the drawer is not a room for the drawer.
+        if rect.height() < 260 or rect.width() < self._DRAWER_W + 16:
+            return None
+        return rect
 
     def _position_ctrl_drawer(self):
-        """Under the header button that opened it.
+        """Where the drawer hangs.
 
-        The gear and the sliders are two doors to one drawer, and the
-        drawer hangs under the door that was used — so the user sees where
-        it came from.
+        THE EMPTY ROOM UNDER THE HEAD
+        ------------------------------
+        The drawer used to drop from the button in the header and land on
+        the face of the assistant: the user asked for the controls and
+        got the controls with the face in the way.
+
+        So the drawer stands in the room under the head while that room is
+        empty — the assistant stays visible, the controls have a place of
+        their own, and nothing is covered. When the room is taken (the
+        viewer is open, a notification is there), the drawer goes back to
+        hanging under the button that opened it, the way a menu does.
         """
-        if not hasattr(self, "_ctrl_drawer"):
+        drawer = getattr(self, "_ctrl_drawer", None)
+        if drawer is None:
             return
+
+        zone = self._drawer_zone()
+        self._ctrl_in_zone = zone is not None
+        if zone is not None:
+            drawer.setFixedWidth(self._DRAWER_W)
+            x = zone.x() + (zone.width() - self._DRAWER_W) // 2
+            drawer.setGeometry(x, zone.y(), self._DRAWER_W, zone.height())
+            return
+
         left = 12
         button = self._ctrl_btn
         if getattr(self, "_drawer_btn", None) is not None \
@@ -2730,7 +2849,12 @@ class MainWindow(QMainWindow):
                                          QPoint(0, 0)).x() - 8)
         except Exception:
             pass
-        self._place_drawer(self._ctrl_drawer, left)
+        drawer.setFixedWidth(self._DRAWER_W)
+        drawer.adjustSize()
+        top = self._header.height() + 2 if hasattr(self, "_header") else 60
+        room = max(220, self.height() - top - 24)
+        drawer.setGeometry(left, top, self._DRAWER_W,
+                           min(drawer.sizeHint().height(), room))
 
     def _build_input_row(self) -> QWidget:
         box = CommandFrame()
@@ -3191,6 +3315,14 @@ class MainWindow(QMainWindow):
         page on screen. A viewer that is hidden and still reading the
         screen would be a program that watches the user's desktop with
         nobody watching it.
+
+        AND THE DRAWER MOVES OUT OF THE WAY.
+        -------------------------------------
+        The drawer of the controls stands in the room under the head when
+        that room is empty. The moment something else moves into it — a
+        notification, the viewer — the drawer goes back to hanging from
+        the button that opened it, so the two are never on top of each
+        other.
         """
         viewer = getattr(self, "_viewer", None)
         if viewer is None:
@@ -3200,6 +3332,9 @@ class MainWindow(QMainWindow):
             viewer.start()
         else:
             viewer.stop()
+        drawer = getattr(self, "_ctrl_drawer", None)
+        if drawer is not None and drawer.isVisible():
+            self._position_ctrl_drawer()
 
     def _hide_viewer(self) -> None:
         panel = getattr(self, "_viewer", None)
@@ -3220,7 +3355,13 @@ class MainWindow(QMainWindow):
         if stack.currentWidget() is panel:
             self._hide_viewer()
             return
-        self._reveal_below_hud(panel, 300)
+        # THE VISOR GETS THE ROOM IT NEEDS.
+        #
+        # The panels under the head are given room by the splitter, and the
+        # viewer was asking for three hundred pixels when it wanted three
+        # hundred and twenty: the third row of "what the hands are doing"
+        # was painted below the edge of the panel.
+        self._reveal_below_hud(panel, 320)
         panel.start()
 
     def _quiz_btn(self, text: str, primary: bool = False) -> QPushButton:

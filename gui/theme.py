@@ -107,8 +107,18 @@ APP_VERSION  = "T.E.E.M.O."
 # be empty — an empty protocol would put a bare label on the HUD.
 APP_PROTOCOL = APP_VERSION.rstrip(".") or APP_VERSION
 
-_DEFAULT_W, _DEFAULT_H = 980, 700
-_MIN_W,     _MIN_H     = 820, 580
+# THE SIZE OF THE WINDOW.
+#
+# The dashboard is three columns — the gauges, the head, the conversation —
+# and it needs about twelve hundred and fifty pixels to lay them out side
+# by side. It used to open at nine hundred and eighty, which is narrower
+# than the interface it was supposed to show: the middle column arrived
+# squeezed and the controls of the drawer had nowhere to stand.
+#
+# So the window opens wide enough for what it carries, and it does not go
+# below the width the three columns need.
+_DEFAULT_W, _DEFAULT_H = 1280, 800
+_MIN_W,     _MIN_H     = 1100, 640
 _LEFT_W  = 148
 _RIGHT_W = 340
 
