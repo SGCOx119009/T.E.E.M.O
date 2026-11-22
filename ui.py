@@ -102,6 +102,8 @@ class TeemoUI:
         _apply_ui_scale()
         self._app = QApplication.instance() or QApplication(sys.argv)
         self._app.setStyle("Fusion")
+        from core.failures import install_excepthooks
+        install_excepthooks()
         self._win = MainWindow(face_path)
         self.root = _RootShim(self._app)
         # THE LOOP STOPS WHEN THE USER SAYS SO.
