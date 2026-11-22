@@ -597,6 +597,7 @@ def _play_spotify(query: str, artist: str) -> tuple[str, bool]:
     something - opening a track that is on its way is not something to undo
     by opening another player on top of it.
     """
+    started = time.monotonic()
     uri, reason = _spotify_api_play(query, artist)
     if uri:
         deadline = time.monotonic() + _VERIFY_TIMEOUT
@@ -649,12 +650,16 @@ def _play_spotify(query: str, artist: str) -> tuple[str, bool]:
         # may still be able to.
         return outcome.failed(
             "music_player",
-            f"Spotify could not be used ({reason or 'the song was not found'})",
+            f"Spotify could not be used ({reason or 'the song was not found'}) "
+            f"after {time.monotonic() - started:.0f}s. Do not call this tool "
+            f"again for the same song: say plainly that it could not be played.",
             service="spotify", track=query), True
 
     return outcome.failed(
         "music_player",
-        f"Spotify could not be used ({reason or 'it is not connected'})",
+        f"Spotify could not be used ({reason or 'it is not connected'}) "
+        f"after {time.monotonic() - started:.0f}s. Do not call this tool "
+        f"again for the same song: say plainly that it could not be played.",
         service="spotify", track=query), True
 
 

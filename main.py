@@ -215,6 +215,27 @@ _TAIL_MARGIN = 0.25
 # while turning an unbounded hang into a blip.
 _STALL_LIMIT = 30.0
 
+# THE SAME CLOCK, WHILE A TOOL IS WORKING.
+#
+# The watchdog above measures "the server has not said anything since the
+# turn went out". A tool call breaks that measure: the answer to a tool
+# call is the TOOL, and a slow tool — searching for a song in the client
+# of Spotify takes seconds, and the first one takes a good deal more —
+# is silent by definition.
+#
+# It used to fire anyway. The session was rebuilt, the result of the tool
+# was lost with it, the model asked for the same song again, the tool was
+# slow again, and the user watched the assistant try the same thing for
+# ever. The clock now runs, but further out, and only while there is
+# genuinely something to wait for.
+_STALL_LIMIT_WITH_TOOL = 120.0
+
+# How often a silent frame goes to the server so that the session does not
+# go quiet. The server closes a session that nobody talks to; five seconds
+# is far inside every timeout measured, and a frame of silence every five
+# seconds costs nothing.
+_KEEPALIVE_SECONDS = 5.0
+
 # How many tool calls one user turn may make before the assistant is told to
 # answer with what it already has.
 #
@@ -795,6 +816,13 @@ _NETWORK_WORDS = (
     "ConnectionRefusedError", "OSError", "Cannot connect",
     "ConnectionClosed", "ConnectionReset", "keepalive ping timeout",
     "WebSocket", "network is unreachable",
+    # The server closes a session that nobody talks to: 1008, "policy
+    # violation", "client inactivity". It is not a refusal of the key and
+    # it is not a quota — it is a connection that went quiet, and it has
+    # to be waited out with a growing pause instead of a flat three
+    # seconds, or the assistant reconnects, is closed again, and the user
+    # watches it happen for ever.
+    "1008", "client inactivity", "Session closed due to",
 )
 
 
@@ -875,6 +903,13 @@ class TeemoLive:
         # None means nothing is outstanding. Armed by the send sites, cleared by
         # the first frame of ANY response, watched by _watch_stall().
         self._rx_deadline          = None
+        # How many tools are working right now. The watchdog has to know:
+        # the answer to a tool call is the tool, and a slow tool is silent
+        # by definition — see _watch_stall.
+        self._tool_in_flight       = 0
+        # When the last silent frame went to the server, so that the session
+        # does not go quiet while the assistant sleeps.
+        self._last_keepalive       = 0.0
         # Transcript-driven mouth shapes for the avatar. Fed from the receive
         # loop as words arrive, drained by the playback loop against the audio.
         self._visemes              = VisemeStream()
@@ -1529,11 +1564,33 @@ class TeemoLive:
         The reconnect keeps the resumption handle, so the conversation survives:
         this costs a couple of seconds and a line in the log, where before it
         cost the rest of the session with no indication anything was wrong.
+
+        BUT NOT WHILE A TOOL IS WORKING.
+
+        The answer to a tool call is the tool. A tool that is slow — the
+        first search in the client of Spotify takes a good many seconds,
+        and a web search takes its own — is silent while it works, and the
+        watchdog used to call that silence a dead session: it rebuilt the
+        session, the result of the tool was lost with it, the model asked
+        for the same song again, and the user watched the assistant try the
+        same thing for ever.
+
+        So while a tool is in flight the clock is pushed out, once, and the
+        watchdog waits. A tool that hangs for ever is still caught — at
+        twice the distance — but a tool that is merely slow is not.
         """
         while True:
             await asyncio.sleep(2)
             deadline = self._rx_deadline
             if deadline is None or time.monotonic() < deadline:
+                continue
+            if self._tool_in_flight > 0:
+                # Give the tool the room it needs, once. Not on every tick:
+                # a deadline that moved every two seconds would never be
+                # reached, and a tool that hangs would hang for ever.
+                self._rx_deadline = time.monotonic() + _STALL_LIMIT_WITH_TOOL
+                print(f"[T.E.E.M.O] ⏳ A tool is still working "
+                      f"({self._tool_in_flight}) — waiting for it.")
                 continue
             self._clear_stall()
             print(f"[T.E.E.M.O] ⚠️  No response for {_STALL_LIMIT:.0f}s — "
@@ -2006,6 +2063,22 @@ class TeemoLive:
         _t_tool = time.monotonic()
         self.ui.set_state("THINKING")
 
+        # THE TOOL IS WORKING, AND THE CLOCK HAS TO KNOW.
+        #
+        # From here until the result is on its way, the answer to this turn
+        # is the tool and nobody else. The stall watchdog reads this
+        # counter: without it, a slow tool looks like a dead session, the
+        # session is rebuilt, the result is lost and the model asks again.
+        self._tool_in_flight += 1
+        if self._rx_deadline is not None:
+            self._rx_deadline = time.monotonic() + _STALL_LIMIT_WITH_TOOL
+        try:
+            return await self._execute_tool_body(fc, name, args, _t_tool)
+        finally:
+            self._tool_in_flight = max(0, self._tool_in_flight - 1)
+
+    async def _execute_tool_body(self, fc, name: str, args: dict,
+                                 _t_tool: float) -> types.FunctionResponse:
 
         if name == "save_memory":
             category = args.get("category", "notes")
@@ -2211,6 +2284,34 @@ class TeemoLive:
             **_extra
         )
 
+    def _keep_session_warm(self) -> None:
+        """A silent frame, now and then, so the session does not go quiet.
+
+        The server closes a session that nobody talks to, and the assistant
+        sleeps for minutes at a time while it waits for the wake word. This
+        is what keeps the connection alive during those minutes: a frame of
+        silence every few seconds, which the model hears as silence and the
+        server reads as a client that is still there.
+
+        It is called from the microphone's own thread, so it decides with a
+        clock and hands the frame to the loop the way the audio does.
+        """
+        now = time.monotonic()
+        if now - self._last_keepalive < _KEEPALIVE_SECONDS:
+            return
+        self._last_keepalive = now
+        try:
+            loop = getattr(self, "_loop", None)
+            if loop is None or self.out_queue is None:
+                return
+            frame = b"\x00" * (CHUNK_SIZE * 2)     # 16-bit, one channel
+            loop.call_soon_threadsafe(
+                self.out_queue.put_nowait,
+                {"data": frame, "mime_type": "audio/pcm"},
+            )
+        except Exception:
+            pass      # a keepalive that fails is not worth a word
+
     async def _send_realtime(self):
         while True:
             msg = await self.out_queue.get()
@@ -2242,6 +2343,18 @@ class TeemoLive:
                 det = self._wake_detector
                 if det is not None:
                     det.feed(indata)
+                # THE SESSION MUST NOT GO QUIET.
+                #
+                # The server closes a session that nobody talks to — 1008,
+                # "client inactivity" — and while the assistant is asleep
+                # the microphone is not streamed at all. So the session was
+                # closed for being quiet, rebuilt, and closed again: the
+                # assistant reconnected for ever, saying nothing, and the
+                # user saw a program that was "bugado".
+                #
+                # Silence is not speech. The model hears nothing, and the
+                # server sees a client that is alive.
+                self._keep_session_warm()
                 return
             with self._speaking_lock:
                 assistant_speaking = self._is_speaking
@@ -2264,6 +2377,7 @@ class TeemoLive:
                 # block here and call interrupt() after `required_blocks` of
                 # agreement — but it depends on the listener's room, so it stays
                 # out until it can be tried on real hardware.
+                self._keep_session_warm()
                 return
 
             # ── Echo tail ────────────────────────────────────────────────────
@@ -2288,6 +2402,7 @@ class TeemoLive:
             # opens it, which is the whole point: nothing leaves the machine
             # unless you are holding the key.
             if self._ptt_enabled and not self._ptt_held:
+                self._keep_session_warm()
                 return
             
             if not self.ui.muted and not self._phone_active:
@@ -3513,10 +3628,24 @@ class TeemoLive:
                 if is_net_err:
                     _conn_backoff = min(getattr(self, "_conn_backoff", 3) * 2, 60)
                     self._conn_backoff = _conn_backoff
-                    self.ui.write_log(
-                        f"NET: Connection failed — retrying in {_conn_backoff}s. "
-                        "(a VPN may be required)"
-                    )
+                    if "1008" in err_str or "client inactivity" in err_str:
+                        # THE SERVER CLOSED THE SESSION FOR BEING QUIET.
+                        #
+                        # Nobody talked to it for a while, so it hung up.
+                        # The answer is to wait — and to say so, because a
+                        # session that keeps hanging up is exactly what the
+                        # user described as "bugado".
+                        _conn_backoff = max(_conn_backoff, 10)
+                        self._conn_backoff = _conn_backoff
+                        self.ui.write_log(
+                            f"NET: The server closed the session for lack of "
+                            f"activity — reconnecting in {_conn_backoff}s."
+                        )
+                    else:
+                        self.ui.write_log(
+                            f"NET: Connection failed — retrying in {_conn_backoff}s. "
+                            "(a VPN may be required)"
+                        )
                 else:
                     # The one case nobody planned for. The whole traceback
                     # is printed, because this is the line that has to be
