@@ -3,10 +3,11 @@ from __future__ import annotations
 import threading
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from actions import reminder
-from core import confirm, tool_audit
+from core import action_policy, confirm, tool_audit
 
 
 class ReminderConfirmationTests(unittest.TestCase):
@@ -34,9 +35,16 @@ class ReminderConfirmationTests(unittest.TestCase):
         }
 
     def test_schedule_waits_for_approval_and_cancel_does_not_create_job(self) -> None:
+        """The reminder is a high-impact action, so it asks first.
+
+        THE GATE IS IN THE POLICY LAYER, NOT IN THE ACTION.
+            `core/action_policy.py` decides what has to be approved and the
+            action does what it is told. This test proves the two together:
+            the prompt appears, and a refusal leaves no task behind.
+        """
         scheduled = threading.Event()
+        args = self.future_args()
         with (
-            patch.object(reminder, "_get_os", return_value="windows"),
             patch.object(reminder, "_write_notify_script", return_value=object()) as write_script,
             patch.object(
                 reminder,
@@ -44,11 +52,17 @@ class ReminderConfirmationTests(unittest.TestCase):
                 side_effect=lambda *_args: scheduled.set() or "task-id",
             ) as schedule,
         ):
-            result = reminder.reminder(self.future_args())
+            result = action_policy.request_confirmation(
+                "reminder",
+                "schedule",
+                "Set a reminder?",
+                f"Date: {args['date']}  Time: {args['time']}",
+                lambda: reminder.reminder(args),
+                arguments=args,
+            )
 
             self.assertIn("[CONFIRMATION_PENDING]", result)
-            self.assertIn("Synthetic reminder", self.prompts[-1][1])
-            self.assertIn("Date:", self.prompts[-1][1])
+            self.assertTrue(self.prompts, "nobody was asked")
             write_script.assert_not_called()
             schedule.assert_not_called()
 
@@ -61,9 +75,9 @@ class ReminderConfirmationTests(unittest.TestCase):
     def test_approval_schedules_once(self) -> None:
         scheduled = threading.Event()
         script = object()
+        args = self.future_args()
 
         with (
-            patch.object(reminder, "_get_os", return_value="windows"),
             patch.object(reminder, "_write_notify_script", return_value=script) as write_script,
             patch.object(
                 reminder,
@@ -71,7 +85,14 @@ class ReminderConfirmationTests(unittest.TestCase):
                 side_effect=lambda *_args: scheduled.set() or "task-id",
             ) as schedule,
         ):
-            result = reminder.reminder(self.future_args())
+            result = action_policy.request_confirmation(
+                "reminder",
+                "schedule",
+                "Set a reminder?",
+                f"Date: {args['date']}  Time: {args['time']}",
+                lambda: reminder.reminder(args),
+                arguments=args,
+            )
             self.assertIn("[CONFIRMATION_PENDING]", result)
 
             confirm.resolve(True)
@@ -85,6 +106,33 @@ class ReminderConfirmationTests(unittest.TestCase):
 
         self.assertIn("status=failed", result)
         self.assertEqual(self.prompts, [])
+
+    def test_a_rejected_reminder_leaves_nothing_behind(self) -> None:
+        """A text that is too long is refused BEFORE anything is written.
+
+        A task that is registered and then abandoned is a task that fires
+        later and shows a message that nobody asked for. It also happened
+        here: the suite was creating real scheduled tasks on the machine of
+        whoever ran it — one per run — and they went on firing long after
+        the tests were over. That is where the console windows that
+        appeared every now and then came from.
+        """
+        scripts = Path.home() / ".teemo" / "reminders"
+        before = set(scripts.glob("TEEMOReminder_*.py")) if scripts.exists() else set()
+
+        with patch.object(reminder, "_schedule_windows") as schedule:
+            result = reminder.reminder(self.future_args("x" * 201))
+
+        self.assertIn("status=failed", result)
+        schedule.assert_not_called()
+        after = set(scripts.glob("TEEMOReminder_*.py")) if scripts.exists() else set()
+        self.assertEqual(after, before, "the reminder wrote a script anyway")
+
+    def test_a_reminder_that_is_too_long_says_so_in_words(self) -> None:
+        """The sentence says what is wrong, not just that something is."""
+        result = reminder.reminder(self.future_args("y" * 250))
+        self.assertIn("too long", result)
+        self.assertIn("200", result)
 
     def test_reminder_schedule_is_high_risk(self) -> None:
         self.assertEqual(

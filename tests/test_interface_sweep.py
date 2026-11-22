@@ -60,6 +60,16 @@ def window(qt_app, tmp_path, monkeypatch):
 
     win = MainWindow(str(BASE / "core" / "face_model.obj"))
     win.show()
+    # THE SHORTCUT IS NOT WRITTEN ON THE REAL DESKTOP.
+    #
+    # The sweep presses every button, and one of them writes a shortcut to
+    # the desktop of whoever is running the tests. The button is still
+    # pressed and its handler still runs; what it would write goes to the
+    # temporary folder of the test instead.
+    written = []
+    monkeypatch.setattr(MainWindow, "_create_desktop_shortcut",
+                        lambda self: written.append(True))
+    win._shortcuts_written = written
     # The ignition covers the whole interface on purpose, and it is put up
     # by a timer a moment after the window appears. The sweep is about the
     # interface underneath, so the show is let out and skipped — exactly as
@@ -70,6 +80,27 @@ def window(qt_app, tmp_path, monkeypatch):
         boot.skip()
     _pump(qt_app, 0.2)
     yield win
+    # THE CAMERA OF THIS WINDOW IS CLOSED BEFORE THE WINDOW GOES.
+    #
+    # A test that pressed the button of the hands leaves the service
+    # watching the camera, and the service holds the camera of the whole
+    # process. Ten tests later there were ten services running MediaPipe
+    # on the same frames, the machine was burning five cores, and the
+    # suite took three times as long as it should. The window is closed
+    # first and the camera afterwards: in that order, so that nothing is
+    # left reading from a device that is being closed.
+    try:
+        service = getattr(win, "_gesture", None)
+        if service is not None:
+            service.stop()
+    except Exception:
+        pass
+    try:
+        viewer = getattr(win, "_viewer", None)
+        if viewer is not None:
+            viewer.stop()
+    except Exception:
+        pass
     win._quitting = True
     try:
         win.close()
@@ -77,6 +108,18 @@ def window(qt_app, tmp_path, monkeypatch):
         pass
     win.deleteLater()
     qt_app.processEvents()
+    # And the camera of the process, in case somebody was still holding it.
+    #
+    # THE READERS ARE LET GO, BUT THE DEVICE STAYS OPEN. Closing the
+    # camera between tests is what opened and closed the DirectShow
+    # device over and over, and the driver did not survive it.
+    try:
+        from core.camera import hub as _camera_hub
+        hub = _camera_hub()
+        if hub.readers:
+            hub.release_readers()
+    except Exception:
+        pass
 
 
 def _pump(qt_app, seconds=0.15):
@@ -316,6 +359,59 @@ def test_the_controls_drawer_answers_every_button(window, qt_app):
 
     window._toggle_controls(False)
     _pump(qt_app, 0.2)
+
+
+def _interactive_controls(root):
+    """Every control a person can operate, not only the buttons.
+
+    The group of the language has no buttons at all: it has two boxes and
+    two fields. A group with nothing to operate is a group nobody can use,
+    and that is what this counts.
+    """
+    from PyQt6.QtWidgets import QAbstractButton, QComboBox, QLineEdit
+
+    found = 0
+    for widget in root.findChildren((QAbstractButton, QComboBox, QLineEdit)):
+        if widget.isVisible() and widget.isEnabled():
+            found += 1
+    return found
+
+
+def test_every_group_of_the_drawer_answers_every_button(window, qt_app):
+    """Every group, one by one, with all of its buttons pressed.
+
+    The drawer is seven groups now, and a group that is never opened is a
+    group nobody has ever pressed: the buttons of the language, the
+    appearance, the hands and the session were all invisible to the sweep
+    and therefore untested. This walks the whole rail.
+    """
+    window._toggle_controls(True)
+    _pump(qt_app, 0.3)
+
+    total = 0
+    for key in window._GROUPS:
+        window._select_group(key)
+        _pump(qt_app, 0.15)
+        assert window._group_stack.currentWidget() is window._group_pages[key]
+        pressed = _sweep_buttons(window._group_pages[key], qt_app,
+                                 f"the group {key}")
+        controls = _interactive_controls(window._group_pages[key])
+        assert controls > 0, f"the group {key} had nothing to operate at all"
+        total += controls
+        assert not window._quitting, \
+            f"a button in the group {key} closed the program"
+
+    assert total >= 20, "the drawer is too small to be the whole drawer"
+
+    window._toggle_controls(False)
+    _pump(qt_app, 0.2)
+
+
+def test_the_quick_access_answers_every_button(window, qt_app):
+    """The eight switches of the everyday, in the column of the eye."""
+    pressed = _sweep_buttons(window._quick_panel, qt_app, "the quick access")
+    assert pressed >= 8, "the quick access lost its buttons"
+    assert not window._quitting, "a button in the quick access closed the program"
 
 
 def test_the_engine_panel_answers_every_button(window, qt_app):
