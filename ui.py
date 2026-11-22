@@ -294,7 +294,23 @@ class TeemoUI:
         self._win._state_sig.emit(state)
 
     def write_log(self, text: str):
-        self._win._log_sig.emit(text)
+        """Put a line in the communications panel — unless it is raw.
+
+        RAW GOES TO THE TERMINAL. A line that opens with a bracket is a
+        machine line — a tool, a web answer, a dump — and the panel is for
+        the conversation and for what the user needs to know. The user asked
+        for those to stay out of the chat, and they did: the raw output of
+        the tools was written into the conversation, where it read as if the
+        assistant had said it.
+
+        A line with a line break in it is a dump too, and it goes the same
+        way.
+        """
+        line = str(text or "")
+        if line.startswith("[") or "\n" in line:
+            print(line)
+            return
+        self._win._log_sig.emit(line)
 
     def wait_for_api_key(self):
         while not self._win._ready:
