@@ -71,22 +71,67 @@ def _restore_from_trash(original: Path) -> str:
     Recycle Bin / Trash where the person can also find it themselves. Getting it
     back out again is shell work and only reliable on Windows, where pywin32 is
     already a dependency. Everywhere else this says where the file is instead of
-    pretending it failed — the file is not lost either way."""
+    pretending it failed — the file is not lost either way.
+
+    THE SHELL IS TALKED TO FROM ANOTHER PROCESS.
+        The obvious way is `win32com.client.Dispatch("Shell.Application")`, and
+        it is a trap: COM is an agreement between the threads of a process about
+        which apartment owns which object, `win32com.client` initializes COM in
+        the thread that imports it, and the undo of a deletion runs in a worker
+        thread. Importing COM there is how a process dies with «Windows fatal
+        exception: access violation» and no clue.
+
+        So the shell is asked from `cscript.exe`: a console host that is run
+        without a console window, and the COM that does the work lives in THAT
+        process, not in this one.
+    """
     if _OS == "Windows":
         try:
-            import win32com.client
-            shell = win32com.client.Dispatch("Shell.Application")
-            bin_folder = shell.NameSpace(10)      # ssfBITBUCKET
-            for item in bin_folder.Items():
-                if str(bin_folder.GetDetailsOf(item, 1)).strip().lower() == \
-                        str(original.parent).strip().lower():
-                    if str(item.Name).strip().lower() == original.name.strip().lower():
-                        item.InvokeVerb("UNDELETE")
-                        return f"'{original.name}' restored from the Recycle Bin."
+            import subprocess
+            import tempfile
+
+            parent = str(original.parent).strip().lower()
+            name = original.name.strip().lower()
+            vbs = "\n".join([
+                'Set shell = CreateObject("Shell.Application")',
+                'Set bin = shell.Namespace(10)',
+                'For Each item In bin.Items',
+                f'  If LCase(bin.GetDetailsOf(item, 1)) = "{_vbs_quote(parent)}" Then',
+                f'    If LCase(item.Name) = "{_vbs_quote(name)}" Then',
+                '      item.InvokeVerb("UNDELETE")',
+                '      WScript.Echo "RESTORED"',
+                '      WScript.Quit 0',
+                '    End If',
+                '  End If',
+                'Next',
+                'WScript.Echo "NOTFOUND"',
+                'WScript.Quit 1',
+            ])
+            fd, tmp = tempfile.mkstemp(suffix=".vbs")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(vbs)
+                proc = subprocess.run(
+                    ["cscript.exe", "//nologo", tmp],
+                    capture_output=True, text=True, timeout=20,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                if "RESTORED" in (proc.stdout or ""):
+                    return f"'{original.name}' restored from the Recycle Bin."
+            finally:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[file] Recycle Bin restore failed: {e}")
     return (f"'{original.name}' is in the Recycle Bin — I could not pull it back "
             f"automatically, but it is there and can be restored by hand.")
+
+
+def _vbs_quote(text: str) -> str:
+    """A string for a VBScript literal, with the quotes doubled."""
+    return str(text).replace('"', '""')
 
 
 _SAFE_ROOTS: list[Path] = [
