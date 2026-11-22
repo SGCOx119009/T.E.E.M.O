@@ -69,6 +69,8 @@ def _bare() -> metrics_mod._SysMetrics:
     obj._counters_ok = None
     obj._counters_fail = 0
     obj._wmi_fail = 0
+    obj._gpu_state = "pending"
+    obj._tmp_state = "pending"
     obj._running = False
     return obj
 

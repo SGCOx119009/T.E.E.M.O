@@ -31,6 +31,8 @@ THE COST
 """
 from __future__ import annotations
 
+import time
+
 from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QBrush, QColor, QLinearGradient, QPainter, QPen, QRadialGradient,
@@ -58,7 +60,41 @@ _MARK = {
 
 ROW_MS = 190            # one row every this many milliseconds
 FADE_MS = 420           # how long the overlay takes to go away
-MAX_MS = 5200           # it gives up on itself after this long
+# THE IGNITION WAITS FOR THE MACHINE TO SAY HOW IT IS.
+#
+# The GPU counters are counted one process and one engine at a time and
+# take three to twelve seconds, depending on how busy the machine is.
+# The ignition stays until they land, so the four numbers on the screen
+# are the four real ones — and not a row of "EN ESPERA" that nobody
+# would believe. Nine seconds is the ceiling: past that the show is
+# costing more than it is worth, and any key skips it anyway.
+MAX_MS = 9000           # it gives up on itself after this long
+VITALS_BEAT_MS = 400    # the pause between the last row and the door opening
+VITALS_WAIT_MS = 8000   # how long it waits for the signs of life to land
+
+
+def read_vitals() -> dict:
+    """The machine's signs of life, as they are right now.
+
+    The same numbers the panel on the right shows, read from the same
+    place, so the ignition cannot say one thing and the interface another.
+
+    A number that has not been measured yet is NOT zero: it is -1, and the
+    ignition writes "EN ESPERA" for it. A meter that starts at zero is a
+    meter that is lying for the first second of the life of the program.
+    """
+    out = {"cpu": -1.0, "mem": -1.0, "gpu": -1.0, "tmp": -1.0}
+    try:
+        from gui.metrics import _metrics
+        snap = _metrics.snapshot()
+    except Exception:
+        return out
+    for key in ("cpu", "mem", "gpu", "tmp"):
+        try:
+            out[key] = float(snap.get(key, -1.0))
+        except Exception:
+            continue
+    return out
 
 
 def collect_checks(probe_audio: bool = True) -> list[tuple[str, str, str]]:
@@ -163,6 +199,11 @@ class BootOverlay(QWidget):
         self._elapsed = 0
         self._alpha = 1.0
         self._done = False
+        self._started_at = 0.0
+        # The signs of life of the machine, and when they were asked for.
+        self._vitals = read_vitals()
+        self._vitals_asked = 0
+        self._ending = False
 
         self._wordmark = DecodeText(self._brand, self, size=38, colour=C.PRI)
         self._wordmark.setMinimumHeight(68)
@@ -180,15 +221,32 @@ class BootOverlay(QWidget):
         self._wordmark.set_text(self._brand)
         self._timer.start(ROW_MS)
         self._done = False
+        self._ending = False
         self._alpha = 1.0
+        self._started_at = time.monotonic()
+        self._vitals_asked = 0
         self.show()
         self.raise_()
         self.update()
+
+    def elapsed_ms(self) -> int:
+        """How long the ignition has been up, in real milliseconds.
+
+        THE WALL CLOCK, NOT THE TICKER. A timer that fires late would
+        stretch the ignition: a machine that is busy would keep the user
+        waiting longer than the patience says, and a machine that is idle
+        would cut the show short. The ignition is timed against the
+        clock, not against itself.
+        """
+        if not self._started_at:
+            return 0
+        return int((time.monotonic() - self._started_at) * 1000)
 
     def skip(self) -> None:
         """Go away now."""
         self._timer.stop()
         self._done = True
+        self._ending = True
         self._alpha = 0.0
         self.update()
         self.hide()
@@ -196,16 +254,50 @@ class BootOverlay(QWidget):
 
     def _tick(self) -> None:
         """One more row of the checklist."""
-        self._shown += 1
+        if self._shown < len(self._checks):
+            self._shown += 1
+        self._read_vitals()
         self.update()
         if self._shown >= len(self._checks):
             self._timer.stop()
-            # The last row is up: a beat, and then the interface opens.
-            QTimer.singleShot(700, self.skip)
+            self._maybe_end()
+
+    def _read_vitals(self) -> None:
+        """Ask the machine how it is, right now."""
+        if self._vitals_asked == 0:
+            self._vitals_asked = self.elapsed_ms()
+        self._vitals = read_vitals()
+
+    def _vitals_complete(self) -> bool:
+        """Are the signs of life all in?
+
+        The processor and the memory are known at once. The temperature
+        takes six hundredths of a second. The GPU counters take four
+        seconds — they are counted one process and one engine at a time —
+        and until they land the ignition says so instead of inventing a
+        number.
+        """
+        v = self._vitals
+        return (v.get("gpu", -1.0) >= 0.0) and (v.get("tmp", -1.0) > 0.0)
+
+    def _maybe_end(self) -> None:
+        """The checklist is done. The door opens when the machine has said
+        how it is — or when the ignition runs out of patience."""
+        if self._ending:
+            return
+        waited = self.elapsed_ms() - self._vitals_asked
+        if not self._vitals_complete() and waited < VITALS_WAIT_MS:
+            # The signs are still coming: keep the timer going and look
+            # again in a moment.
+            self._timer.start(ROW_MS)
+            return
+        self._ending = True
+        # The last row is up: a beat, and then the interface opens.
+        QTimer.singleShot(VITALS_BEAT_MS, self.skip)
 
     def _clock(self) -> None:
         self._elapsed += 40
-        if self._elapsed > MAX_MS and not self._done:
+        if self.elapsed_ms() > MAX_MS and not self._done:
             self.skip()
 
     # ── the painting ────────────────────────────────────────────────────────
@@ -272,6 +364,9 @@ class BootOverlay(QWidget):
             p.setPen(QPen(fx.qcol(colour, 110), 1))
             p.drawLine(int(left), int(y) + 22, int(left + 500), int(y) + 22)
 
+        # The signs of life of the machine, read while it starts.
+        self._paint_vitals(p, left, H)
+
         # The scale along the bottom: the progress of the ignition.
         total = max(1, len(self._checks))
         done = min(self._shown, total)
@@ -294,6 +389,40 @@ class BootOverlay(QWidget):
     # ── the layout ──────────────────────────────────────────────────────────
 
     _mark_h = 68
+
+    def _paint_vitals(self, p, left: int, H: int) -> None:
+        """The vitals, along the bottom, as they are read.
+
+        CPU, memory, GPU and temperature — the four numbers the panel on
+        the right shows, read from the same place, so the ignition cannot
+        say one thing and the interface another.
+
+        A number that has not arrived yet says "EN ESPERA". It does not
+        say zero: zero is a measurement, and a machine that has not been
+        measured is not a machine with nothing to report.
+        """
+        v = self._vitals
+        items = (
+            ("CPU",  v.get("cpu", -1.0), "{:.0f}%"),
+            ("MEM",  v.get("mem", -1.0), "{:.0f}%"),
+            ("GPU",  v.get("gpu", -1.0), "{:.0f}%"),
+            ("TEMP", v.get("tmp", -1.0),  "{:.0f}°C"),
+        )
+        y = H - 84
+        p.setFont(px_font(9, spacing=1.2))
+        x = int(left)
+        for label, value, fmt in items:
+            p.setPen(QPen(QColor(C.TEXT_DIM)))
+            p.drawText(x, y, label)
+            p.setFont(mono_font(12))
+            if value < 0:
+                p.setPen(QPen(QColor(C.TEXT_DIM)))
+                p.drawText(x + 40, y, "EN ESPERA")
+            else:
+                p.setPen(QPen(QColor(C.PRI)))
+                p.drawText(x + 40, y, fmt.format(value))
+            p.setFont(px_font(9, spacing=1.2))
+            x += 152
 
     def _layout(self) -> None:
         """Put the wordmark where it belongs.

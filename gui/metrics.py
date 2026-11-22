@@ -89,6 +89,54 @@ _nvml_lib: object = None   # cached ctypes DLL
 _nvml_ok:  object = None   # None=untested, True=works, False=unavailable
 
 
+def _load_pynvml():
+    """The NVML module, loaded once and quietly.
+
+    Two reasons for the quiet: the package prints a deprecation warning
+    that has nothing to do with the user, and — the real one — it is
+    loaded HERE, in the thread that owns the program, and not in the
+    thread that reads the hardware. A daemon thread that prints while the
+    interpreter is shutting down takes it down with it: "Fatal Python
+    error: _enter_buffered_busy: could not acquire lock for <stderr>".
+    """
+    global _pynvml_mod
+    if _pynvml_mod is not None:
+        return _pynvml_mod
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import pynvml  # type: ignore
+        _pynvml_mod = pynvml
+    except Exception:
+        _pynvml_mod = None
+    return _pynvml_mod
+
+
+_pynvml_mod = None
+_wmi_mod = None
+
+
+def _load_wmi():
+    """The WMI module, loaded once and quietly, in the main thread.
+
+    Same reason as the NVML one: nothing that runs in a daemon thread
+    should import or print while the interpreter is shutting down.
+    """
+    global _wmi_mod
+    if _wmi_mod is not None:
+        return _wmi_mod
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import wmi  # type: ignore
+        _wmi_mod = wmi
+    except Exception:
+        _wmi_mod = None
+    return _wmi_mod
+
+
 def _nvml_gpu_windows() -> float:
     """Return NVIDIA GPU utilisation % using nvml.dll directly — zero subprocess."""
     global _nvml_lib, _nvml_ok
@@ -111,7 +159,9 @@ def _nvml_gpu_windows() -> float:
                     continue
 
         if _nvml_lib is None:
-            import pynvml  # type: ignore
+            pynvml = _load_pynvml()
+            if pynvml is None:
+                raise RuntimeError("pynvml is not here")
             pynvml.nvmlInit()
             h = pynvml.nvmlDeviceGetHandleByIndex(0)
             _nvml_ok = True
@@ -141,11 +191,33 @@ def _gpu_windows_counters(conn) -> float:
     The counters give one row per process and per engine, so the answer is
     the sum of the 3D engine of everybody, capped at a hundred.
 
-    It is not cheap — about five seconds — which is why it runs in its own
-    thread and not in the one that reads the processor.
+    The query asks for the 3D engines ONLY: the whole table is 288 rows
+    and takes 7,1 seconds, while the 3D rows alone are 96 and take 1,8.
+
+    AND THE PROVIDER IS WARMED UP FIRST. The first question about the
+    GPU engines in a process costs eleven seconds: Windows enumerates
+    every adapter and every engine before it answers, and that work is
+    paid once. Asking about the adapters first — two rows, a tenth of a
+    second — does it, and the same question then takes two and a half.
+    Measured in the same process: 11 s before the warm-up, 2,5 s after.
+
+    It is not cheap — about two and a half seconds — which is why it runs
+    in its own thread and not in the one that reads the processor.
     """
+    try:
+        conn.Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory()
+    except Exception:
+        pass
     total = 0
-    for row in conn.Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine():
+    try:
+        rows = conn.query(
+            "SELECT Name, UtilizationPercentage FROM "
+            "Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine "
+            "WHERE Name LIKE '%engtype_3D%'"
+        )
+    except Exception:
+        rows = conn.Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine()
+    for row in rows:
         name = str(row.Name)
         if "engtype_3D" not in name:
             continue
@@ -200,6 +272,20 @@ class _SysMetrics:
         self._counters_ok = None       # None=untested, False=unavailable here
         self._counters_fail = 0        # consecutive failures of the counters
         self._wmi_fail   = 0           # consecutive failures of the thermal zone
+        self._cpu_first  = True        # the first reading has no baseline yet
+        # Whether a number that is not there is missing because it has not
+        # been read yet, or because there is nothing to read.
+        self._gpu_state = "pending"
+        self._tmp_state = "pending"
+        # THE NATIVE LIBRARIES ARE LOADED HERE, IN THE THREAD THAT OWNS
+        # THE PROGRAM.
+        #
+        # The probes run in a thread of their own, and a thread that
+        # imports something —or prints a warning— while the interpreter
+        # is shutting down takes it down with it. So the two libraries
+        # that talk to the machine are loaded now, quietly, from here.
+        _load_pynvml()
+        _load_wmi()
         t = threading.Thread(target=self._loop, daemon=True)
         t.start()
         # THE SLOW PROBES GET THEIR OWN THREAD.
@@ -225,18 +311,27 @@ class _SysMetrics:
 
         Each is asked separately: a GPU counter that throws must not cost
         the machine its temperature.
+
+        THE TEMPERATURE GOES FIRST, AND IT IS PUBLISHED FIRST. It costs
+        six hundredths of a second and the GPU counters cost four; asking
+        the slow one first means the machine's temperature is known almost
+        at once, and the ignition can show it while the GPU is still being
+        counted. Publishing each one as soon as it arrives is the other
+        half of it: waiting for the GPU to write the temperature down as
+        well would hide a number that is already there.
         """
-        try:
-            gpu = self._get_gpu()
-        except Exception:
-            gpu = -1.0
         try:
             tmp = self._get_temp()
         except Exception:
             tmp = -1.0
         with self._lock:
-            self.gpu = gpu
             self.tmp = tmp
+        try:
+            gpu = self._get_gpu()
+        except Exception:
+            gpu = -1.0
+        with self._lock:
+            self.gpu = gpu
         return gpu, tmp
 
     def _slow_loop(self):
@@ -245,12 +340,29 @@ class _SysMetrics:
         # thread. Without this the queries come back as a syntax error and
         # both meters say N/A for ever.
         _com_ready()
+        # THE FIRST READING WAITS A MOMENT.
+        #
+        # This thread starts while the program is still loading its
+        # libraries — the face model, the maths, the audio — and a question
+        # asked to the machine while it is still loading takes twelve
+        # seconds instead of three. Measured in this program: 12,8 s asked
+        # during the loading, 3,6 s asked afterwards. So the first question
+        # waits until the window is up and the machine is quiet.
+        time.sleep(3.0)
         while self._running:
             self._read_slow()
             time.sleep(6.0)
 
     def _update(self):
-        cpu = psutil.cpu_percent(interval=None)
+        if getattr(self, "_cpu_first", False):
+            # The first reading has nothing to compare itself with, and
+            # psutil answers 0,0 — which is not a measurement but the
+            # absence of one. A quarter of a second of counting gives a
+            # real number, and the ignition shows it.
+            cpu = psutil.cpu_percent(interval=0.4)
+            self._cpu_first = False
+        else:
+            cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory().percent
 
         nc  = psutil.net_io_counters()
@@ -277,7 +389,9 @@ class _SysMetrics:
         if self._pynvml_ok is not False:
             try:
                 if self._pynvml_h is None:
-                    import pynvml  # type: ignore
+                    pynvml = _load_pynvml()
+                    if pynvml is None:
+                        raise RuntimeError("pynvml is not here")
                     pynvml.nvmlInit()
                     self._pynvml    = pynvml
                     self._pynvml_h  = pynvml.nvmlDeviceGetHandleByIndex(0)
@@ -300,6 +414,7 @@ class _SysMetrics:
                     value = _gpu_windows_counters(self._cimv2())
                     self._counters_ok = True
                     self._counters_fail = 0
+                    self._gpu_state = "ok"
                     return value
                 except Exception:
                     # A failure that lasts is a failure that lasts: three in
@@ -309,8 +424,9 @@ class _SysMetrics:
                     self._counters_fail += 1
                     if self._counters_fail >= 3:
                         self._counters_ok = False
+                        self._gpu_state = "na"
 
-        return -1.0   # N/A — no subprocess at all
+        return -1.0   # nothing to read — no subprocess at all
 
     def _cimv2(self):
         """The connection to root/cimv2, kept open — one per thread.
@@ -326,7 +442,9 @@ class _SysMetrics:
         conn = getattr(self._cimv2_local, "conn", None)
         if conn is None:
             _com_ready()
-            import wmi  # type: ignore
+            wmi = _load_wmi()
+            if wmi is None:
+                raise RuntimeError("the wmi package is not here")
             conn = wmi.WMI(namespace="root/cimv2")
             self._cimv2_local.conn = conn
         return conn
@@ -339,9 +457,11 @@ class _SysMetrics:
             for name in ["coretemp", "k10temp", "cpu_thermal", "acpitz",
                          "cpu-thermal", "zenpower", "it8688"]:
                 if name in temps and temps[name]:
+                    self._tmp_state = "ok"
                     return temps[name][0].current
             for entries in temps.values():
                 if entries:
+                    self._tmp_state = "ok"
                     return entries[0].current
         except Exception:
             pass
@@ -353,6 +473,7 @@ class _SysMetrics:
             try:
                 value = _temp_windows(self._cimv2())
                 if value > 0:
+                    self._tmp_state = "ok"
                     return value
             except Exception:
                 pass
@@ -360,12 +481,15 @@ class _SysMetrics:
                 try:
                     conn = getattr(self._wmi_local, "conn", None)
                     if conn is None:
-                        import wmi  # type: ignore
+                        wmi = _load_wmi()
+                        if wmi is None:
+                            raise RuntimeError("the wmi package is not here")
                         conn = wmi.WMI(namespace="root/wmi")
                         self._wmi_local.conn = conn
                     tz = conn.MSAcpi_ThermalZoneTemperature()
                     if tz:
                         self._wmi_fail = 0
+                        self._tmp_state = "ok"
                         return (tz[0].CurrentTemperature / 10.0) - 273.15
                 except Exception:
                     # Three in a row and the old way is given up on. One in a
@@ -377,9 +501,18 @@ class _SysMetrics:
                         self._wmi_ok   = False
                     self._wmi_local.conn = None
 
-        return -1.0   # N/A — no subprocess at all
+        return -1.0   # nothing to read — no subprocess at all
 
     def snapshot(self) -> dict:
+        """What the machine says, and how sure we are of it.
+
+        `gpu_state` and `tmp_state` say whether a number that is not there
+        is missing because it has not been read yet —"pending"— or
+        because there is nothing to read —"na". The difference matters: a
+        meter that says N/A while it is still counting is a meter that
+        looks broken, and the GPU counters take ten seconds on a busy
+        machine.
+        """
         with self._lock:
             return {
                 "cpu": self.cpu,
@@ -387,6 +520,8 @@ class _SysMetrics:
                 "net": self.net,
                 "gpu": self.gpu,
                 "tmp": self.tmp,
+                "gpu_state": self._gpu_state,
+                "tmp_state": self._tmp_state,
             }
 
 
