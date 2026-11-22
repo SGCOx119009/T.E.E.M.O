@@ -2362,6 +2362,9 @@ class MainWindow(QMainWindow):
             }}
         """)
         self._input.returnPressed.connect(self._send)
+        # While the user writes, the clipboard panel gets out of the way: it
+        # was designed for a moment when nothing else was happening.
+        self._input.textChanged.connect(lambda *_: self._hide_clipboard_panel())
         row.addWidget(self._input, stretch=1)
 
         send = IconButton("send", 32)
@@ -3942,23 +3945,70 @@ class MainWindow(QMainWindow):
     # ── Clipboard intelligence ───────────────────────────────────────────────────
 
     def _on_clipboard_changed(self):
+        """The clipboard changed: the panel offers what to do with it.
+
+        IT COMES BACK ONLY FOR SOMETHING NEW. The same text used to raise the
+        panel again and again — a copy anywhere in Windows and another window
+        appeared out of nowhere, over and over, and the user had to close each
+        one.
+
+        AND IT STAYS OUT OF THE WAY. While the user is typing an order, a
+        panel that pops up over the field they are typing in is worse than no
+        panel at all.
+        """
         try:
             text = QApplication.clipboard().text().strip()
-            if len(text) >= 10:
-                self._clipboard_sig.emit(text)
         except Exception:
-            pass
+            return
+        if len(text) < 10:
+            return
+        if text == getattr(self, "_last_clip_text", ""):
+            return                      # the same thing, already offered
+        field = getattr(self, "_input", None)
+        if field is not None and field.hasFocus():
+            return                      # the user is typing: leave them alone
+        self._last_clip_text = text
+        self._clipboard_sig.emit(text)
 
     def _show_clipboard_panel(self, text: str):
         self._clipboard_panel.show_clipboard(text)
         self._position_clipboard_panel()
 
+    def _hide_clipboard_panel(self) -> None:
+        """The clipboard panel goes away when the user starts writing."""
+        panel = getattr(self, "_clipboard_panel", None)
+        if panel is None:
+            return
+        try:
+            panel.hide()
+        except Exception:
+            pass
+
     def _position_clipboard_panel(self):
+        """The panel goes where there is nothing to click.
+
+        IT USED TO GO AT THE BOTTOM OF THE MIDDLE COLUMN, over the
+        questionnaire and over the order field, and it ate the clicks there:
+        a copy anywhere in Windows and the buttons underneath stopped
+        answering, which is what made the whole interface look dead.
+
+        It now goes in the top right of the face, which is empty space: a
+        panel that is up never stands between the user and a control.
+        """
         cw = self.centralWidget()
         pw = ClipboardPanel._W
         ph = self._clipboard_panel.sizeHint().height() or ClipboardPanel._H
-        x = (cw.width() - pw) // 2
-        y = cw.height() - ph - 6
+        area = None
+        hud = getattr(self, "hud", None)
+        if hud is not None:
+            try:
+                area = hud.geometry()
+            except Exception:
+                area = None
+        if area is None or area.width() <= 0:
+            area = cw.rect()
+        x = max(8, area.right() - pw - 14)
+        y = area.top() + 12
         self._clipboard_panel.setGeometry(x, y, pw, ph)
         self._clipboard_panel.raise_()
 

@@ -35,7 +35,19 @@ class SceneCanvas(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        # THE MOUSE BELONGS TO THE CHILDREN.
+        #
+        # WA_TransparentForMouseEvents does not mean "this widget ignores the
+        # mouse": Qt reads it as "this widget AND EVERYTHING INSIDE IT ignore
+        # the mouse". The scene is the central widget of the window, and the
+        # whole dashboard — header, panels, drawers, buttons — is laid out
+        # INSIDE it, so setting the attribute here silently deafened the entire
+        # interface: every click landed on the window and nothing answered.
+        #
+        # The background has no click behaviour of its own, so the honest
+        # thing is to let it receive the press and ignore it, and let the
+        # widgets on top of it work as they always meant to.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self._enabled = True
         self._t = 0.0
         self._cache: QPixmap | None = None
