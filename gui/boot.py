@@ -97,6 +97,27 @@ def read_vitals() -> dict:
     return out
 
 
+def _opencv_version() -> str:
+    """The version of OpenCV, read from the package and not from the library.
+
+    The metadata of the installed package knows the version without
+    loading a single line of native code, and the interface has no
+    business loading OpenCV: the camera lives in another process.
+    """
+    try:
+        from importlib import metadata
+
+        for name in ("opencv-python", "opencv-contrib-python",
+                     "opencv-python-headless"):
+            try:
+                return str(metadata.version(name)).split("+")[0]
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""
+
+
 def collect_checks(probe_audio: bool = True) -> list[tuple[str, str, str]]:
     """Run the real checks and return them as (label, state, detail).
 
@@ -165,11 +186,18 @@ def collect_checks(probe_audio: bool = True) -> list[tuple[str, str, str]]:
             checks.append(("AUDIO", PENDING, type(exc).__name__))
 
     # 5. The camera — the eye of the gesture control.
-    try:
-        import cv2
-        checks.append(("VISIÓN", OK, f"OpenCV {cv2.__version__.split()[0]}"))
-    except Exception as exc:                                   # noqa: BLE001
-        checks.append(("VISIÓN", PENDING, type(exc).__name__))
+    #
+    # THE VERSION IS READ FROM THE PACKAGE, NOT FROM THE LIBRARY.
+    #     Importing OpenCV here would load a native library with threads
+    #     of its own into the process of the interface, in the middle of
+    #     the ignition, for a version number that the metadata already
+    #     knows. The camera is opened in the process that holds it, and
+    #     the interface never needs OpenCV.
+    version = _opencv_version()
+    if version:
+        checks.append(("VISIÓN", OK, f"OpenCV {version}"))
+    else:
+        checks.append(("VISIÓN", PENDING, "OpenCV no está"))
 
     # 6. The network is deliberately not checked.
     #

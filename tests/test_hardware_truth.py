@@ -26,6 +26,7 @@ BASE = Path(__file__).resolve().parent.parent
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
+from core import metrics_worker as worker  # noqa: E402
 from gui import metrics as metrics_mod  # noqa: E402
 
 
@@ -52,16 +53,13 @@ class _FakeConn:
         return list(self._zones)
 
 
-def _bare() -> metrics_mod._SysMetrics:
-    """A metrics object without the two background threads.
+def _bare() -> worker._Probes:
+    """A set of probes without the background thread.
 
-    The threads would go and ask the real machine, which makes a test slow
+    The thread would go and ask the real machine, which makes a test slow
     and makes the answer depend on the hardware of whoever runs it.
     """
-    obj = object.__new__(metrics_mod._SysMetrics)
-    obj.cpu = obj.mem = obj.net = 0.0
-    obj.gpu = obj.tmp = -1.0
-    obj._lock = threading.Lock()
+    obj = object.__new__(worker._Probes)
     obj._pynvml = obj._pynvml_h = obj._pynvml_ok = None
     obj._wmi_conn = obj._wmi_ok = None
     obj._wmi_local = threading.local()
@@ -71,7 +69,20 @@ def _bare() -> metrics_mod._SysMetrics:
     obj._wmi_fail = 0
     obj._gpu_state = "pending"
     obj._tmp_state = "pending"
+    return obj
+
+
+def _bare_interface():
+    """The meters of the interface, without the two background threads."""
+    obj = object.__new__(metrics_mod._SysMetrics)
+    obj.cpu = obj.mem = obj.net = 0.0
+    obj.gpu = obj.tmp = -1.0
+    obj._lock = threading.Lock()
+    obj._worker = None
+    obj._gpu_state = "pending"
+    obj._tmp_state = "pending"
     obj._running = False
+    obj._stop = threading.Event()
     return obj
 
 
@@ -84,7 +95,7 @@ def test_the_gpu_counters_sum_the_3d_engines():
         _Row(name="pid_1_engtype_Compute", utilization=99),
         _Row(name="pid_1_engtype_VideoDecode", utilization=80),
     ])
-    assert metrics_mod._gpu_windows_counters(conn) == 55.0
+    assert worker._gpu_windows_counters(conn) == 55.0
 
 
 def test_the_gpu_never_goes_over_a_hundred():
@@ -92,7 +103,7 @@ def test_the_gpu_never_goes_over_a_hundred():
         _Row(name="pid_1_engtype_3D", utilization=80),
         _Row(name="pid_2_engtype_3D", utilization=70),
     ])
-    assert metrics_mod._gpu_windows_counters(conn) == 100.0
+    assert worker._gpu_windows_counters(conn) == 100.0
 
 
 def test_a_row_without_a_number_is_skipped_and_not_fatal():
@@ -104,52 +115,52 @@ def test_a_row_without_a_number_is_skipped_and_not_fatal():
             raise RuntimeError("the counter is not there")
 
     conn = _FakeConn(engines=[_Broken(), _Row(name="pid_1_engtype_3D", utilization=12)])
-    assert metrics_mod._gpu_windows_counters(conn) == 12.0
+    assert worker._gpu_windows_counters(conn) == 12.0
 
 
 def test_the_gpu_falls_back_to_the_windows_counters_when_there_is_no_nvml(monkeypatch):
     """The machine of the user has an AMD card: NVML can only ever say no."""
     obj = _bare()
     obj._pynvml_ok = False
-    monkeypatch.setattr(metrics_mod, "_OS", "Windows")
-    monkeypatch.setattr(metrics_mod, "_nvml_gpu_windows", lambda: -1.0)
-    monkeypatch.setattr(metrics_mod, "_gpu_windows_counters", lambda conn: 42.0)
-    monkeypatch.setattr(obj, "_cimv2", lambda: _FakeConn())
+    monkeypatch.setattr(worker, "_OS", "Windows")
+    monkeypatch.setattr(worker, "_nvml_gpu_windows", lambda: -1.0)
+    monkeypatch.setattr(worker, "_gpu_windows_counters", lambda conn: 42.0)
+    monkeypatch.setattr(obj, "cimv2", lambda: _FakeConn())
 
-    assert obj._get_gpu() == 42.0
+    assert obj.gpu() == 42.0
     assert obj._counters_ok is True
 
 
 def test_the_gpu_says_na_when_there_is_nothing_to_read(monkeypatch):
     obj = _bare()
     obj._pynvml_ok = False
-    monkeypatch.setattr(metrics_mod, "_OS", "Windows")
-    monkeypatch.setattr(metrics_mod, "_nvml_gpu_windows", lambda: -1.0)
+    monkeypatch.setattr(worker, "_OS", "Windows")
+    monkeypatch.setattr(worker, "_nvml_gpu_windows", lambda: -1.0)
 
     def _boom(conn):
         raise RuntimeError("no counters here")
 
-    monkeypatch.setattr(metrics_mod, "_gpu_windows_counters", _boom)
+    monkeypatch.setattr(worker, "_gpu_windows_counters", _boom)
 
     # Three in a row and the door stays shut.
-    assert obj._get_gpu() == -1.0
-    obj._get_gpu()
-    obj._get_gpu()
+    assert obj.gpu() == -1.0
+    obj.gpu()
+    obj.gpu()
     assert obj._counters_ok is False
-    assert obj._get_gpu() == -1.0
+    assert obj.gpu() == -1.0
 
 
 def test_the_nvml_way_is_tried_first(monkeypatch):
     obj = _bare()
     obj._pynvml_ok = True
-    monkeypatch.setattr(metrics_mod, "_OS", "Windows")
+    monkeypatch.setattr(worker, "_OS", "Windows")
     called = {"counters": False}
 
     def _counters(conn):
         called["counters"] = True
         return 11.0
 
-    monkeypatch.setattr(metrics_mod, "_gpu_windows_counters", _counters)
+    monkeypatch.setattr(worker, "_gpu_windows_counters", _counters)
 
     class _Rates:
         gpu = 77.0
@@ -162,7 +173,7 @@ def test_the_nvml_way_is_tried_first(monkeypatch):
     obj._pynvml = _FakeNvml
     obj._pynvml_h = object()
 
-    assert obj._get_gpu() == 77.0
+    assert obj.gpu() == 77.0
     assert called["counters"] is False
 
 
@@ -170,17 +181,17 @@ def test_the_nvml_way_is_tried_first(monkeypatch):
 
 def test_the_thermal_zone_is_read_in_kelvin_and_given_in_celsius():
     conn = _FakeConn(zones=[_Row(temperature=340.0)])
-    assert metrics_mod._temp_windows(conn) == pytest.approx(66.85, abs=0.01)
+    assert worker._temp_windows(conn) == pytest.approx(66.85, abs=0.01)
 
 
 def test_a_zone_with_no_reading_does_not_invent_one():
     conn = _FakeConn(zones=[_Row(temperature=0), _Row(temperature=None)])
-    assert metrics_mod._temp_windows(conn) == -1.0
+    assert worker._temp_windows(conn) == -1.0
 
 
 def test_the_temperature_falls_back_to_cimv2(monkeypatch):
     obj = _bare()
-    monkeypatch.setattr(metrics_mod, "_OS", "Windows")
+    monkeypatch.setattr(worker, "_OS", "Windows")
 
     def _no_sensors():
         raise AttributeError("sensors_temperatures does not exist on Windows")
@@ -190,26 +201,26 @@ def test_the_temperature_falls_back_to_cimv2(monkeypatch):
     # old code could never have read a temperature through psutil here.
     monkeypatch.setattr(metrics_mod.psutil, "sensors_temperatures",
                         _no_sensors, raising=False)
-    monkeypatch.setattr(metrics_mod, "_temp_windows", lambda conn: 68.75)
-    monkeypatch.setattr(obj, "_cimv2", lambda: _FakeConn())
+    monkeypatch.setattr(worker, "_temp_windows", lambda conn: 68.75)
+    monkeypatch.setattr(obj, "cimv2", lambda: _FakeConn())
 
-    assert obj._get_temp() == 68.75
+    assert obj.temp() == 68.75
 
 
 def test_the_temperature_says_na_when_there_is_nothing_to_read(monkeypatch):
     obj = _bare()
-    monkeypatch.setattr(metrics_mod, "_OS", "Windows")
+    monkeypatch.setattr(worker, "_OS", "Windows")
 
     def _no_sensors():
         raise AttributeError("sensors_temperatures does not exist on Windows")
 
     monkeypatch.setattr(metrics_mod.psutil, "sensors_temperatures",
                         _no_sensors, raising=False)
-    monkeypatch.setattr(metrics_mod, "_temp_windows", lambda conn: -1.0)
-    monkeypatch.setattr(obj, "_cimv2", lambda: _FakeConn())
+    monkeypatch.setattr(worker, "_temp_windows", lambda conn: -1.0)
+    monkeypatch.setattr(obj, "cimv2", lambda: _FakeConn())
     obj._wmi_ok = False
 
-    assert obj._get_temp() == -1.0
+    assert obj.temp() == -1.0
 
 
 # ── 3. the slow probes have their own thread ────────────────────────────────
@@ -226,8 +237,8 @@ def test_the_thread_that_reads_the_hardware_opens_its_com_apartment():
     CO_E_NOTINITIALIZED = -2147221008
     result = {}
 
-    def _worker():
-        metrics_mod._com_ready()
+    def _ask():
+        worker._com_ready()
         try:
             pythoncom.CoCreateInstance(pythoncom.CLSID_StdComponentCategoriesMgr,
                                        None, pythoncom.CLSCTX_INPROC_SERVER,
@@ -236,7 +247,7 @@ def test_the_thread_that_reads_the_hardware_opens_its_com_apartment():
         except Exception as exc:      # noqa: BLE001 — the answer is the code
             result["error"] = exc
 
-    thread = threading.Thread(target=_worker)
+    thread = threading.Thread(target=_ask)
     thread.start()
     thread.join()
 
@@ -251,27 +262,32 @@ def test_the_wmi_connection_is_not_shared_between_threads():
     obj._cimv2_local.conn = "la del hilo principal"
     seen = {}
 
-    def _worker():
+    def _other():
         seen["conn"] = getattr(obj._cimv2_local, "conn", None)
 
-    thread = threading.Thread(target=_worker)
+    thread = threading.Thread(target=_other)
     thread.start()
     thread.join()
     assert seen["conn"] is None
 
 
-def test_the_slow_thread_opens_com_before_it_asks(monkeypatch):
+def test_the_thread_that_asks_opens_the_apartment_before_it_asks(monkeypatch):
+    """The apartment is opened by the thread that asks the question.
+
+    Not by another one, and not by the interface: COM belongs to a thread,
+    and the thread that opens it is the thread that closes it.
+    """
     obj = _bare()
-    obj._running = True
     called = []
-    monkeypatch.setattr(metrics_mod, "_com_ready", lambda: called.append(True))
+    monkeypatch.setattr(worker, "_com_ready", lambda: called.append(True))
 
-    def _stop(self):
-        raise KeyboardInterrupt
+    class _FakeWmi:
+        @staticmethod
+        def WMI(namespace=""):
+            return _FakeConn()
 
-    monkeypatch.setattr(metrics_mod._SysMetrics, "_read_slow", _stop)
-    with pytest.raises(KeyboardInterrupt):
-        obj._slow_loop()
+    monkeypatch.setattr(worker, "_load_wmi", lambda: _FakeWmi())
+    obj.cimv2()
     assert called == [True]
 
 
@@ -279,53 +295,64 @@ def test_a_hiccup_does_not_disable_the_counters_for_good(monkeypatch):
     """One failure is a hiccup; three in a row is a door that stays shut."""
     obj = _bare()
     obj._pynvml_ok = False
-    monkeypatch.setattr(metrics_mod, "_OS", "Windows")
-    monkeypatch.setattr(metrics_mod, "_nvml_gpu_windows", lambda: -1.0)
-    monkeypatch.setattr(obj, "_cimv2", lambda: _FakeConn())
+    monkeypatch.setattr(worker, "_OS", "Windows")
+    monkeypatch.setattr(worker, "_nvml_gpu_windows", lambda: -1.0)
+    monkeypatch.setattr(obj, "cimv2", lambda: _FakeConn())
 
     def _boom(conn):
         raise RuntimeError("the counters are not there yet")
 
-    monkeypatch.setattr(metrics_mod, "_gpu_windows_counters", _boom)
+    monkeypatch.setattr(worker, "_gpu_windows_counters", _boom)
 
-    obj._get_gpu()
+    obj.gpu()
     assert obj._counters_ok is None, "one hiccup must not close the door"
-    obj._get_gpu()
-    obj._get_gpu()
+    obj.gpu()
+    obj.gpu()
     assert obj._counters_ok is False
 
 
-def test_a_slow_counter_cannot_freeze_the_fast_meters(monkeypatch):
-    """The GPU counters take about five seconds. The processor meter must
-    not wait for them."""
-    fast_ran = threading.Event()
+def test_the_fast_meters_do_not_wait_for_the_slow_ones():
+    """The GPU counters take about five seconds, in another process.
 
-    def _slow_update(self):
-        fast_ran.set()
+    The processor meter must not wait for them, and the slow numbers
+    only appear when the other process has answered.
+    """
+    obj = _bare_interface()
+    obj._last_net = metrics_mod.psutil.net_io_counters()
+    obj._last_net_t = time.time()
+    obj._update()
+    assert obj.snapshot()["gpu"] == -1.0
+    assert obj.snapshot()["tmp"] == -1.0
 
-    monkeypatch.setattr(metrics_mod._SysMetrics, "_update", _slow_update)
+    obj._publish('{"t": 41.5, "g": 12.0}')
+    snap = obj.snapshot()
+    assert snap["gpu"] == 12.0
+    assert snap["tmp"] == 41.5
+    assert snap["gpu_state"] == "ok"
+    assert snap["tmp_state"] == "ok"
 
-    def _slow_gpu(self):
-        time.sleep(2.0)
-        return 5.0
 
-    def _slow_temp(self):
-        return 50.0
+def test_a_line_that_is_not_json_is_ignored():
+    """The other process writes lines of JSON. A line that is not one is
+    a mistake, and a mistake must not take the meters down."""
+    obj = _bare_interface()
+    obj._publish("this is not json")
+    assert obj.snapshot()["gpu"] == -1.0
 
-    monkeypatch.setattr(metrics_mod._SysMetrics, "_get_gpu", _slow_gpu)
-    monkeypatch.setattr(metrics_mod._SysMetrics, "_get_temp", _slow_temp)
 
-    obj = metrics_mod._SysMetrics()
-    try:
-        assert fast_ran.wait(1.5) is True, "the fast meter did not run"
-        # ...while the slow one is still working.
-        assert obj.snapshot()["gpu"] == -1.0
-    finally:
-        obj._running = False
+def test_a_machine_that_does_not_say_says_na_and_not_pending():
+    """-1 is an answer: there is nothing to read. It is not "still
+    counting", and a meter that says N/A while it is still counting
+    looks broken."""
+    obj = _bare_interface()
+    obj._publish('{"t": -1.0, "g": -1.0}')
+    snap = obj.snapshot()
+    assert snap["gpu_state"] == "na"
+    assert snap["tmp_state"] == "na"
 
 
 def test_the_fast_meter_does_not_touch_the_gpu_or_the_temperature():
-    obj = _bare()
+    obj = _bare_interface()
     obj._last_net = metrics_mod.psutil.net_io_counters()
     obj._last_net_t = time.time()
     obj._update()
@@ -342,13 +369,12 @@ def test_a_gpu_that_throws_does_not_cost_the_temperature(monkeypatch):
     def _boom():
         raise RuntimeError("the counters are not there")
 
-    monkeypatch.setattr(obj, "_get_gpu", _boom)
-    monkeypatch.setattr(obj, "_get_temp", lambda: 42.0)
+    monkeypatch.setattr(obj, "gpu", _boom)
+    monkeypatch.setattr(obj, "temp", lambda: 42.0)
 
-    gpu, tmp = obj._read_slow()
-    assert gpu == -1.0
-    assert tmp == 42.0
-    assert obj.snapshot()["tmp"] == 42.0
+    reading = worker.read_once(obj)
+    assert reading["g"] == -1.0
+    assert reading["t"] == 42.0
 
 
 # ── 4. the form and the ignition ────────────────────────────────────────────
