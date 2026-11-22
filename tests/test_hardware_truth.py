@@ -373,13 +373,27 @@ def window(qt_app, tmp_path_factory):
 
     One for the whole module: every window brings its own timers, its own
     media player and its own scene canvas.
+
+    THE LOCKER IS EMPTY ON PURPOSE.
+    The key lives in the Windows Credential Locker, which belongs to the
+    machine and not to the test: a machine where the owner has already
+    saved a key would show NO form at all, and these tests — which are
+    about the form — would fail for a reason that has nothing to do with
+    the code. So the locker of the test is one of its own, and it is
+    empty: the form is there, as the tests expect it.
     """
     config_dir = tmp_path_factory.mktemp("config")
     from memory import config_manager as cm
     original_dir = cm.CONFIG_DIR
     original_file = cm.CONFIG_FILE
+    original_read = cm._read_secure_key
+    original_store = cm._store_secure_key
+    original_remove = cm._remove_secure_key
     cm.CONFIG_DIR = config_dir
     cm.CONFIG_FILE = config_dir / "api_keys.json"
+    cm._read_secure_key = lambda: None
+    cm._store_secure_key = lambda key: None
+    cm._remove_secure_key = lambda: None
 
     from gui.window import MainWindow
     win = MainWindow(str(BASE / "core" / "face_model.obj"))
@@ -395,6 +409,9 @@ def window(qt_app, tmp_path_factory):
     win.deleteLater()
     cm.CONFIG_DIR = original_dir
     cm.CONFIG_FILE = original_file
+    cm._read_secure_key = original_read
+    cm._store_secure_key = original_store
+    cm._remove_secure_key = original_remove
 
 
 def test_the_form_is_on_screen(window):

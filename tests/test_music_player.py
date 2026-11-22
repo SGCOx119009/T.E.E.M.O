@@ -17,6 +17,7 @@ WHAT IS BEING PROVED
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,35 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from actions import music_player as mp  # noqa: E402
+
+
+@contextmanager
+def _own_config(tmp_path, **settings):
+    """A configuration of our own.
+
+    The rule of the house: a test never touches the configuration of the
+    machine it runs on. The choice of the player is a preference of the
+    user, and a test that changed it would leave the user's own choice
+    altered after the run.
+    """
+    from memory import config_manager
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    previous_dir = config_manager.CONFIG_DIR
+    previous_file = config_manager.CONFIG_FILE
+    config_manager.CONFIG_DIR = config_dir
+    config_manager.CONFIG_FILE = config_dir / "api_keys.json"
+    try:
+        for key, value in settings.items():
+            if key == "music_service":
+                config_manager.save_music_service(value)
+            else:
+                config_manager._patch_config(**{key: value})
+        yield config_manager
+    finally:
+        config_manager.CONFIG_DIR = previous_dir
+        config_manager.CONFIG_FILE = previous_file
 
 
 # ── The request in the language the user made it in ─────────────────────────
@@ -71,19 +101,12 @@ def test_the_requested_route_wins_over_the_automatic_choice(monkeypatch):
     assert mp._preferred_service("youtube") == "youtube"
 
 
-def test_the_saved_preference_wins_over_the_automatic_choice(monkeypatch):
-    from memory import config_manager
-    original = config_manager.load_api_keys().get("music_service")
-    try:
+def test_the_saved_preference_wins_over_the_automatic_choice(monkeypatch, tmp_path):
+    with _own_config(tmp_path) as config_manager:
         config_manager.save_music_service("youtube")
         assert mp._preferred_service("") == "youtube"
         config_manager.save_music_service("spotify")
         assert mp._preferred_service("") == "spotify"
-    finally:
-        if original is None:
-            config_manager.save_music_service("auto")
-        else:
-            config_manager.save_music_service(original)
 
 
 def test_the_automatic_choice_follows_what_is_installed(monkeypatch):
@@ -96,7 +119,7 @@ def test_the_automatic_choice_follows_what_is_installed(monkeypatch):
 # ── The YouTube route ───────────────────────────────────────────────────────
 
 def _stub_youtube(monkeypatch, state="playing", resolved=("vid123", "Coqueta", "Canal")):
-    monkeypatch.setattr(mp, "_youtube_resolve", lambda _q: resolved)
+    monkeypatch.setattr(mp, "_youtube_resolve", lambda _q, _a="": resolved)
     monkeypatch.setattr(mp, "_open_in_default_browser", lambda _url: True)
     monkeypatch.setattr(mp, "_youtube_ensure_playing",
                         lambda _title, timeout=mp._VERIFY_TIMEOUT: (state, ""))
@@ -120,14 +143,14 @@ def test_youtube_reports_what_it_could_not_confirm(monkeypatch):
 
 
 def test_youtube_without_a_resolution_opens_the_search_and_says_so(monkeypatch):
-    monkeypatch.setattr(mp, "_youtube_resolve", lambda _q: ("", "", ""))
+    monkeypatch.setattr(mp, "_youtube_resolve", lambda _q, _a="": ("", "", ""))
     monkeypatch.setattr(mp, "_open_in_default_browser", lambda _url: True)
     result = mp.music_player({"query": "coqueta", "service": "youtube"})
     assert "status=unverified" in result
 
 
 def test_a_browser_that_refuses_to_open_is_a_failure(monkeypatch):
-    monkeypatch.setattr(mp, "_youtube_resolve", lambda _q: ("vid123", "Coqueta", ""))
+    monkeypatch.setattr(mp, "_youtube_resolve", lambda _q, _a="": ("vid123", "Coqueta", ""))
     monkeypatch.setattr(mp, "_open_in_default_browser", lambda _url: False)
     result = mp.music_player({"query": "coqueta", "service": "youtube"})
     assert "status=failed" in result
@@ -165,14 +188,68 @@ def test_the_player_button_is_pressed_when_the_autoplay_was_blocked(monkeypatch)
 
 # ── The Spotify route ──────────────────────────────────────────────────────
 
-def test_spotify_falls_back_to_youtube_when_it_could_not_do_it(monkeypatch):
+def test_spotify_falls_back_to_youtube_when_nobody_had_chosen(monkeypatch, tmp_path):
+    """In automatic mode, a Spotify that could not do it hands over.
+
+    Automatic means exactly that: nobody has said which player they want,
+    so the assistant is free to try the other one rather than leave the
+    user with silence.
+    """
     monkeypatch.setattr(mp, "_spotify_api_play", lambda _q, _a: ("", "no account"))
     monkeypatch.setattr(mp, "_spotify_desktop_play", lambda _q, _a: "")
     monkeypatch.setattr(mp.time, "sleep", lambda _s: None)
     _stub_youtube(monkeypatch)
-    result = mp.music_player({"query": "coqueta", "service": "spotify"})
+    with _own_config(tmp_path, music_service="auto"):
+        result = mp.music_player({"query": "coqueta"})
     assert "status=done" in result
     assert "service=youtube" in result
+
+
+def test_spotify_that_the_request_named_does_not_open_youtube_on_top(monkeypatch):
+    """The player the request named is the player that plays.
+
+    Opening another one on top of it is what made every song open in
+    Spotify first and then in YouTube: the user saw the wrong player
+    first, every single time, with no way to say so.
+    """
+    monkeypatch.setattr(mp, "_spotify_api_play", lambda _q, _a: ("", "no account"))
+    monkeypatch.setattr(mp, "_spotify_desktop_play", lambda _q, _a: "")
+    monkeypatch.setattr(mp.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(mp, "_open_in_default_browser",
+                        lambda _url: pytest.fail("the browser must stay out"))
+    result = mp.music_player({"query": "coqueta", "service": "spotify"})
+    assert "service=youtube" not in result, result
+    assert "status=failed" in result, result
+
+
+def test_the_player_chosen_in_controls_does_not_open_youtube_on_top(monkeypatch, tmp_path):
+    """The choice in CONTROLS is the user choosing, too.
+
+    This is the case that was broken: the selector in CONTROLS was
+    remembered, shown and saved — and then ignored, so the song still
+    opened in Spotify and then in YouTube on top of it.
+    """
+    monkeypatch.setattr(mp, "_spotify_api_play", lambda _q, _a: ("", "no account"))
+    monkeypatch.setattr(mp, "_spotify_desktop_play", lambda _q, _a: "")
+    monkeypatch.setattr(mp.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(mp, "_open_in_default_browser",
+                        lambda _url: pytest.fail("the browser must stay out"))
+    with _own_config(tmp_path, music_service="spotify"):
+        result = mp.music_player({"query": "coqueta"})
+    assert "service=youtube" not in result, result
+    assert "status=failed" in result, result
+
+
+def test_the_choice_in_controls_is_the_one_that_is_obeyed(monkeypatch, tmp_path):
+    """With YouTube chosen in CONTROLES, Spotify is never opened."""
+    monkeypatch.setattr(mp, "_spotify_api_play",
+                        lambda _q, _a: pytest.fail("Spotify must stay out"))
+    monkeypatch.setattr(mp, "_spotify_desktop_play",
+                        lambda _q, _a: pytest.fail("Spotify must stay out"))
+    _stub_youtube(monkeypatch)
+    with _own_config(tmp_path, music_service="youtube"):
+        result = mp.music_player({"query": "coqueta"})
+    assert "service=youtube" in result, result
 
 
 def test_spotify_does_not_open_another_player_over_a_track_it_already_started(monkeypatch):
