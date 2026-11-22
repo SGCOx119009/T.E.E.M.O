@@ -710,6 +710,21 @@ def _foreground() -> tuple[str, str, int, Any]:
         return "", "", 0, None
 
 
+def foreground_window() -> tuple[str, str]:
+    """The application in front and the title of its window.
+
+    It is asked with the plain Windows API — an enumeration of the
+    windows, no COM, no accessibility tree — so it can be called from any
+    thread. The tree itself is COM, and a COM object belongs to the
+    apartment of the thread that made it.
+    """
+    try:
+        app, title, _pid, _hwnd = _foreground()
+        return app, title
+    except Exception:
+        return "", ""
+
+
 def all_windows() -> list[tuple[str, str]]:
     """Every visible top-level window, as (process name, title). Never raises.
 
@@ -732,8 +747,20 @@ def _all_windows_windows() -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     names: dict[int, str] = {}
 
-    callback = ctypes.WINFUNCTYPE(
-        ctypes.c_bool, ctypes.c_int, ctypes.POINTER(ctypes.c_int))
+    # THE SHAPE OF THE CALLBACK IS THE SHAPE OF THE WINDOWS API.
+    #
+    # EnumWindows wants a WNDPROC — (HWND, LPARAM) returning an LRESULT —
+    # and a LPARAM is a number, not a None. Calling it with None used to
+    # print two lines of noise on the console of the program, every time
+    # the list of windows was asked for:
+    #
+    #     WNDPROC return value cannot be converted to LRESULT
+    #     TypeError: WPARAM is simple, so must be an int object (got NoneType)
+    #
+    # The other three enumerations of this file were already written the
+    # right way. This one was not, and it is the one the viewer and the
+    # assistant ask for.
+    callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def visit(hwnd, _param):
         try:
@@ -761,7 +788,7 @@ def _all_windows_windows() -> list[tuple[str, str]]:
             pass
         return True
 
-    user32.EnumWindows(callback(visit), None)
+    user32.EnumWindows(callback(visit), 0)
     return found
 
 

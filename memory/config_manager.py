@@ -878,6 +878,34 @@ def save_output_device(name: str) -> None:
     _patch_config(output_device=(name or "").strip())
 
 
+def get_camera_index() -> int | None:
+    """Which camera the user picked — or None when nobody has picked one.
+
+    None is not zero. Zero is a real answer ("the first camera"), and a
+    machine with one camera never has to be told which one it is; None
+    means "nobody has said", and the caller is then free to go and look
+    for a camera that works. The value is read here and nowhere else, so
+    the interface, the viewer, the hands and the tool all watch the same
+    camera.
+    """
+    raw = load_api_keys().get("camera_index")
+    if raw is None:
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def save_camera_index(index: int) -> None:
+    """Remember which camera was picked."""
+    try:
+        value = max(0, int(index))
+    except (TypeError, ValueError):
+        value = 0
+    _patch_config(camera_index=value)
+
+
 def get_plugin_enabled(plugin_name: str) -> bool:
     """Plugins are enabled by default the moment they're discovered (opt-out model)."""
     return load_api_keys().get("plugins_enabled", {}).get(plugin_name, True)
