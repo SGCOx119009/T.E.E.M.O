@@ -787,6 +787,57 @@ def _keep_context_of(exc: BaseException) -> bool:
     return True
 
 
+# The words that mean the connection died, as opposed to the words that
+# mean the server said no. A dropped connection and a refused key are two
+# different problems, and the user is told two different things.
+_NETWORK_WORDS = (
+    "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
+    "ConnectionRefusedError", "OSError", "Cannot connect",
+    "ConnectionClosed", "ConnectionReset", "keepalive ping timeout",
+    "WebSocket", "network is unreachable",
+)
+
+
+def _is_network_error(text: str) -> bool:
+    """True when the failure is the connection, not the server's answer."""
+    return any(word in text for word in _NETWORK_WORDS)
+
+
+def _error_text(exc: BaseException) -> str:
+    """Every message inside an exception, including the ones inside a group.
+
+    WHY THIS EXISTS
+        A TaskGroup bundles the failures of its tasks into an
+        ExceptionGroup, and the group says only this:
+
+            unhandled errors in a TaskGroup (1 sub-exception)
+
+        The real error — "timed out while closing connection", "keepalive
+        ping timeout", "quota exceeded" — is inside, and every decision
+        this program makes about what went wrong is made by LOOKING AT
+        THE TEXT. So the group is opened up and the leaves are read.
+
+        Before this, a dropped connection that arrived wrapped in a group
+        was invisible: the text said "TaskGroup", the network-error test
+        said no, the quota test said no, and the assistant sat there
+        wondering why the connection had died, until the backoff
+        happened to bring it back by accident.
+    """
+    parts: list[str] = []
+    stack = [exc]
+    while stack:
+        current = stack.pop(0)
+        if isinstance(current, BaseExceptionGroup):
+            stack = list(current.exceptions) + stack
+            continue
+        name = type(current).__name__
+        message = str(current)
+        parts.append(f"{name}: {message}" if message else name)
+    if not parts:
+        return type(exc).__name__
+    return " | ".join(parts)
+
+
 class TeemoLive:
     def __init__(self, ui: TeemoUI):
         # Platform limits are announced once per run, not once per
@@ -3396,9 +3447,8 @@ class TeemoLive:
                     self._conn_backoff = 0
                     continue
 
-                err_str = str(e)
-                print(f"[T.E.E.M.O] Error ({type(e).__name__}): {e}")
-                traceback.print_exc()
+                err_str = _error_text(e)
+                print(f"[T.E.E.M.O] Error: {err_str}")
 
                 # Out of quota, or this model is not available to this key —
                 # step down the ladder and reconnect straight away. This is the
@@ -3459,10 +3509,7 @@ class TeemoLive:
                     continue
 
                 # Network / timeout errors — log clearly and back off
-                is_net_err = any(k in err_str for k in (
-                    "TimeoutError", "timed out", "getaddrinfo", "CancelledError",
-                    "ConnectionRefusedError", "OSError", "Cannot connect",
-                ))
+                is_net_err = _is_network_error(err_str)
                 if is_net_err:
                     _conn_backoff = min(getattr(self, "_conn_backoff", 3) * 2, 60)
                     self._conn_backoff = _conn_backoff
@@ -3471,7 +3518,12 @@ class TeemoLive:
                         "(a VPN may be required)"
                     )
                 else:
+                    # The one case nobody planned for. The whole traceback
+                    # is printed, because this is the line that has to be
+                    # enough to fix it — the known failures above say what
+                    # they are in one line.
                     self._conn_backoff = 3
+                    traceback.print_exc()
             finally:
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns)
