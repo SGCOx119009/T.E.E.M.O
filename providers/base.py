@@ -116,6 +116,159 @@ DEFAULT_CAPS: dict[str, Any] = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Capability names — the vocabulary two systems negotiate in
+# ─────────────────────────────────────────────────────────────────────────────
+# `DEFAULT_CAPS` above is the set of FACTS about one engine: "can it see?",
+# "can it call tools?". What follows is the set of NAMES that an engine and a
+# client agree on, so the two can be COMPARED instead of merely described.
+#
+# The rule the negotiation exists to enforce is one sentence long: a client
+# that cannot play audio does not receive audio. Synthesising a voice for a
+# client with no speaker is slow, expensive and wrong — and only the client
+# knows it has no speaker.
+#
+# The two layers are kept deliberately apart. `caps` stays exactly what the
+# providers declare today — a dict of facts, read by main.py and by the GUI —
+# and the names live beside it. Nothing that reads `caps` changes.
+CAP_AUDIO_OUTPUT = "audio_output"    # the engine can produce a voice
+CAP_AUDIO_INPUT = "audio_input"      # the client can send a microphone
+CAP_VIDEO_OUTPUT = "video_output"    # the client can show images and video
+CAP_TEXT_STREAM = "text_stream"      # the client can render text
+CAP_TOOLS = "tools"                  # the engine can call functions
+CAP_INTERRUPT = "interrupt"          # the engine can be stopped mid-answer
+CAP_BARGE_IN = "barge_in"            # the user can interrupt by speaking
+
+# The canonical order. Every list this module returns follows it, so the same
+# negotiation twice produces the same list and two of them can be compared.
+CAPABILITIES: tuple[str, ...] = (
+    CAP_AUDIO_OUTPUT,
+    CAP_AUDIO_INPUT,
+    CAP_VIDEO_OUTPUT,
+    CAP_TEXT_STREAM,
+    CAP_TOOLS,
+    CAP_INTERRUPT,
+    CAP_BARGE_IN,
+)
+
+# What the desktop client supports. T.E.E.M.O itself plays audio, takes the
+# microphone, shows video, renders text, runs tools and can be interrupted.
+CLIENT_CAPS_FULL: tuple[str, ...] = CAPABILITIES
+
+# The facts -> names bridge. A fact in DEFAULT_CAPS that says the engine can
+# do something becomes the name that says the same thing. A name that is also
+# a fact ("tools", "barge_in") speaks for itself and needs no entry here.
+_FACT_TO_CAPABILITY: dict[str, str] = {
+    "audio_out": CAP_AUDIO_OUTPUT,
+    "vision": CAP_VIDEO_OUTPUT,
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Negotiation
+# ─────────────────────────────────────────────────────────────────────────────
+# Why the client gets a say
+# -------------------------
+# The engine knows what it can produce. It does NOT know what the thing on
+# the other end can do with it: a browser bridge with no speaker, a phone
+# dashboard in text-only mode, a test harness that wants the transcript and
+# nothing else. The client therefore declares what it supports, and the two
+# lists are intersected.
+#
+# The intersection is symmetric — the order of the two arguments does not
+# change the answer — and it is returned in the canonical order above, so it
+# is stable and printable.
+def client_caps(*names: str) -> tuple[str, ...]:
+    """Declare the capabilities a client supports.
+
+        client_caps(CAP_AUDIO_INPUT, CAP_TEXT_STREAM)
+
+    Unknown names are refused rather than ignored: a typo in a capability
+    name would otherwise turn into a client that quietly lacks a feature.
+    """
+    unknown = [n for n in names if n not in CAPABILITIES]
+    if unknown:
+        raise ValueError(f"unknown capability: {unknown[0]!r}")
+    wanted = set(names)
+    return tuple(c for c in CAPABILITIES if c in wanted)
+
+
+def capabilities_of(caps) -> tuple[str, ...]:
+    """The capability names a `caps` object actually grants.
+
+    Accepts either the facts dict a provider declares (`DEFAULT_CAPS` and
+    friends) or a plain list of names, so a negotiated result can be fed
+    straight back in.
+    """
+    if caps is None:
+        return ()
+    if isinstance(caps, dict):
+        granted = set()
+        for key, value in caps.items():
+            if not value:
+                continue
+            if key in CAPABILITIES:
+                granted.add(key)
+            elif key in _FACT_TO_CAPABILITY:
+                granted.add(_FACT_TO_CAPABILITY[key])
+        return tuple(c for c in CAPABILITIES if c in granted)
+    granted = {n for n in caps if n in CAPABILITIES}
+    return tuple(c for c in CAPABILITIES if c in granted)
+
+
+def negotiate_capabilities(server_caps, client_caps) -> list[str]:
+    """What the engine can do AND the client can accept.
+
+    The result is the intersection, in the canonical order. A client that
+    does not declare `audio_output` does not get it, whatever the engine can
+    produce.
+    """
+    server = set(capabilities_of(server_caps))
+    client = set(capabilities_of(client_caps))
+    return [c for c in CAPABILITIES if c in server and c in client]
+
+
+def supports(caps, name: str) -> bool:
+    """True when this caps set grants `name`."""
+    return name in capabilities_of(caps)
+
+
+def allows_audio(caps) -> bool:
+    """True when audio may flow: the engine can produce it and the client can
+    play it. A client without a speaker gets no audio."""
+    return CAP_AUDIO_OUTPUT in capabilities_of(caps)
+
+
+@dataclass(frozen=True)
+class NegotiatedCaps:
+    """The outcome of one negotiation — what this session may actually do.
+
+    The pipeline asks this object, not the raw engine caps: the question is
+    never "can the engine?" but "can the engine AND the client?".
+    """
+
+    server: tuple[str, ...] = ()
+    client: tuple[str, ...] = ()
+    allowed: tuple[str, ...] = ()
+
+    def supports(self, name: str) -> bool:
+        return name in self.allowed
+
+    def allows_audio(self) -> bool:
+        return CAP_AUDIO_OUTPUT in self.allowed
+
+    def as_list(self) -> list[str]:
+        return list(self.allowed)
+
+
+def negotiate(server_caps, client_caps) -> NegotiatedCaps:
+    """Negotiate, and keep both sides so the log can say what was refused."""
+    server = capabilities_of(server_caps)
+    client = capabilities_of(client_caps)
+    allowed = tuple(c for c in CAPABILITIES if c in server and c in client)
+    return NegotiatedCaps(server, client, allowed)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Configuration fields — the UI form is GENERATED from these
 # ─────────────────────────────────────────────────────────────────────────────
 # A provider says what it needs and the settings panel draws it. This is the
