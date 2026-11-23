@@ -44,6 +44,20 @@ from gui.overlays import (
 
 from gui.style import hud_font
 
+from core.localization import t as _t
+
+# Where the projects the coding model writes are kept. A path, not a
+# sentence: it is the same folder in every language.
+_PROJECTS_PATH = "Desktop/TEEMO Projects"
+
+# The messages a worker sends when there is NOTHING to report. They travel as
+# sentinels and not as text, because the text they stand for is translated
+# when it is shown, on the Qt thread, in the language in use at that moment.
+_NOTHING_TO_CHECK = "\x00nothing-to-check"
+_NOTHING_TO_LIST = "\x00nothing-to-list"
+_INSTALLED = "\x00installed"
+_PIP_FAILED = "\x00pip-failed"
+
 
 def _call_probe(probe, progress=None, cancelled=None) -> tuple[bool, str]:
     """Ask a provider whether it is usable, whichever probe it offers.
@@ -131,10 +145,14 @@ class ProvidersOverlay(_HudOverlay):
 
     # Which provider fills each slot, and what the slot is FOR — in the words
     # somebody configuring it would use, not the words the code uses.
+    # The third item is a CATALOG KEY and not the name itself: the panel is
+    # read in five languages, and the code does not get to decide what a slot
+    # is called. The help ("_help") and the short word ("_word") of the same
+    # slot come from the same stem.
     _SLOTS = (
-        ("stt", "①", "HEARING",  "turns what you say into words"),
-        ("llm", "②", "THINKING", "understands, decides, uses your tools"),
-        ("tts", "③", "SPEAKING", "reads the answer out loud"),
+        ("stt", "①", "providers.slot.hearing"),
+        ("llm", "②", "providers.slot.thinking"),
+        ("tts", "③", "providers.slot.speaking"),
     )
 
     def __init__(self, parent=None):
@@ -203,13 +221,12 @@ class ProvidersOverlay(_HudOverlay):
         outer.setContentsMargins(22, 18, 22, 18)
         outer.setSpacing(10)
 
-        title = QLabel("🔌  ENGINE  &  PROVIDERS")
+        title = QLabel(_t("providers.title"))
         title.setFont(hud_font(13, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         outer.addWidget(title)
 
-        sub = QLabel("Choose what powers the conversation. "
-                     "Gemini is the default and needs nothing set up here.")
+        sub = QLabel(_t("providers.subtitle"))
         sub.setWordWrap(True)
         sub.setFont(hud_font(8))
         sub.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
@@ -221,16 +238,15 @@ class ProvidersOverlay(_HudOverlay):
         # answers deserve to be readable at the same time.
         self._mode = get_provider_mode()
         cards = QHBoxLayout(); cards.setSpacing(10)
+        # "GEMINI LIVE" is the name of Google's product, so it is written the
+        # same way in every language. The card next to it is translated.
         self._card_gemini = self._mode_card(
             "☁  GEMINI LIVE",
-            "One connection carries your voice, its voice, the transcript and "
-            "the tools together. The fastest option — about half a second to "
-            "the first word.",
+            _t("providers.mode.gemini_body"),
             "gemini")
         self._card_local = self._mode_card(
-            "🖥  MY OWN SETUP",
-            "Your choice of hearing, thinking and speaking. Can run entirely on "
-            "this computer, with nothing leaving it. Slower: 1.5 to 4 seconds.",
+            _t("providers.mode.own"),
+            _t("providers.mode.own_body"),
             "pipeline")
         cards.addWidget(self._card_gemini)
         cards.addWidget(self._card_local)
@@ -279,7 +295,8 @@ class ProvidersOverlay(_HudOverlay):
         outer.addWidget(self._footer)
 
         row = QHBoxLayout(); row.setSpacing(8)
-        apply_btn = QPushButton("▸  SAVE  &&  APPLY")     # && — a lone & is a Qt shortcut marker
+        # "&&" in the English text: a lone & is a Qt shortcut marker.
+        apply_btn = QPushButton(_t("providers.apply"))
         apply_btn.setFixedHeight(34)
         apply_btn.setFont(hud_font(9, QFont.Weight.Bold))
         apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -291,7 +308,7 @@ class ProvidersOverlay(_HudOverlay):
         apply_btn.clicked.connect(self._apply)
         row.addWidget(apply_btn, 2)
 
-        close = QPushButton("CLOSE")
+        close = QPushButton(_t("providers.close"))
         close.setFixedHeight(34)
         close.setFont(hud_font(9))
         close.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -451,8 +468,9 @@ class ProvidersOverlay(_HudOverlay):
             box.setCurrentIndex(j)
         elif keep:
             box.setCurrentText(keep)
-        self._say(pid, f"{len(items)} model{'s' if len(items) != 1 else ''} "
-                       f"found on this server — pick one above.", C.TEXT_DIM)
+        key = ("providers.status.models_found" if len(items) != 1
+               else "providers.status.model_found")
+        self._say(pid, _t(key, count=len(items)), C.TEXT_DIM)
 
     def _set_mode(self, value: str) -> None:
         if value == self._mode:
@@ -669,17 +687,14 @@ class ProvidersOverlay(_HudOverlay):
         self._status.clear()
 
         if self._mode == "pipeline":
-            for slot, num, name, what in self._SLOTS:
-                self._body_lay.addWidget(self._slot_box(slot, num, name, what))
+            for slot, num, name in self._SLOTS:
+                self._body_lay.addWidget(self._slot_box(slot, num, name))
         else:
             w, lay = self._box([])
+            lay.addWidget(self._label(_t("providers.gemini_body"), 8, C.TEXT_DIM))
             lay.addWidget(self._label(
-                "Nothing to set up. Your voice goes to Gemini and comes back as "
-                "speech over one connection, with the transcript and every tool "
-                "call on the same wire.", 8, C.TEXT_DIM))
-            lay.addWidget(self._label(
-                "Pick MY OWN SETUP above to run it on your own machine, or "
-                "through another company's model.", 7, C.TEXT_DIM))
+                _t("providers.gemini_body2",
+                   own=_t("providers.mode.own_name")), 7, C.TEXT_DIM))
             self._body_lay.addWidget(w)
 
         self._body_lay.addWidget(self._sidecar_box_widget())
@@ -687,9 +702,9 @@ class ProvidersOverlay(_HudOverlay):
         self._body_lay.addStretch(1)
         self._update_footer()
 
-    def _slot_box(self, slot: str, num: str, name: str, what: str) -> QWidget:
-        head = self._label(f"{num}  {name}", 9, C.PRI, bold=True)
-        w, lay = self._box([head, self._label(what, 7, C.TEXT_DIM)])
+    def _slot_box(self, slot: str, num: str, name: str) -> QWidget:
+        head = self._label(f"{num}  {_t(name)}", 9, C.PRI, bold=True)
+        w, lay = self._box([head, self._label(_t(f"{name}_help"), 7, C.TEXT_DIM)])
 
         def fmt(entry, decl):
             label = entry["label"]
@@ -701,10 +716,10 @@ class ProvidersOverlay(_HudOverlay):
                 label = f"    {label}"
             note = entry.get("note") or ""
             if not decl.get("_available", True):
-                note = (note + " · needs install").strip(" ·")
+                note = (note + " · " + _t("providers.needs_install")).strip(" ·")
             return f"{label}{'   —  ' + note if note else ''}"
 
-        box = self._service_combo(slot, ("— not set —", ""), fmt)
+        box = self._service_combo(slot, (_t("providers.not_set"), ""), fmt)
         sid = self._pipe.get(slot, "")
         self._select(box, sid)
         box.currentIndexChanged.connect(
@@ -790,7 +805,8 @@ class ProvidersOverlay(_HudOverlay):
             # refuse every request without one.
             if f.key == "api_key" and entry.get("local") is False:
                 f = replace(f, required=True,
-                            hint=f"Needed — create one in your {entry['label']} account")
+                            hint=_t("providers.api_key_needed",
+                                    name=entry["label"]))
             if f.key == "backend":
                 carried[f.key] = (self._line(
                     str(entry.get("values", {}).get("backend")
@@ -804,7 +820,8 @@ class ProvidersOverlay(_HudOverlay):
 
         for _key, (w, f) in shown.items():
             lay.addWidget(self._label(
-                f.label + ("" if f.required else "   (optional)"), 7, C.TEXT_DIM))
+                f.label + ("" if f.required else _t("providers.optional")),
+                7, C.TEXT_DIM))
             lay.addWidget(w)
             # A text box already shows its hint as placeholder text. Adding the
             # label as well printed every hint twice, which is how the panel
@@ -821,21 +838,25 @@ class ProvidersOverlay(_HudOverlay):
         self._status[pid] = status
 
         brow = QHBoxLayout(); brow.setSpacing(6)
-        test_btn = self._btn("TEST", lambda _=0, p=pid: self._test(p), C.PRI)
+        test_btn = self._btn(_t("providers.test"),
+                             lambda _=0, p=pid: self._test(p), C.PRI)
         self._test_buttons[pid] = test_btn
         brow.addWidget(test_btn)
         # Not "LIST" any more: the list arrives on its own when a service is
         # chosen. This is the button for when it did not — the server was
         # starting up, or a model has just been pulled.
         if any(k in shown for k in ("model", "voice_id", "voice")):
-            brow.addWidget(self._btn("↻ REFRESH", lambda _=0, p=pid: self._list(p)))
+            brow.addWidget(self._btn(_t("providers.refresh"),
+                                     lambda _=0, p=pid: self._list(p)))
         if advanced:
             brow.addWidget(self._btn(
-                ("⌃ LESS" if self._more.get(pid) else "⌄ MORE"),
+                (_t("providers.less") if self._more.get(pid)
+                 else _t("providers.more")),
                 lambda _=0, p=pid: self._toggle_more(p)))
         if not decl.get("_available", True) and decl.get("install"):
-            brow.addWidget(self._btn(f"INSTALL {decl['install']}",
-                                     lambda _=0, p=pid: self._install(p), C.ACC2))
+            brow.addWidget(self._btn(
+                _t("providers.install", pkg=decl["install"]),
+                lambda _=0, p=pid: self._install(p), C.ACC2))
         brow.addStretch(1)
         holder = QWidget()
         holder.setStyleSheet("background: transparent; border: none;")
@@ -846,7 +867,8 @@ class ProvidersOverlay(_HudOverlay):
         if self._more.get(pid):
             lay.addWidget(self._label("─" * 46, 7, C.BORDER))
             for f, w in advanced:
-                lay.addWidget(self._label(f"{f.label}   (optional)", 7, C.TEXT_DIM))
+                lay.addWidget(self._label(
+                    f"{f.label}{_t('providers.optional')}", 7, C.TEXT_DIM))
                 lay.addWidget(w)
                 if f.hint and not isinstance(w, QLineEdit):
                     lay.addWidget(self._label(f.hint, 7, C.TEXT_DIM))
@@ -863,7 +885,7 @@ class ProvidersOverlay(_HudOverlay):
             w = self._combo()
             choices = list(self._live_choices(pid, f.key) or f.choices)
             if not f.required:
-                w.addItem("— default —", "")
+                w.addItem(_t("providers.default_choice"), "")
             for c in choices:
                 w.addItem(str(c), str(c))
             w.setEditable(f.key in ("base_url", "model", "voice_id"))
@@ -880,8 +902,12 @@ class ProvidersOverlay(_HudOverlay):
             return w
         if f.kind == "bool":
             w = self._combo()
-            w.addItem("no", "")
-            w.addItem("yes", "1")
+            # The two words of a yes/no answer live in ONE catalog entry,
+            # because "no" is spelled the same in English and in Spanish and
+            # a key may not say the same thing in two languages.
+            no, yes = [x.strip() for x in _t("providers.bool_choices").split("|")]
+            w.addItem(no, "")
+            w.addItem(yes, "1")
             w.setCurrentIndex(1 if str(value) in ("1", "True", "true") else 0)
             return w
         w = self._line(str(value if value is not None else ""))
@@ -897,14 +923,9 @@ class ProvidersOverlay(_HudOverlay):
         QTimer.singleShot(0, self._rebuild_body)
 
     def _sidecar_box_widget(self) -> QWidget:
-        head = self._label("⚡  BACKGROUND REQUESTS", 9, C.PRI, bold=True)
+        head = self._label(_t("providers.sidecar.title"), 9, C.PRI, bold=True)
         w, lay = self._box([head])
-        lay.addWidget(self._label(
-            "Reading a document, looking at your screen, writing code — the "
-            "assistant's own requests, not the conversation. These use Gemini's "
-            "text quota, which runs out before the voice does. Sending them "
-            "somewhere else keeps them working, and changes nothing you hear.",
-            7, C.TEXT_DIM))
+        lay.addWidget(self._label(_t("providers.sidecar.body"), 7, C.TEXT_DIM))
 
         # Read the stored choice BEFORE the box exists. The first version asked
         # the combo — and at this point that is the empty box being built, so
@@ -914,18 +935,17 @@ class ProvidersOverlay(_HudOverlay):
         def fmt(entry, _decl):
             mark = "🖥" if entry.get("local") else (
                 "☁" if entry.get("local") is False else "  ")
-            return f"{mark}  Fall back to {entry['label']}"
+            return f"{mark}  {_t('providers.sidecar.fallback', name=entry['label'])}"
 
         self._sidecar_combo = self._service_combo(
-            "llm", ("Gemini only  —  the way it has always been", ""), fmt)
+            "llm", (_t("providers.sidecar.gemini_only"), ""), fmt)
         self._select(self._sidecar_combo, sid)
         self._sidecar_combo.currentIndexChanged.connect(self._sidecar_changed)
         lay.addWidget(self._sidecar_combo)
 
         self._first_combo = self._combo()
-        self._first_combo.addItem("Try Gemini first  —  faster", "after")
-        self._first_combo.addItem(
-            "Try the other one first  —  keeps more on your machine", "before")
+        self._first_combo.addItem(_t("providers.sidecar.try_gemini"), "after")
+        self._first_combo.addItem(_t("providers.sidecar.try_other"), "before")
         self._first_combo.setCurrentIndex(1 if self._sidecar_first else 0)
         lay.addWidget(self._first_combo)
 
@@ -935,13 +955,14 @@ class ProvidersOverlay(_HudOverlay):
         if sid:
             if self._mode == "pipeline" and sid == self._pipe.get("llm"):
                 lay.addWidget(self._label(
-                    "Uses the model you chose for ② THINKING.", 7, C.TEXT_DIM))
+                    _t("providers.uses_thinking",
+                       slot=self._slot_label("providers.slot.thinking")),
+                    7, C.TEXT_DIM))
             else:
                 self._fields_into(lay, "llm", sid)
         else:
             lay.addWidget(self._label(
-                "Left as it is, these keep using Gemini and stop working when "
-                "its text quota runs out.", 7, C.TEXT_DIM))
+                _t("providers.sidecar.left_as_is"), 7, C.TEXT_DIM))
         return w
 
     def _coding_box_widget(self) -> QWidget:
@@ -952,23 +973,22 @@ class ProvidersOverlay(_HudOverlay):
         whole source file at a time. Whatever is picked is tried FIRST for code,
         with Gemini behind it, so a service having a bad day still produces a
         project instead of nothing."""
-        head = self._label("🛠  CODING", 9, C.PRI, bold=True)
+        head = self._label(_t("providers.coding.title"), 9, C.PRI, bold=True)
         w, lay = self._box([head])
         lay.addWidget(self._label(
-            "The model that plans, writes and fixes projects when you ask the "
-            "assistant to build something. Saved to Desktop/TEEMO Projects.",
-            7, C.TEXT_DIM))
+            _t("providers.coding.body", path=_PROJECTS_PATH), 7, C.TEXT_DIM))
 
         sid = self._coding
 
         def fmt(entry, _decl):
             mark = "🖥" if entry.get("local") else (
                 "☁" if entry.get("local") is False else "  ")
-            star = "   ★ recommended" if entry.get("id") == "minimax" else ""
-            return f"{mark}  Code with {entry['label']}{star}"
+            star = ("   " + _t("providers.coding.recommended")
+                    if entry.get("id") == "minimax" else "")
+            return f"{mark}  {_t('providers.coding.with', name=entry['label'])}{star}"
 
         self._coding_combo = self._service_combo(
-            "llm", ("Same as background requests", ""), fmt)
+            "llm", (_t("providers.coding.same_as_sidecar"), ""), fmt)
         # The sponsor's model sits directly under the default, where it is the
         # first real choice anybody sees — not buried twelfth in the list.
         for i in range(self._coding_combo.count()):
@@ -984,14 +1004,16 @@ class ProvidersOverlay(_HudOverlay):
 
         if not sid:
             lay.addWidget(self._label(
-                "Code is written by whatever answers background requests above.",
-                7, C.TEXT_DIM))
+                _t("providers.coding.written_by_sidecar"), 7, C.TEXT_DIM))
         elif sid == self._sidecar:
             lay.addWidget(self._label(
-                "Uses the settings under BACKGROUND REQUESTS.", 7, C.TEXT_DIM))
+                _t("providers.coding.uses_sidecar",
+                   section=_t("providers.sidecar.name")), 7, C.TEXT_DIM))
         elif self._mode == "pipeline" and sid == self._pipe.get("llm"):
             lay.addWidget(self._label(
-                "Uses the model you chose for ② THINKING.", 7, C.TEXT_DIM))
+                _t("providers.uses_thinking",
+                   slot=self._slot_label("providers.slot.thinking")),
+                7, C.TEXT_DIM))
         else:
             self._fields_into(lay, "llm", sid)
         return w
@@ -1014,25 +1036,34 @@ class ProvidersOverlay(_HudOverlay):
             self._fetch_models(sid)
         QTimer.singleShot(0, self._rebuild_body)
 
+    def _slot_label(self, name: str) -> str:
+        """How a slot is named inside a sentence: "② THINKING".
+
+        The badge and the name travel together, so the sentence that points
+        at a slot points at the same slot the panel shows above it."""
+        for _slot, num, key in self._SLOTS:
+            if key == name:
+                return f"{num} {_t(key)}"
+        return _t(name)
+
     def _update_footer(self) -> None:
         if self._mode != "pipeline":
-            self._footer.setText(
-                "Gemini Live. Nothing on this panel changes the conversation.")
+            self._footer.setText(_t("providers.footer.gemini"))
             return
-        missing = [name for slot, _n, name, _w in self._SLOTS
+        missing = [key for slot, _n, key in self._SLOTS
                    if not self._pipe.get(slot)]
-        if "THINKING" in missing:
-            self._footer.setText(
-                "⚠  ② THINKING is not set — without it the assistant falls back "
-                "to Gemini Live and says so in the log.")
+        if "providers.slot.thinking" in missing:
+            self._footer.setText(_t(
+                "providers.footer.thinking_missing",
+                slot=self._slot_label("providers.slot.thinking")))
         elif missing:
-            words = " and ".join(f"{m.lower()}" for m in missing)
-            self._footer.setText(
-                f"Only {words} is missing — it will run, but you will type "
-                f"instead of speak, or read instead of listen.")
+            words = _t("providers.list_join").join(
+                _t(f"{key}_word") for key in missing)
+            self._footer.setText(_t("providers.footer.only_missing",
+                                    slots=words))
         else:
-            self._footer.setText(
-                "All three set. SAVE & APPLY reconnects; the conversation is kept.")
+            self._footer.setText(_t("providers.footer.all_set",
+                                    apply=_t("providers.apply_label")))
 
     # ── actions ──────────────────────────────────────────────────────────────
     def _live_choices(self, pid: str, key: str) -> tuple:
@@ -1113,14 +1144,14 @@ class ProvidersOverlay(_HudOverlay):
             # A test is already running, so the button means "stop it".
             self._cancel_test(pid)
             return
-        self._say(pid, "checking…", C.TEXT_DIM)
+        self._say(pid, _t("providers.status.checking"), C.TEXT_DIM)
         QApplication.processEvents()
 
         import threading
 
         cancel = threading.Event()
         self._testing[pid] = cancel
-        self._set_test_button(pid, "CANCEL", C.ACC)
+        self._set_test_button(pid, _t("providers.cancel"), C.ACC)
 
         def progress(done: int, total: int) -> None:
             if not total:
@@ -1128,7 +1159,9 @@ class ProvidersOverlay(_HudOverlay):
             pct = min(100, int(done * 100 / total))
             # The label is a widget: it may only be touched from the Qt thread,
             # and this runs on the worker. The signal is queued to that thread.
-            self._test_progress.emit(pid, f"downloading — {pct}%")
+            # The worker sends the number and the thread that owns the widget
+            # writes the sentence, in the language in use at that moment.
+            self._test_progress.emit(pid, str(pct))
 
         def work():
             ok = False
@@ -1140,8 +1173,7 @@ class ProvidersOverlay(_HudOverlay):
                 inst = self._registry.build(pid, values)
                 probe = getattr(inst, "probe", None)
                 if probe is None:
-                    self._test_done.emit(pid, False, "Nothing to check for this one.",
-                                         None)
+                    self._test_done.emit(pid, False, _NOTHING_TO_CHECK, None)
                     return
                 ok, msg = _call_probe(probe, progress, cancel.is_set)
                 seen = (getattr(inst, "caps", {}) or {}).get("vision")
@@ -1153,15 +1185,16 @@ class ProvidersOverlay(_HudOverlay):
         threading.Thread(target=work, daemon=True).start()
 
     # -- the slots the workers call, always on the Qt thread ------------------
-    def _on_test_progress(self, pid: str, text: str) -> None:
-        self._say(pid, text, C.TEXT_DIM)
+    def _on_test_progress(self, pid: str, pct: str) -> None:
+        self._say(pid, _t("providers.status.downloading", pct=pct),
+                  C.TEXT_DIM)
 
     def _on_test_done(self, pid: str, ok: bool, msg: str, seen) -> None:
         """Report a finished test — on the Qt thread, like every other widget."""
         self._testing.pop(pid, None)
-        self._set_test_button(pid, "TEST", C.PRI)
-        if msg == "Nothing to check for this one.":
-            self._say(pid, msg, C.TEXT_DIM)
+        self._set_test_button(pid, _t("providers.test"), C.PRI)
+        if msg == _NOTHING_TO_CHECK:
+            self._say(pid, _t("providers.status.nothing_to_check"), C.TEXT_DIM)
             return
         self._say(pid, ("✓  " if ok else "✕  ") + msg, C.GREEN if ok else C.ACC)
         # TEST is also where "can this model see?" gets answered — by asking the
@@ -1179,7 +1212,7 @@ class ProvidersOverlay(_HudOverlay):
         event = self._testing.get(pid)
         if event is not None:
             event.set()
-            self._say(pid, "stopping…", C.TEXT_DIM)
+            self._say(pid, _t("providers.status.stopping"), C.TEXT_DIM)
 
     def _set_test_button(self, pid: str, text: str, colour: str) -> None:
         button = self._test_buttons.get(pid)
@@ -1194,7 +1227,7 @@ class ProvidersOverlay(_HudOverlay):
 
     def _list(self, pid: str) -> None:
         values = self._values(pid)          # before processEvents — see _test
-        self._say(pid, "reading…", C.TEXT_DIM)
+        self._say(pid, _t("providers.status.reading"), C.TEXT_DIM)
         QApplication.processEvents()
 
         import threading
@@ -1211,7 +1244,7 @@ class ProvidersOverlay(_HudOverlay):
                 elif hasattr(inst, "voices"):
                     items, key = list(inst.voices()), "voice_id"
                 else:
-                    self._list_done.emit(pid, "", [], "Nothing to list for this one.")
+                    self._list_done.emit(pid, "", [], _NOTHING_TO_LIST)
                     return
             except Exception as e:
                 msg = f"{type(e).__name__}: {str(e)[:150]}"
@@ -1224,8 +1257,9 @@ class ProvidersOverlay(_HudOverlay):
     def _on_list_done(self, pid: str, key: str, items: list, error: str) -> None:
         """A finished listing — on the Qt thread, like every other widget."""
         if error:
-            if error == "Nothing to list for this one.":
-                self._say(pid, error, C.TEXT_DIM)
+            if error == _NOTHING_TO_LIST:
+                self._say(pid, _t("providers.status.nothing_to_list"),
+                          C.TEXT_DIM)
             else:
                 self._say(pid, f"✕  {error}", C.RED)
             return
@@ -1235,8 +1269,11 @@ class ProvidersOverlay(_HudOverlay):
         """Fill the dropdown — on the Qt thread, like every other widget."""
         entry = self._edits.get(pid, {}).get(key)
         if entry is None or not items:
-            self._say(pid, f"✓  {len(items)} found." if items else "None found.",
-                      C.GREEN if items else C.TEXT_DIM)
+            if items:
+                self._say(pid, _t("providers.status.found", count=len(items)),
+                          C.GREEN)
+            else:
+                self._say(pid, _t("providers.status.none_found"), C.TEXT_DIM)
             return
         box = entry[0]
         if isinstance(box, QComboBox):
@@ -1249,10 +1286,13 @@ class ProvidersOverlay(_HudOverlay):
                 j = box.findText(keep)
             box.setCurrentIndex(j if j >= 0 else 0)
         else:
-            self._say(pid, f"✓  {len(items)} available: "
-                           f"{', '.join(str(v) for v, _ in items[:8])}", C.GREEN)
+            self._say(pid, _t(
+                "providers.status.available_list",
+                count=len(items),
+                items=", ".join(str(v) for v, _ in items[:8])), C.GREEN)
             return
-        self._say(pid, f"✓  {len(items)} available — pick one above.", C.GREEN)
+        self._say(pid, _t("providers.status.available", count=len(items)),
+                  C.GREEN)
 
     def _install(self, pid: str) -> None:
         """Fetch a provider's optional dependency, off the Qt thread — pip takes
@@ -1265,7 +1305,7 @@ class ProvidersOverlay(_HudOverlay):
         pkg = decl.get("install")
         if not pkg:
             return
-        self._say(pid, f"installing {pkg} — this can take a minute…", C.ACC2)
+        self._say(pid, _t("providers.status.installing", pkg=pkg), C.ACC2)
 
         def work():
             try:
@@ -1274,8 +1314,10 @@ class ProvidersOverlay(_HudOverlay):
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
                 good = r.returncode == 0
                 tail = r.stdout.decode("utf-8", "replace").strip().splitlines()
-                msg = ("✓  installed — close and reopen this panel"
-                       if good else (tail[-1][:150] if tail else "pip failed"))
+                # The worker does not write sentences: it says WHAT happened,
+                # and the Qt thread turns that into words.
+                msg = (_INSTALLED if good
+                       else (tail[-1][:150] if tail else _PIP_FAILED))
             except Exception as e:
                 good, msg = False, f"{type(e).__name__}: {str(e)[:120]}"
             # A signal, not a timer: a QTimer created in this thread has no
@@ -1285,6 +1327,10 @@ class ProvidersOverlay(_HudOverlay):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_install_done(self, pid: str, good: bool, msg: str) -> None:
+        if msg == _INSTALLED:
+            msg = _t("providers.status.installed")
+        elif msg == _PIP_FAILED:
+            msg = _t("providers.status.pip_failed")
         self._say(pid, msg, C.GREEN if good else C.RED)
 
     def _on_prepare_report(self, pid: str, text: str, colour: str) -> None:

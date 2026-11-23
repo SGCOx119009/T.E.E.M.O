@@ -1088,11 +1088,11 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "zh": "语言",
     },
     "group.look": {
-        "en": "LOOK",
-        "es": "ASPECTO",
-        "pt": "APARÊNCIA",
-        "fr": "APPARENCE",
-        "zh": "外观",
+        "en": "WINDOW",
+        "es": "VENTANA",
+        "pt": "JANELA",
+        "fr": "FENÊTRE",
+        "zh": "窗口",
     },
     "group.hand": {
         "en": "HAND",
@@ -1121,6 +1121,221 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "pt": "FERRAMENTAS",
         "fr": "OUTILS",
         "zh": "工具",
+    },
+
+    # -- qué es cada grupo del cajón -----------------------------------------
+    #
+    # El dueño preguntó qué era cada cosa: qué es el mazo, qué es la
+    # ventana flotante, qué hace "pantalla completa" y qué tiene que ver
+    # "sistema" con "ventana". Una línea por grupo y una por control
+    # contestan esas preguntas sin que nadie tenga que adivinar.
+    "drawer.voice.explain": {
+        "en": "How it listens and how it answers.",
+        "es": "Cómo escucha y cómo contesta.",
+        "pt": "Como escuta e como responde.",
+        "fr": "Comment il écoute et comment il répond.",
+        "zh": "它如何听、如何回答。",
+    },
+    "drawer.language.explain": {
+        "en": "The language it speaks and the place it believes you are in.",
+        "es": "El idioma que habla y el lugar donde cree que estás.",
+        "pt": "O idioma que fala e o lugar onde acredita que você está.",
+        "fr": "La langue qu'il parle et l'endroit où il croit que vous êtes.",
+        "zh": "它使用的语言，以及它认为你所在的地方。",
+    },
+    "drawer.look.explain": {
+        "en": "The shape of the window: the whole panel, the core in a corner, "
+              "or only the icon in the tray.",
+        "es": "La forma de la ventana: el panel entero, el núcleo en una esquina "
+              "o sólo el icono en la bandeja.",
+        "pt": "A forma da janela: o painel inteiro, o núcleo num canto ou só "
+              "o ícone na bandeja.",
+        "fr": "La forme de la fenêtre : le panneau entier, le noyau dans un coin, "
+              "ou seulement l'icône dans la zone de notification.",
+        "zh": "窗口的形态：完整面板、角落中的核心，或仅托盘图标。",
+    },
+    "drawer.window_shapes.explain": {
+        "en": "Maximized keeps the taskbar, full screen does not, and minimize "
+              "leaves only the icon.",
+        "es": "Maximizada conserva la barra de tareas, a pantalla completa no, "
+              "y minimizada deja sólo el icono.",
+        "pt": "Maximizada mantém a barra de tarefas, em ecrã inteiro não, e "
+              "minimizada deixa só o ícone.",
+        "fr": "Maximisée garde la barre des tâches, en plein écran non, et "
+              "réduite ne laisse que l'icône.",
+        "zh": "最大化保留任务栏，全屏不保留，最小化只剩图标。",
+    },
+    "drawer.hand.explain": {
+        "en": "The hand as a mouse: the camera follows it and the pinch is the button.",
+        "es": "La mano como ratón: la cámara la sigue y el pellizco es el botón.",
+        "pt": "A mão como rato: a câmara segue-a e a belisca é o botão.",
+        "fr": "La main comme souris : la caméra la suit et le pincement est le bouton.",
+        "zh": "手就是鼠标：摄像头跟随它，捏合就是按键。",
+    },
+    "drawer.session.explain": {
+        "en": "The deck of cards, the panel that floats over another program, "
+              "and which tools the model is offered.",
+        "es": "El mazo de tarjetas, el panel que flota sobre otro programa y "
+              "qué herramientas se le ofrecen al modelo.",
+        "pt": "O baralho de cartas, o painel que flutua sobre outro programa e "
+              "quais ferramentas são oferecidas ao modelo.",
+        "fr": "Le deck de cartes, le panneau qui flotte au-dessus d'un autre "
+              "programme et les outils proposés au modèle.",
+        "zh": "卡片堆、浮在其他程序之上的面板，以及提供给模型的工具。",
+    },
+    "drawer.deck.explain": {
+        "en": "The deck: the news and the answers, as cards you open and close.",
+        "es": "El mazo: las noticias y las respuestas, en tarjetas que abres y cierras.",
+        "pt": "O baralho: as notícias e as respostas, em cartões que abre e fecha.",
+        "fr": "Le deck : les nouvelles et les réponses, en cartes que vous "
+              "ouvrez et fermez.",
+        "zh": "卡片堆：新闻和回答都在可开合的卡片里。",
+    },
+    "drawer.floating.explain": {
+        "en": "The floating panel: a window of its own that stays on top of "
+              "the other programs.",
+        "es": "El panel flotante: una ventana propia que se queda encima de "
+              "los demás programas.",
+        "pt": "O painel flutuante: uma janela própria que fica por cima dos "
+              "outros programas.",
+        "fr": "Le panneau flottant : une fenêtre à part qui reste au-dessus "
+              "des autres programmes.",
+        "zh": "浮动面板：一个独立窗口，始终停在其他程序之上。",
+    },
+    "drawer.system.explain": {
+        "en": "Which program plays the music, and what is still half done.",
+        "es": "Qué programa reproduce la música y qué está a medio hacer.",
+        "pt": "Que programa toca a música e o que está meio feito.",
+        "fr": "Quel programme joue la musique, et ce qui est encore à moitié fait.",
+        "zh": "用哪个程序播放音乐，以及哪些功能还没做完。",
+    },
+    "drawer.tools.explain": {
+        "en": "Each of these opens a window of its own.",
+        "es": "Cada una de estas abre una ventana propia.",
+        "pt": "Cada uma destas abre uma janela própria.",
+        "fr": "Chacune de celles-ci ouvre une fenêtre à part.",
+        "zh": "每一项都会打开一个独立的窗口。",
+    },
+    "drawer.tool.remote": {
+        "en": "Shows the QR code that pairs the phone with T.E.E.M.O.",
+        "es": "Muestra el código QR que empareja el móvil con T.E.E.M.O.",
+        "pt": "Mostra o código QR que emparelha o telemóvel com o T.E.E.M.O.",
+        "fr": "Affiche le code QR qui associe le téléphone à T.E.E.M.O.",
+        "zh": "显示把手机与 T.E.E.M.O. 配对的二维码。",
+    },
+    "drawer.tool.shortcut": {
+        "en": "Writes a shortcut on the desktop.",
+        "es": "Escribe un acceso directo en el escritorio.",
+        "pt": "Escreve um atalho no ambiente de trabalho.",
+        "fr": "Écrit un raccourci sur le bureau.",
+        "zh": "在桌面上创建快捷方式。",
+    },
+    "drawer.tool.autostart": {
+        "en": "Starts with Windows, before anybody asks.",
+        "es": "Arranca con Windows, antes de que nadie se lo pida.",
+        "pt": "Arranca com o Windows, antes de alguém pedir.",
+        "fr": "Démarre avec Windows, avant que quiconque le demande.",
+        "zh": "随 Windows 自动启动，无需询问。",
+    },
+    "drawer.tool.customise": {
+        "en": "Changes the name, the colour and the voice.",
+        "es": "Cambia el nombre, el color y la voz.",
+        "pt": "Muda o nome, a cor e a voz.",
+        "fr": "Change le nom, la couleur et la voix.",
+        "zh": "更改名称、颜色和声音。",
+    },
+    "drawer.tool.audio": {
+        "en": "Chooses the microphone and the speakers.",
+        "es": "Elige el micrófono y los altavoces.",
+        "pt": "Escolhe o microfone e as colunas.",
+        "fr": "Choisit le microphone et les haut-parleurs.",
+        "zh": "选择麦克风和扬声器。",
+    },
+    "drawer.tool.memory": {
+        "en": "Everything the assistant has remembered about you.",
+        "es": "Todo lo que el asistente ha guardado de ti.",
+        "pt": "Tudo o que o assistente guardou sobre si.",
+        "fr": "Tout ce que l'assistant a retenu de vous.",
+        "zh": "助手记住的关于你的一切。",
+    },
+    "drawer.tool.plugins": {
+        "en": "The plugins: Gmail, the calendar and Spotify.",
+        "es": "Los complementos: Gmail, el calendario y Spotify.",
+        "pt": "Os plug-ins: Gmail, o calendário e o Spotify.",
+        "fr": "Les modules : Gmail, l'agenda et Spotify.",
+        "zh": "插件：Gmail、日历和 Spotify。",
+    },
+    "drawer.tool.plugin_settings": {
+        "en": "The settings of each plugin, one by one.",
+        "es": "Los ajustes de cada complemento, uno por uno.",
+        "pt": "As definições de cada plug-in, uma a uma.",
+        "fr": "Les réglages de chaque module, un par un.",
+        "zh": "每个插件的设置，逐个设置。",
+    },
+    "drawer.tool.providers": {
+        "en": "The models and the keys it thinks with.",
+        "es": "Los modelos y las claves con los que piensa.",
+        "pt": "Os modelos e as chaves com que pensa.",
+        "fr": "Les modèles et les clés avec lesquels il pense.",
+        "zh": "它思考所用的模型和密钥。",
+    },
+    "drawer.copy": {
+        "en": "COPY",
+        "es": "COPIAR",
+        "pt": "COPIAR",
+        "fr": "COPIER",
+        "zh": "复制",
+    },
+    "drawer.copy_tip": {
+        "en": "Copies the open group as text, to paste it into the chat.",
+        "es": "Copia el grupo abierto como texto, para pegarlo en el chat.",
+        "pt": "Copia o grupo aberto como texto, para o colar na conversa.",
+        "fr": "Copie le groupe ouvert sous forme de texte, pour le coller "
+              "dans la conversation.",
+        "zh": "把当前分组复制成文本，方便粘贴到对话里。",
+    },
+    "drawer.copied": {
+        "en": "Copied to the clipboard.",
+        "es": "Copiado al portapapeles.",
+        "pt": "Copiado para a área de transferência.",
+        "fr": "Copié dans le presse-papiers.",
+        "zh": "已复制到剪贴板。",
+    },
+    "gesture.backend.none": {
+        "en": "no tracker",
+        "es": "sin rastreador",
+        "pt": "sem rastreador",
+        "fr": "aucun détecteur",
+        "zh": "无追踪器",
+    },
+    "hand.left": {
+        "en": "LEFT", "es": "IZQUIERDA", "pt": "ESQUERDA", "fr": "GAUCHE",
+        "zh": "左手",
+    },
+    "hand.right": {
+        "en": "RIGHT", "es": "DERECHA", "pt": "DIREITA", "fr": "DROITE",
+        "zh": "右手",
+    },
+    "gesture.backend.mediapipe": {
+        "en": "MediaPipe",
+        "es": "MediaPipe",
+        "pt": "MediaPipe",
+        "fr": "MediaPipe",
+        "zh": "MediaPipe",
+    },
+    "gesture.backend.mediapipe-legacy": {
+        "en": "MediaPipe (older version)",
+        "es": "MediaPipe (versión antigua)",
+        "pt": "MediaPipe (versão antiga)",
+        "fr": "MediaPipe (version plus ancienne)",
+        "zh": "MediaPipe（旧版）",
+    },
+    "gesture.backend.opencv": {
+        "en": "OpenCV (approximate)",
+        "es": "OpenCV (aproximado)",
+        "pt": "OpenCV (aproximado)",
+        "fr": "OpenCV (approximatif)",
+        "zh": "OpenCV（近似）",
     },
 
     # -- the window ----------------------------------------------------------
@@ -2022,6 +2237,13 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "pt": "◈  ENTRADA VISUAL",
         "fr": "◈  ENTRÉE VISUELLE",
         "zh": "◈  视觉输入",
+    },
+    "hud.visual_input_hint": {
+        "en": "The last picture the camera took. It closes by itself.",
+        "es": "La última foto que tomó la cámara. Se cierra sola.",
+        "pt": "A última foto que a câmara tirou. Fecha-se sozinha.",
+        "fr": "La dernière photo prise par la caméra. Elle se ferme seule.",
+        "zh": "摄像头拍摄的最后一张照片。它会自动关闭。",
     },
     "hud.state.muted": {
         "en": "MUTED",
@@ -3089,6 +3311,576 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "Un contrôle marqué d'une étoile est là et fonctionne jusqu'où "
               "il va, mais le reste n'est pas encore écrit.",
         "zh": "带星号的控件已经在那儿，也能用到现在这一步，但剩下的部分还没写。",
+    },
+
+    # -- ENGINE & PROVIDERS panel (gui/providers_panel.py) -------------------
+    # The panel that decides what holds the conversation. Everything here is
+    # something a person reads on screen, so everything here is a key: the
+    # names of the providers and of the models are NOT, because those are
+    # other people's names.
+    "providers.title": {
+        "en": "🔌  ENGINE  &  PROVIDERS",
+        "es": "🔌  MOTOR  Y  PROVEEDORES",
+        "pt": "🔌  MOTOR  E  PROVEDORES",
+        "fr": "🔌  MOTEUR  ET  FOURNISSEURS",
+        "zh": "🔌  引擎  与  服务商",
+    },
+    "providers.subtitle": {
+        "en": "Choose what powers the conversation. Gemini is the default and "
+              "needs nothing set up here.",
+        "es": "Elige qué sostiene la conversación. Gemini es el "
+              "predeterminado y no necesita nada configurado aquí.",
+        "pt": "Escolha o que sustenta a conversa. O Gemini é o padrão e não "
+              "precisa de nada configurado aqui.",
+        "fr": "Choisissez ce qui porte la conversation. Gemini est l'option "
+              "par défaut et n'a rien à configurer ici.",
+        "zh": "选择支撑本次对话的引擎。Gemini 是默认选项，这里不需要配置任何东西。",
+    },
+    "providers.mode.gemini_body": {
+        "en": "One connection carries your voice, its voice, the transcript "
+              "and the tools together. The fastest option — about half a "
+              "second to the first word.",
+        "es": "Una sola conexión lleva tu voz, la suya, la transcripción y "
+              "las herramientas a la vez. La opción más rápida: medio "
+              "segundo hasta la primera palabra.",
+        "pt": "Uma única ligação leva a sua voz, a dele, a transcrição e as "
+              "ferramentas em conjunto. A opção mais rápida: cerca de meio "
+              "segundo até a primeira palavra.",
+        "fr": "Une seule connexion porte votre voix, la sienne, la "
+              "transcription et les outils ensemble. L'option la plus rapide "
+              ": environ une demi-seconde avant le premier mot.",
+        "zh": "一条连接同时承载你的声音、它的声音、文字记录和工具。这是最快的选项——大约半秒后就能开口。",
+    },
+    "providers.mode.own": {
+        "en": "🖥  MY OWN SETUP",
+        "es": "🖥  MI PROPIA CONFIGURACIÓN",
+        "pt": "🖥  A MINHA PRÓPRIA CONFIGURAÇÃO",
+        "fr": "🖥  MA PROPRE CONFIGURATION",
+        "zh": "🖥  我自己的配置",
+    },
+    "providers.mode.own_name": {
+        "en": "MY OWN SETUP",
+        "es": "MI PROPIA CONFIGURACIÓN",
+        "pt": "A MINHA PRÓPRIA CONFIGURAÇÃO",
+        "fr": "MA PROPRE CONFIGURATION",
+        "zh": "我自己的配置",
+    },
+    "providers.mode.own_body": {
+        "en": "Your choice of hearing, thinking and speaking. Can run entirely "
+              "on this computer, with nothing leaving it. Slower: 1.5 to 4 "
+              "seconds.",
+        "es": "Tu elección de escucha, razonamiento y voz. Puede funcionar "
+              "por completo en este equipo, sin que nada salga de él. Más "
+              "lento: de 1,5 a 4 segundos.",
+        "pt": "A sua escolha de audição, raciocínio e fala. Pode funcionar "
+              "inteiramente neste computador, sem que nada saia dele. Mais "
+              "lento: de 1,5 a 4 segundos.",
+        "fr": "Votre choix d'écoute, de raisonnement et de parole. Peut "
+              "tourner entièrement sur cet ordinateur, sans rien en sortir. "
+              "Plus lent : de 1,5 à 4 secondes.",
+        "zh": "由你来决定聆听、思考和朗读。可以完全在这台电脑上运行，不会有任何东西离开它。速度较慢：1.5 到 4 秒。",
+    },
+    # The three parts of a conversation. The heading is the name of the slot
+    # and the help says what the slot does, in the words of somebody setting
+    # it up rather than the words of the code.
+    "providers.slot.hearing": {
+        "en": "HEARING",
+        "es": "ESCUCHA",
+        "pt": "AUDIÇÃO",
+        "fr": "ÉCOUTE",
+        "zh": "听觉",
+    },
+    "providers.slot.hearing_help": {
+        "en": "turns what you say into words",
+        "es": "convierte lo que dices en palabras",
+        "pt": "transforma o que você diz em palavras",
+        "fr": "transforme ce que vous dites en mots",
+        "zh": "把你说的话变成文字",
+    },
+    "providers.slot.hearing_word": {
+        "en": "hearing",
+        "es": "la escucha",
+        "pt": "a audição",
+        "fr": "l'écoute",
+        "zh": "听觉",
+    },
+    "providers.slot.thinking": {
+        "en": "THINKING",
+        "es": "RAZONAMIENTO",
+        "pt": "RACIOCÍNIO",
+        "fr": "RAISONNEMENT",
+        "zh": "思考",
+    },
+    "providers.slot.thinking_help": {
+        "en": "understands, decides, uses your tools",
+        "es": "entiende, decide y usa tus herramientas",
+        "pt": "entende, decide e usa as suas ferramentas",
+        "fr": "comprend, décide et utilise vos outils",
+        "zh": "理解、决策并调用你的工具",
+    },
+    "providers.slot.thinking_word": {
+        "en": "thinking",
+        "es": "el razonamiento",
+        "pt": "o raciocínio",
+        "fr": "le raisonnement",
+        "zh": "推理",
+    },
+    "providers.slot.speaking": {
+        "en": "SPEAKING",
+        "es": "HABLA",
+        "pt": "FALA",
+        "fr": "PAROLE",
+        "zh": "朗读",
+    },
+    "providers.slot.speaking_help": {
+        "en": "reads the answer out loud",
+        "es": "lee la respuesta en voz alta",
+        "pt": "lê a resposta em voz alta",
+        "fr": "lit la réponse à voix haute",
+        "zh": "把答案读出来",
+    },
+    "providers.slot.speaking_word": {
+        "en": "speaking",
+        "es": "la voz",
+        "pt": "a voz",
+        "fr": "la parole",
+        "zh": "朗读",
+    },
+    # The two words of a yes/no answer live in ONE entry: "no" is spelled the
+    # same in English and in Spanish, and a key is not allowed to say the
+    # same thing in two languages. The bar separates them.
+    "providers.bool_choices": {
+        "en": "no|yes",
+        "es": "no|sí",
+        "pt": "não|sim",
+        "fr": "non|oui",
+        "zh": "否|是",
+    },
+    "providers.apply": {
+        "en": "▸  SAVE  &&  APPLY",
+        "es": "▸  GUARDAR  Y  APLICAR",
+        "pt": "▸  SALVAR  E  APLICAR",
+        "fr": "▸  ENREGISTRER  ET  APPLIQUER",
+        "zh": "▸  保存并应用",
+    },
+    "providers.apply_label": {
+        "en": "SAVE & APPLY",
+        "es": "GUARDAR Y APLICAR",
+        "pt": "SALVAR E APLICAR",
+        "fr": "ENREGISTRER ET APPLIQUER",
+        "zh": "保存并应用",
+    },
+    "providers.close": {
+        "en": "CLOSE",
+        "es": "CERRAR",
+        "pt": "FECHAR",
+        "fr": "FERMER",
+        "zh": "关闭",
+    },
+    "providers.cancel": {
+        "en": "CANCEL",
+        "es": "CANCELAR",
+        "pt": "CANCELAR",
+        "fr": "ANNULER",
+        "zh": "取消",
+    },
+    "providers.test": {
+        "en": "TEST",
+        "es": "PROBAR",
+        "pt": "TESTAR",
+        "fr": "TESTER",
+        "zh": "测试",
+    },
+    "providers.refresh": {
+        "en": "↻ REFRESH",
+        "es": "↻ ACTUALIZAR",
+        "pt": "↻ ATUALIZAR",
+        "fr": "↻ ACTUALISER",
+        "zh": "↻ 刷新",
+    },
+    "providers.more": {
+        "en": "⌄ MORE",
+        "es": "⌄ MÁS",
+        "pt": "⌄ MAIS",
+        "fr": "⌄ PLUS",
+        "zh": "⌄ 更多",
+    },
+    "providers.less": {
+        "en": "⌃ LESS",
+        "es": "⌃ MENOS",
+        "pt": "⌃ MENOS",
+        "fr": "⌃ MOINS",
+        "zh": "⌃ 更少",
+    },
+    "providers.install": {
+        "en": "INSTALL {pkg}",
+        "es": "INSTALAR {pkg}",
+        "pt": "INSTALAR {pkg}",
+        "fr": "INSTALLER {pkg}",
+        "zh": "安装 {pkg}",
+    },
+    "providers.not_set": {
+        "en": "— not set —",
+        "es": "— sin configurar —",
+        "pt": "— não definido —",
+        "fr": "— non défini —",
+        "zh": "— 未设置 —",
+    },
+    "providers.default_choice": {
+        "en": "— default —",
+        "es": "— predeterminado —",
+        "pt": "— padrão —",
+        "fr": "— par défaut —",
+        "zh": "— 默认 —",
+    },
+    "providers.optional": {
+        "en": "   (optional)",
+        "es": "   (opcional)",
+        "pt": "   (opcional)",
+        "fr": "   (facultatif)",
+        "zh": "   （可选）",
+    },
+    "providers.needs_install": {
+        "en": "needs install",
+        "es": "necesita instalación",
+        "pt": "precisa de instalação",
+        "fr": "nécessite une installation",
+        "zh": "需要安装",
+    },
+    "providers.api_key_needed": {
+        "en": "Needed — create one in your {name} account",
+        "es": "Necesaria: crea una en tu cuenta de {name}",
+        "pt": "Necessária — crie uma na sua conta {name}",
+        "fr": "Nécessaire — créez-en une dans votre compte {name}",
+        "zh": "需要——在你的 {name} 账户中创建一个",
+    },
+    "providers.gemini_body": {
+        "en": "Nothing to set up. Your voice goes to Gemini and comes back as "
+              "speech over one connection, with the transcript and every tool "
+              "call on the same wire.",
+        "es": "Nada que configurar. Tu voz va a Gemini y vuelve como voz por "
+              "una sola conexión, con la transcripción y cada llamada a las "
+              "herramientas en el mismo canal.",
+        "pt": "Nada a configurar. A sua voz vai para o Gemini e volta como "
+              "fala por uma única ligação, com a transcrição e cada chamada "
+              "de ferramenta no mesmo canal.",
+        "fr": "Rien à configurer. Votre voix part vers Gemini et revient en "
+              "parole sur une seule connexion, avec la transcription et "
+              "chaque appel d'outil sur le même fil.",
+        "zh": "这里没有什么要设置的。你的声音送给 Gemini，再由它用声音送回，全部走同一条连接，文字记录和每一次工具调用也在上面。",
+    },
+    "providers.gemini_body2": {
+        "en": "Pick {own} above to run it on your own machine, or through "
+              "another company's model.",
+        "es": "Elige {own} arriba para ejecutarlo en tu propio equipo, o a "
+              "través del modelo de otra empresa.",
+        "pt": "Escolha {own} acima para rodar na sua própria máquina, ou pelo "
+              "modelo de outra empresa.",
+        "fr": "Choisissez {own} ci-dessus pour le faire tourner sur votre "
+              "propre machine, ou via le modèle d'une autre société.",
+        "zh": "在上方选择{own}，即可在自己的电脑上运行，或通过其他公司的模型运行。",
+    },
+    "providers.sidecar.title": {
+        "en": "⚡  BACKGROUND REQUESTS",
+        "es": "⚡  SOLICITUDES EN SEGUNDO PLANO",
+        "pt": "⚡  PEDIDOS EM SEGUNDO PLANO",
+        "fr": "⚡  REQUÊTES EN ARRIÈRE-PLAN",
+        "zh": "⚡  后台请求",
+    },
+    "providers.sidecar.name": {
+        "en": "BACKGROUND REQUESTS",
+        "es": "SOLICITUDES EN SEGUNDO PLANO",
+        "pt": "PEDIDOS EM SEGUNDO PLANO",
+        "fr": "REQUÊTES EN ARRIÈRE-PLAN",
+        "zh": "后台请求",
+    },
+    "providers.sidecar.body": {
+        "en": "Reading a document, looking at your screen, writing code — the "
+              "assistant's own requests, not the conversation. These use "
+              "Gemini's text quota, which runs out before the voice does. "
+              "Sending them somewhere else keeps them working, and changes "
+              "nothing you hear.",
+        "es": "Leer un documento, mirar tu pantalla, escribir código: las "
+              "peticiones del propio asistente, no la conversación. Usan la "
+              "cuota de texto de Gemini, que se agota antes que la voz. "
+              "Mandarlas a otro sitio las mantiene funcionando, y no cambia "
+              "nada de lo que oyes.",
+        "pt": "Ler um documento, olhar a sua tela, escrever código: os pedidos "
+              "do próprio assistente, não a conversa. Usam a cota de texto do "
+              "Gemini, que acaba antes do que a voz. Mandá-los para outro "
+              "lugar os mantém funcionando, e não muda nada do que você "
+              "ouve.",
+        "fr": "Lire un document, regarder votre écran, écrire du code : les "
+              "requêtes de l'assistant lui-même, pas la conversation. Elles "
+              "utilisent le quota de texte de Gemini, qui s'épuise avant la "
+              "voix. Les envoyer ailleurs les garde fonctionnelles, et ne "
+              "change rien de ce que vous entendez.",
+        "zh": "读文档、看屏幕、写代码——这些是助手自己的请求，不是对话。它们使用 "
+              "Gemini 的文本额度，而文本额度比语音额度先用完。把它们送到别处"
+              "就能继续工作，你听到的内容不会有任何改变。",
+    },
+    "providers.sidecar.fallback": {
+        "en": "Fall back to {name}",
+        "es": "Usar {name} como alternativa",
+        "pt": "Usar {name} como alternativa",
+        "fr": "Se rabattre sur {name}",
+        "zh": "回退到 {name}",
+    },
+    "providers.sidecar.gemini_only": {
+        "en": "Gemini only  —  the way it has always been",
+        "es": "Solo Gemini  —  como siempre ha sido",
+        "pt": "Somente Gemini  —  como sempre foi",
+        "fr": "Gemini uniquement  —  comme toujours",
+        "zh": "仅用 Gemini  ——  一如既往",
+    },
+    "providers.sidecar.try_gemini": {
+        "en": "Try Gemini first  —  faster",
+        "es": "Probar Gemini primero  —  más rápido",
+        "pt": "Tentar o Gemini primeiro  —  mais rápido",
+        "fr": "Essayer Gemini d'abord  —  plus rapide",
+        "zh": "先用 Gemini  ——  更快",
+    },
+    "providers.sidecar.try_other": {
+        "en": "Try the other one first  —  keeps more on your machine",
+        "es": "Probar el otro primero  —  deja más cosas en tu equipo",
+        "pt": "Tentar o outro primeiro  —  mantém mais coisas na sua máquina",
+        "fr": "Essayer l'autre d'abord  —  garde plus de choses sur votre "
+              "machine",
+        "zh": "先用另一个  ——  更多内容留在本机",
+    },
+    "providers.uses_thinking": {
+        "en": "Uses the model you chose for {slot}.",
+        "es": "Usa el modelo que elegiste para {slot}.",
+        "pt": "Usa o modelo que você escolheu para {slot}.",
+        "fr": "Utilise le modèle choisi pour {slot}.",
+        "zh": "使用你为{slot}选择的模型。",
+    },
+    "providers.sidecar.left_as_is": {
+        "en": "Left as it is, these keep using Gemini and stop working when "
+              "its text quota runs out.",
+        "es": "Si lo dejas como está, estas siguen usando Gemini y dejan de "
+              "funcionar cuando se agota su cuota de texto.",
+        "pt": "Se ficar como está, estes continuam a usar o Gemini e deixam "
+              "de funcionar quando a cota de texto acaba.",
+        "fr": "Laissé tel quel, elles continuent d'utiliser Gemini et cessent "
+              "de fonctionner quand son quota de texte est épuisé.",
+        "zh": "保持原样时，这些请求继续使用 Gemini，并在其文本额度耗尽后停止工作。",
+    },
+    "providers.coding.title": {
+        "en": "🛠  CODING",
+        "es": "🛠  PROGRAMACIÓN",
+        "pt": "🛠  PROGRAMAÇÃO",
+        "fr": "🛠  PROGRAMMATION",
+        "zh": "🛠  编程",
+    },
+    "providers.coding.body": {
+        "en": "The model that plans, writes and fixes projects when you ask "
+              "the assistant to build something. Saved to {path}.",
+        "es": "El modelo que planifica, escribe y arregla proyectos cuando le "
+              "pides al asistente que construya algo. Se guarda en {path}.",
+        "pt": "O modelo que planeja, escreve e conserta projetos quando você "
+              "pede ao assistente para construir alguma coisa. Salvo em "
+              "{path}.",
+        "fr": "Le modèle qui planifie, écrit et répare des projets quand vous "
+              "demandez à l'assistant de construire quelque chose. Enregistré "
+              "dans {path}.",
+        "zh": "当你让助手搭建东西时，负责规划、编写和修复项目的模型。保存在 {path}。",
+    },
+    "providers.coding.recommended": {
+        "en": "★ recommended",
+        "es": "★ recomendado",
+        "pt": "★ recomendado",
+        "fr": "★ recommandé",
+        "zh": "★ 推荐",
+    },
+    "providers.coding.with": {
+        "en": "Code with {name}",
+        "es": "Programar con {name}",
+        "pt": "Programar com {name}",
+        "fr": "Programmer avec {name}",
+        "zh": "使用 {name} 编写代码",
+    },
+    "providers.coding.same_as_sidecar": {
+        "en": "Same as background requests",
+        "es": "Igual que las solicitudes en segundo plano",
+        "pt": "Igual aos pedidos em segundo plano",
+        "fr": "Identique aux requêtes en arrière-plan",
+        "zh": "与后台请求相同",
+    },
+    "providers.coding.written_by_sidecar": {
+        "en": "Code is written by whatever answers background requests above.",
+        "es": "El código lo escribe lo que responde a las solicitudes en "
+              "segundo plano de arriba.",
+        "pt": "O código é escrito pelo que responde aos pedidos em segundo "
+              "plano acima.",
+        "fr": "Le code est écrit par ce qui répond aux requêtes en "
+              "arrière-plan ci-dessus.",
+        "zh": "代码由上面响应后台请求的那个模型编写。",
+    },
+    "providers.coding.uses_sidecar": {
+        "en": "Uses the settings under {section}.",
+        "es": "Usa los ajustes de {section}.",
+        "pt": "Usa as configurações de {section}.",
+        "fr": "Utilise les réglages de {section}.",
+        "zh": "使用{section}下的设置。",
+    },
+    "providers.footer.gemini": {
+        "en": "Gemini Live. Nothing on this panel changes the conversation.",
+        "es": "Gemini Live. Nada en este panel cambia la conversación.",
+        "pt": "Gemini Live. Nada neste painel muda a conversa.",
+        "fr": "Gemini Live. Rien sur ce panneau ne change la conversation.",
+        "zh": "Gemini Live。此面板上的任何设置都不会改变对话。",
+    },
+    "providers.footer.thinking_missing": {
+        "en": "⚠  {slot} is not set — without it the assistant falls back to "
+              "Gemini Live and says so in the log.",
+        "es": "⚠  {slot} no está configurado: sin él el asistente recurre a "
+              "Gemini Live y lo dice en el registro.",
+        "pt": "⚠  {slot} não está definido: sem ele o assistente recorre ao "
+              "Gemini Live e diz isso no registro.",
+        "fr": "⚠  {slot} n'est pas défini — sans lui l'assistant se rabat sur "
+              "Gemini Live et le signale dans le journal.",
+        "zh": "⚠  {slot}尚未设置——没有它，助手会回退到 Gemini Live，并在日志中说明。",
+    },
+    "providers.footer.only_missing": {
+        "en": "Only {slots} is missing — it will run, but you will type "
+              "instead of speak, or read instead of listen.",
+        "es": "Solo falta {slots}: funcionará, pero escribirás en vez de "
+              "hablar, o leerás en vez de escuchar.",
+        "pt": "Falta apenas {slots}: vai funcionar, mas você vai digitar em "
+              "vez de falar, ou ler em vez de ouvir.",
+        "fr": "Il ne manque que {slots} : ça fonctionnera, mais vous taperez "
+              "au lieu de parler, ou lirez au lieu d'écouter.",
+        "zh": "只缺少{slots}：仍然可以运行，但你只能打字而不是说话，或阅读而不是聆听。",
+    },
+    "providers.footer.all_set": {
+        "en": "All three set. {apply} reconnects; the conversation is kept.",
+        "es": "Los tres configurados. {apply} reconecta; la conversación se "
+              "conserva.",
+        "pt": "Os três definidos. {apply} reconecta; a conversa é mantida.",
+        "fr": "Les trois sont définis. {apply} se reconnecte ; la conversation "
+              "est conservée.",
+        "zh": "三项都已设置。{apply}会重新连接；对话会保留。",
+    },
+    # The word that joins two things in a list. It is a key of its own
+    # because Chinese joins without spaces and the others join with them.
+    "providers.list_join": {
+        "en": " and ",
+        "es": " y ",
+        "pt": " e ",
+        "fr": " et ",
+        "zh": "和",
+    },
+    "providers.status.checking": {
+        "en": "checking…",
+        "es": "comprobando…",
+        "pt": "verificando…",
+        "fr": "vérification…",
+        "zh": "正在检查…",
+    },
+    "providers.status.stopping": {
+        "en": "stopping…",
+        "es": "deteniendo…",
+        "pt": "parando…",
+        "fr": "arrêt…",
+        "zh": "正在停止…",
+    },
+    "providers.status.reading": {
+        "en": "reading…",
+        "es": "leyendo…",
+        "pt": "lendo…",
+        "fr": "lecture…",
+        "zh": "正在读取…",
+    },
+    "providers.status.downloading": {
+        "en": "downloading — {pct}%",
+        "es": "descargando — {pct}%",
+        "pt": "baixando — {pct}%",
+        "fr": "téléchargement — {pct}%",
+        "zh": "正在下载 — {pct}%",
+    },
+    "providers.status.nothing_to_check": {
+        "en": "Nothing to check for this one.",
+        "es": "No hay nada que comprobar en este.",
+        "pt": "Não há nada a verificar neste.",
+        "fr": "Rien à vérifier pour celui-ci.",
+        "zh": "这一项没有什么可检查的。",
+    },
+    "providers.status.nothing_to_list": {
+        "en": "Nothing to list for this one.",
+        "es": "No hay nada que listar en este.",
+        "pt": "Não há nada a listar neste.",
+        "fr": "Rien à lister pour celui-ci.",
+        "zh": "这一项没有什么可列出的。",
+    },
+    "providers.status.model_found": {
+        "en": "✓  {count} model found on this server — pick one above.",
+        "es": "✓  {count} modelo encontrado en este servidor: elige uno "
+              "arriba.",
+        "pt": "✓  {count} modelo encontrado neste servidor: escolha um "
+              "acima.",
+        "fr": "✓  {count} modèle trouvé sur ce serveur — choisissez-en un "
+              "au-dessus.",
+        "zh": "✓  在此服务器上找到 {count} 个模型——在上方选择一个。",
+    },
+    "providers.status.models_found": {
+        "en": "✓  {count} models found on this server — pick one above.",
+        "es": "✓  {count} modelos encontrados en este servidor: elige uno "
+              "arriba.",
+        "pt": "✓  {count} modelos encontrados neste servidor: escolha um "
+              "acima.",
+        "fr": "✓  {count} modèles trouvés sur ce serveur — choisissez-en un "
+              "au-dessus.",
+        "zh": "✓  在此服务器上找到 {count} 个模型——在上方选择一个。",
+    },
+    "providers.status.found": {
+        "en": "✓  {count} found.",
+        "es": "✓  {count} encontrados.",
+        "pt": "✓  {count} encontrados.",
+        "fr": "✓  {count} trouvés.",
+        "zh": "✓  找到 {count} 个。",
+    },
+    "providers.status.none_found": {
+        "en": "None found.",
+        "es": "No se encontró nada.",
+        "pt": "Não foi encontrado nada.",
+        "fr": "Rien de trouvé.",
+        "zh": "没有找到任何内容。",
+    },
+    "providers.status.available_list": {
+        "en": "✓  {count} available: {items}",
+        "es": "✓  {count} disponibles: {items}",
+        "pt": "✓  {count} disponíveis: {items}",
+        "fr": "✓  {count} disponibles : {items}",
+        "zh": "✓  可用 {count} 个：{items}",
+    },
+    "providers.status.available": {
+        "en": "✓  {count} available — pick one above.",
+        "es": "✓  {count} disponibles: elige uno arriba.",
+        "pt": "✓  {count} disponíveis: escolha um acima.",
+        "fr": "✓  {count} disponibles — choisissez-en un au-dessus.",
+        "zh": "✓  可用 {count} 个——在上方选择一个。",
+    },
+    "providers.status.installing": {
+        "en": "installing {pkg} — this can take a minute…",
+        "es": "instalando {pkg}: esto puede tardar un minuto…",
+        "pt": "instalando {pkg} — isto pode levar um minuto…",
+        "fr": "installation de {pkg} — cela peut prendre une minute…",
+        "zh": "正在安装 {pkg}——这可能需要一分钟…",
+    },
+    "providers.status.installed": {
+        "en": "✓  installed — close and reopen this panel",
+        "es": "✓  instalado: cierra y vuelve a abrir este panel",
+        "pt": "✓  instalado — feche e reabra este painel",
+        "fr": "✓  installé — fermez puis rouvrez ce panneau",
+        "zh": "✓  已安装——关闭并重新打开此面板",
+    },
+    "providers.status.pip_failed": {
+        "en": "pip failed",
+        "es": "pip falló",
+        "pt": "o pip falhou",
+        "fr": "pip a échoué",
+        "zh": "pip 安装失败",
     },
 }
 

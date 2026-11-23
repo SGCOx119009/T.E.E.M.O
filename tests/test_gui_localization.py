@@ -128,12 +128,14 @@ def test_the_non_english_languages_are_not_the_english_string():
     """A catalogue that says the same thing five times is not a translation."""
     # A few keys are genuinely the same word everywhere: the product's own
     # name, "Ok", which is a loan word in Spanish, Portuguese and French
-    # and the standard rendering in a Chinese interface, and the two names
-    # of the music players, which are brands and are written the same way
-    # in every language.
+    # and the standard rendering in a Chinese interface, the two names of
+    # the music players, which are brands and are written the same way in
+    # every language, and MediaPipe, which is the library that reads the
+    # hands.
     identical = {
         "app.name", "action.ok",
         "music.service_spotify", "music.service_youtube",
+        "gesture.backend.mediapipe",
     }
     for key in localization.catalog_keys():
         if key in identical:

@@ -38,9 +38,12 @@ _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 #   * "music.service_spotify" y "music.service_youtube" son nombres de
 #     marca: se escriben igual en cualquier idioma, y traducirlos seria
 #     inventarse otro producto.
+#   * "gesture.backend.mediapipe" es el nombre de la libreria que lee las
+#     manos: igual que un nombre de marca, se escribe igual siempre.
 _ANYAS_IGUALES = {
     "app.name", "action.ok",
     "music.service_spotify", "music.service_youtube",
+    "gesture.backend.mediapipe",
 }
 
 # Las claves que el resto del producto va a pedir. Si una falta, quien la
