@@ -1373,6 +1373,12 @@ def paint_icon(p: QPainter, kind: str, r: QRectF, col: QColor) -> None:
     elif kind == "min":
         # A line at the bottom of the screen.
         p.drawLine(QLineF(cx - s * 0.7, cy + s * 0.55, cx + s * 0.7, cy + s * 0.55))
+    elif kind == "bell":
+        # The morning briefing: a bell with the little hammer beside it.
+        p.drawArc(QRectF(cx - s * 0.55, cy - s * 0.75, s * 1.1, s * 1.35),
+                  200 * 16, 340 * 16)
+        p.drawLine(QLineF(cx - s * 0.75, cy + s * 0.45, cx + s * 0.75, cy + s * 0.45))
+        p.drawEllipse(QPointF(cx, cy + s * 0.68), s * 0.14, s * 0.14)
 
 
 class IconButton(QPushButton):

@@ -184,6 +184,7 @@ class MainWindow(QMainWindow):
         self.on_text_command   = None
         self.on_remote_clicked = None   # callable: () -> (url, key) | None
         self.on_interrupt      = None   # callable: () -> None — stop the assistant mid-speech
+        self.on_briefing       = None   # callable: () -> None — say the morning briefing now
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
         self._confirm_overlay  = None   # live ConfirmBanner, if one is on screen
@@ -1650,14 +1651,38 @@ class MainWindow(QMainWindow):
             boot.setGeometry(cw.rect())
         # The deck sits under the header and over the footer.
         deck = getattr(self, "_blades", None)
-        if deck is not None and deck.isVisible():
-            deck._ensure_visible()
+        if deck is not None:
+            self._place_deck_top()
+            if deck.isVisible():
+                deck._ensure_visible()
         # Quick drawer — reposition if open
         if hasattr(self, '_quick_drawer') and self._quick_drawer.isVisible():
             self._position_quick_drawer()
         if hasattr(self, '_ctrl_drawer') and self._ctrl_drawer.isVisible():
             self._position_ctrl_drawer()
         self._fit_video()
+
+    def _place_deck_top(self) -> None:
+        """Where the column of cards begins: under the title of the column.
+
+        THE DECK USED TO BEGIN AT THE VERY TOP of the right-hand column
+        and hid its name. The user saw a row of cards and no idea of
+        what the column was called; the deck is in that column, so it
+        starts under the title of it.
+        """
+        deck = getattr(self, "_blades", None)
+        panel = getattr(self, "_right_panel", None)
+        if deck is None or panel is None:
+            return
+        try:
+            from PyQt6.QtCore import QPoint
+
+            top_left = panel.mapTo(self.centralWidget(), QPoint(0, 0))
+            rail = getattr(self, "_right_rail", None)
+            rail_h = rail.sizeHint().height() if rail is not None else 0
+            deck.set_top(top_left.y() + rail_h + HoloPanel.HEADER + 10)
+        except Exception:
+            pass
 
     def _update_metrics(self):
         snap = _metrics.snapshot()
@@ -1963,7 +1988,7 @@ class MainWindow(QMainWindow):
             ("hand", _t("controls.gesture_tip"), self._toggle_gesture),
             ("deck", _t("controls.deck_tip"), self._toggle_blades),
             ("sliders", _t("window.controls_drawer_tip"), self._open_controls),
-            ("gear", _t("window.setup_drawer_tip"), self._open_tools),
+            ("bell", _t("window.briefing_tip"), self._ask_briefing),
         )
         _COLS = 5
         for _i, (_kind, _tip, _slot) in enumerate(_buttons):
@@ -1981,6 +2006,22 @@ class MainWindow(QMainWindow):
     def _open_tools(self) -> None:
         """The drawer of the tools, from the quick access."""
         self._open_group("tools")
+
+    def _ask_briefing(self) -> None:
+        """The morning briefing, now.
+
+        THE SWITCH WAS ON AND THE MORNING SAID NOTHING. Now the summary
+        waits for the voice, and this is the other way in: the user asks
+        for it whenever they want it, and the facts are read again at
+        that moment — the weather of this minute, the agenda of today.
+        """
+        if self.on_briefing:
+            try:
+                self.on_briefing()
+                return
+            except Exception as exc:                   # noqa: BLE001
+                print(f"[window] the briefing could not be asked for: {exc!r}")
+        self._log.append_log(_t("window.briefing_not_ready"))
 
 
     def _build_left_panel(self) -> QWidget:

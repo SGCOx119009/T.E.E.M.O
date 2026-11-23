@@ -84,6 +84,7 @@ class BladeStack(QWidget):
         # and the card are two different questions and now they have two
         # different answers.
         self._shown = False
+        self._top = 70
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setMouseTracking(True)
         self.hide()
@@ -259,7 +260,7 @@ class BladeStack(QWidget):
         total = 0.0
         for index, blade in enumerate(self._blades):
             if index == self._active:
-                total += STRIP_H + PAD + self._body_height(blade, index, width)
+                total += STRIP_H + 2 * PAD - 4 + self._body_height(blade, index, width)
             else:
                 total += STRIP_H
             total += GAP
@@ -271,16 +272,31 @@ class BladeStack(QWidget):
         Under the header and over the footer: the deck is a column of
         cards and not a part of the frame, so it must not sit on top of
         the bar that has the clock and the buttons.
+
+        AND IT DOES NOT COVER THE TITLE OF THE COLUMN IT LIVES IN. It
+        used to begin at the very top of the right-hand column and hid
+        the name of that column — the user saw a row of cards and no
+        idea of what the column was called.
         """
         parent = self.parentWidget()
         if parent is None:
             return
-        top = 70
+        top = self._top
         bottom = 44
         width = self._deck_width()
         available = max(STRIP_H * 2, parent.height() - top - bottom)
         height = max(STRIP_H * 2, min(self._content_height(width), available))
         self.setGeometry(parent.width() - width - 12, top, int(width), int(height))
+
+    def set_top(self, top: int) -> None:
+        """Where the column of cards begins.
+
+        The window knows where the right-hand column starts and how tall
+        its header is; the deck is told, so it never hides the name of
+        the column it belongs to.
+        """
+        self._top = max(0, int(top))
+        self._ensure_visible()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -316,12 +332,8 @@ class BladeStack(QWidget):
         """
         y = 0.0
         positions: list[tuple[int, float, float]] = []
-        for index, blade in enumerate(self._blades):
-            if index == self._active:
-                body = self._body_height(blade, index)
-                height = STRIP_H + PAD + body * self._anim
-            else:
-                height = STRIP_H
+        for index in range(len(self._blades)):
+            height = self._card_height(index)
             positions.append((index, y, height))
             y += height + GAP
         return positions
@@ -418,11 +430,31 @@ class BladeStack(QWidget):
         p.end()
 
     def _body_height(self, blade: Blade, index: int, width: int | None = None) -> float:
-        """How tall the body of a card would be if it were fully open."""
+        """How tall the body of a card would be if it were fully open.
+
+        THE FIRST LINE STARTS TWELVE PIXELS DOWN. The text is not drawn
+        against the top of the body but a line lower, and a body that
+        was measured without that left the card with a title and no
+        words under it: the open card showed its title and nothing
+        else, and the text was cut by the card's own edge.
+        """
         if width is None:
             width = self._deck_width()
         lines = self._wrap(blade.text, width - 2 * PAD - 4, index)
-        return max(0.0, len(lines) * 16.0)
+        return 12.0 + max(0.0, len(lines) * 16.0)
+
+    def _card_height(self, index: int) -> float:
+        """How tall a card is right now.
+
+        ONE ANSWER FOR THE PAINTING AND FOR THE MEASUREMENT. The card
+        needs its header, the gap that follows it, the body with the
+        first line twelve pixels down, and the padding at the bottom.
+        """
+        blade = self._blades[index]
+        if index != self._active:
+            return float(STRIP_H)
+        body = self._body_height(blade, index)
+        return STRIP_H + 2 * PAD - 4 + body * self._anim
 
     def _draw_close(self, p: QPainter, top: float, height: float) -> None:
         """The cross that throws a card away.

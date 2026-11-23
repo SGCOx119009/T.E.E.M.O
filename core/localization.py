@@ -1058,6 +1058,13 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "RÉDUIRE",
         "zh": "最小化",
     },
+    "window.leave_fullscreen": {
+        "en": "LEAVE FULLSCREEN",
+        "es": "SALIR DE PANTALLA COMPLETA",
+        "pt": "SAIR DA TELA CHEIA",
+        "fr": "QUITTER LE PLEIN ÉCRAN",
+        "zh": "退出全屏",
+    },
     "window.window_modes": {
         "en": "WINDOW",
         "es": "VENTANA",
@@ -1210,6 +1217,20 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "pt": "O baralho — tudo o que o assistente disse nesta sessão  [Ctrl+Alt+E]",
         "fr": "La pioche — tout ce que l'assistant a dit cette session  [Ctrl+Alt+E]",
         "zh": "牌堆——本次会话助手说过的一切  [Ctrl+Alt+E]",
+    },
+    "window.briefing_tip": {
+        "en": "The morning briefing — the hour, the weather and your agenda",
+        "es": "El resumen matutino — la hora, el clima y tu agenda",
+        "pt": "O resumo da manhã — a hora, o clima e sua agenda",
+        "fr": "Le point du matin — l'heure, la météo et votre agenda",
+        "zh": "晨间简报——时间、天气和日程",
+    },
+    "window.briefing_not_ready": {
+        "en": "the briefing is not ready yet — the assistant is still starting",
+        "es": "el resumen todavía no está listo — el asistente está arrancando",
+        "pt": "o resumo ainda não está pronto — o assistente está iniciando",
+        "fr": "le point n'est pas encore prêt — l'assistant démarre",
+        "zh": "简报尚未准备好——助手正在启动",
     },
     "window.boot_done": {
         "en": "the ignition is over — everything is up",

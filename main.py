@@ -939,6 +939,7 @@ class TeemoLive:
         self.ui.on_interrupt      = self.interrupt
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
         self.ui.on_audio_device_change = self._on_audio_device_change
+        self.ui.on_briefing       = self._ask_briefing_now    # the quick access → the morning briefing
         self._reconnect_event: asyncio.Event | None = None
         self._reconnect_keep = True   # False → next rebuild drops the resumption handle
 
@@ -1263,6 +1264,22 @@ class TeemoLive:
             self.ui.set_state("LISTENING")
         self.ui.write_log(f"SYS: Awake — {reason}.")
         self._briefing_on_wake()
+
+    def _ask_briefing_now(self) -> None:
+        """The morning briefing, right now.
+
+        THE BUTTON IN THE QUICK ACCESS. The switch says whether the
+        briefing comes on its own; this says it comes when it is asked
+        for. Both read the facts again at that moment, so the weather is
+        the weather of this minute and the agenda is the agenda of
+        today.
+        """
+        loop = getattr(self, "_loop", None)
+        if loop is None or not loop.is_running():
+            self.ui.write_log("SYS: The briefing is not ready yet.")
+            return
+        self._briefing_sent = False      # an asked-for briefing is a new one
+        asyncio.run_coroutine_threadsafe(self._send_startup_briefing(), loop)
 
     def _briefing_on_wake(self) -> None:
         """The morning briefing, the first time the assistant wakes up.

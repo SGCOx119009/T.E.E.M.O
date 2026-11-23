@@ -181,6 +181,15 @@ class TeemoUI:
     def on_audio_device_change(self, cb):
         self._win.on_audio_device_change = cb
 
+    @property
+    def on_briefing(self):
+        """The hook the quick access uses to ask for the morning briefing."""
+        return self._win.on_briefing
+
+    @on_briefing.setter
+    def on_briefing(self, cb):
+        self._win.on_briefing = cb
+
     def show_confirm(self, title: str, detail: str) -> None:
         """Thread-safe: raise the irreversible-action gate. Called from action
         handlers running in executor threads, so it goes through a signal."""
