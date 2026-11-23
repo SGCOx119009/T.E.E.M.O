@@ -304,6 +304,26 @@ class TeemoUI:
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
 
+    def set_emotional_state(self, name: str, prompt: str = "", colour: str = "") -> None:
+        """Thread-safe: apply an affective state chosen by the user.
+
+        The tool that sets the state runs on a worker thread, so this only
+        emits a signal; the window does the work on the Qt thread. Three
+        outputs, one state: the palette glides to the state's colour, the
+        face takes the state's micro-animation, and the model is told the new
+        tone.
+        """
+        self._win._emotion_sig.emit(str(name or ""), str(prompt or ""),
+                                    str(colour or ""))
+
+    def set_resource_state(self, state) -> None:
+        """Thread-safe: hand the regulator's reading to the HUD.
+
+        The regulator publishes from its own thread, once a second and only
+        when the level changes, so this is a signal and not a direct call.
+        """
+        self._win._resource_sig.emit(state)
+
     def write_log(self, text: str):
         """Put a line in the communications panel — unless it is raw.
 

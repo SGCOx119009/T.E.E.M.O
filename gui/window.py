@@ -134,6 +134,12 @@ def _vbs_quote(text: str) -> str:
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
+    # (state name, prompt fragment, colour) — the affective state, chosen by
+    # the user out loud and applied to the interface.
+    _emotion_sig    = pyqtSignal(str, str, str)
+    # The regulator's reading of the machine. It arrives from a worker thread,
+    # so it travels by signal like everything else that crosses the thread.
+    _resource_sig   = pyqtSignal(object)
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _codejob_sig    = pyqtSignal(object)     # dev_agent job state — live coding panel
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
@@ -184,6 +190,7 @@ class MainWindow(QMainWindow):
         self.on_text_command   = None
         self.on_remote_clicked = None   # callable: () -> (url, key) | None
         self.on_interrupt      = None   # callable: () -> None — stop the assistant mid-speech
+        self.on_emotional_state = None  # callable: (name, prompt) -> None — the state changed
         self.on_briefing       = None   # callable: () -> None — say the morning briefing now
         self.on_voice_change   = None   # callable: () -> None — rebuild session with new voice
         self.on_audio_device_change = None  # callable: () -> None — reopen audio streams
@@ -550,6 +557,8 @@ class MainWindow(QMainWindow):
 
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
+        self._emotion_sig.connect(self._apply_emotional_state)
+        self._resource_sig.connect(self._apply_resource_state)
         self._content_sig.connect(self._show_content)
         self._codejob_sig.connect(self._show_code_job)
         self._reconfig_sig.connect(self._show_setup)
@@ -2888,6 +2897,8 @@ class MainWindow(QMainWindow):
         _btn(tools, _t("controls.memory"), self._open_memory_panel)
         _cap(tools, _t("drawer.tool.plugins"))
         _btn(tools, _t("controls.plugins"), self._open_plugin_manager)
+        _cap(tools, _t("drawer.tool.permissions"))
+        _btn(tools, _t("controls.permissions"), self._open_permissions)
         _cap(tools, _t("drawer.tool.plugin_settings"))
         _btn(tools, _t("controls.plugin_settings"), self._open_plugin_settings)
         # The button is built here with the rest of the drawer; the panel behind
@@ -5294,7 +5305,8 @@ class MainWindow(QMainWindow):
     # nothing else opens over it.
     _OVERLAY_ATTRS = ("_audio_overlay", "_providers_overlay", "_memory_overlay",
                        "_customize_overlay", "_plugin_manager_overlay",
-                       "_plugin_settings_overlay", "_remote_overlay")
+                       "_plugin_settings_overlay", "_remote_overlay",
+                       "_permissions_overlay")
 
     def _close_overlays(self, keep: str = "") -> None:
         """Close every modal except the one named."""
@@ -5358,6 +5370,26 @@ class MainWindow(QMainWindow):
         self._log.append_log("SYS: Audio devices updated.")
         if self.on_audio_device_change:
             self.on_audio_device_change()
+
+    # ── Permissions ──────────────────────────────────────────────────────────
+
+    def _open_permissions(self):
+        """The permissions panel: what the assistant may do, and what is allowed.
+
+        The panel is imported on the click, like the providers panel: it pulls
+        in the policy module and it must not slow the drawer down while it is
+        being built.
+        """
+        try:
+            from gui.overlays import PermissionsOverlay
+        except Exception as exc:
+            self._log.append_log(f"ERR: Permissions panel unavailable — {exc}")
+            return
+        try:
+            ov = PermissionsOverlay(parent=self.centralWidget())
+            self._show_overlay(ov, "_permissions_overlay")   # kept so it is not GC'd
+        except Exception as exc:
+            self._log.append_log(f"ERR: Permissions panel unavailable — {exc}")
 
     # ── Engine & providers ───────────────────────────────────────────────────
 
@@ -5606,6 +5638,64 @@ class MainWindow(QMainWindow):
                 pass
 
     # ── the ignition ────────────────────────────────────────────────────────
+
+    def _apply_emotional_state(self, name: str, prompt: str = "", colour: str = ""):
+        """The user chose an affective state: the interface adopts it.
+
+        THREE THINGS MOVE TOGETHER, and that is the whole point of the state:
+        the palette travels toward the state's colour BY INTERPOLATION, the
+        face takes on the state's micro-animation, and the model is told the
+        new tone.
+
+        The colour glides rather than snapping, and the reason is visible: a
+        colour that jumps reads as a mistake, a colour that settles reads as
+        a mood changing. The same rule is why the state is a named machine
+        state and not a word in a prompt — one thing, three outputs, and they
+        never disagree.
+        """
+        name = str(name or "")
+        if not name:
+            return
+
+        # 1. The palette, by interpolation.
+        target = str(colour or "")
+        if target:
+            try:
+                from gui import theme as _theme
+                _theme.animate_accent_to(target)
+            except Exception:
+                pass
+
+        # 2. The face and the ring.
+        try:
+            if getattr(self, "hud", None) is not None:
+                self.hud.set_emotional_state(name)
+        except Exception:
+            pass
+
+        # 3. The model. main.py pushes the tone into the live session, so the
+        #    change takes effect on the next sentence and not at the next
+        #    reconnect.
+        if self.on_emotional_state:
+            try:
+                self.on_emotional_state(name, str(prompt or ""))
+            except Exception:
+                pass
+
+    def _apply_resource_state(self, state) -> None:
+        """The regulator says how the machine is doing: the HUD slows down with it.
+
+        THE PRESENTATION GOES FIRST, THE CAPACITY NEVER. A busy machine makes
+        the interface breathe more slowly — 60 frames a second becomes 45, then
+        30, then 15 — so that the assistant keeps thinking while the picture
+        gets worse. The other way round, a machine that is too slow to draw
+        also stops being able to answer.
+        """
+        try:
+            if getattr(self, "hud", None) is not None:
+                self.hud.apply_resource_state(state)
+        except Exception:
+            pass
 
     def _start_boot(self, ignore: tuple = ()) -> None:
         """Put the ignition up.

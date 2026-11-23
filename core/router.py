@@ -228,7 +228,23 @@ def free_vram_mb() -> int:
     Never raises and never guesses: a machine with no NVIDIA card has no
     VRAM to speak of, and the answer is 0, not a number invented from the
     integrated adapter's shared memory.
+
+    THE REGULATOR FIRST
+        The plan says the hardware regulator is "the source of truth of the
+        free VRAM", and it is: it reads the card once a second, with NVML,
+        and it publishes the number in its `ResourceState`. So the router
+        asks it before shelling out to `nvidia-smi`, and it only does the
+        slow thing when the regulator has no reading to give — a machine
+        with no NVIDIA card, or an application that never started the
+        regulator at all.
     """
+    try:
+        from core.hardware_equilibrium import free_vram_mb as _from_regulator
+        published = float(_from_regulator())
+        if published >= 0:
+            return int(published)
+    except Exception:
+        pass
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.total,memory.used",

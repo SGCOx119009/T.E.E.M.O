@@ -94,6 +94,7 @@ from core                      import audio_devices
 from core.action_loader        import discover_actions
 from core.operators           import CONTEXT_ALL, OperatorRegistry
 from core.echo                 import EchoGuard
+from core.bargein              import BargeInDetector
 from core.viseme               import VisemeStream
 from core.wake_word            import (
     VoiceActivityDetector, WakeWordDetector,
@@ -554,6 +555,27 @@ def _load_system_prompt() -> str:
             "Never simulate or guess results — always call the appropriate tool."
         )
 
+
+def _emotional_state_line() -> str:
+    """The tone line for the prompt, taken from the active affective state.
+
+    The state is not a word in the prompt and nothing else: it drives the tone
+    of the reply, the accent colour of the interface and the movement of the
+    face, all from one named state (see `core/emotional_spectrum.py`). This
+    function is the seam between them — it turns the active state into the
+    sentence the system prompt carries.
+
+    A missing module is not a crash: the assistant keeps its own voice.
+    """
+    try:
+        from core import emotional_spectrum as _spectrum
+        return _spectrum.prompt_fragment()
+    except Exception:
+        return (
+            "Hold one steady register for everything, and let the situation "
+            "decide how warm or how blunt you are."
+        )
+
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
 
 # Transcript chunks shorter than this may legitimately repeat ("evet, evet"),
@@ -896,6 +918,9 @@ class TeemoLive:
         # branch below that reads it treats None as "everything is available",
         # so the Live path is exactly what it was.
         self._engine_caps          = None
+        # What BOTH sides agreed on: the engine's capabilities intersected
+        # with this client's. None until the engine is resolved.
+        self._negotiated_caps      = None
         # Set only when a local pipeline is running, so push-to-talk can tell it
         # the turn is over. Live decides that on the server; nothing does here.
         self._engine               = None
@@ -920,6 +945,16 @@ class TeemoLive:
         self._ptt                  = None    # core.hotkey.PushToTalk
         self._out_level            = 0.0     # level of the audio being played right now
         self._echo                 = EchoGuard()
+        # BARGE-IN.
+        #
+        # The user cuts the assistant off by talking. It is not a loudness
+        # test: it is the echo guard's verdict first (is this our own voice
+        # coming back through the speakers?), then a dead zone above the
+        # turn-ending threshold (so a cough does not cut the answer), then a
+        # short cooldown (so the tail of our own reply cannot start a new
+        # turn). The detector is pure and lives in `core/bargein.py`.
+        self._barge_in             = BargeInDetector()
+        self._barge_in_enabled     = True
         # `stream.write()` returns when the buffer accepts the audio, not when the
         # speaker has finished with it, so sound is still in the room after the
         # speaking flag drops. Streaming the microphone during that gap is how an
@@ -937,6 +972,28 @@ class TeemoLive:
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
+        self.ui.on_emotional_state = self._on_emotional_state   # the affective state → the live tone
+
+        # THE REGULATOR.
+        #
+        # It watches the machine and publishes a reading once a second; the
+        # HUD takes its frame interval from it, so a busy computer makes the
+        # picture breathe more slowly instead of making the assistant stop.
+        # It is a daemon thread: the process must be able to end without
+        # asking it. And it is started AFTER the interface exists, because the
+        # first thing it does is talk to the HUD.
+        self._regulator = None
+        try:
+            from core.hardware_equilibrium import regulator
+            # The ONE regulator of the process: the plan says it is also the
+            # source of truth of the free VRAM that the router needs, and two
+            # regulators would read the machine twice a second and could
+            # answer with different numbers.
+            self._regulator = regulator()
+            self._regulator.add_listener(self._on_resource_state)
+            self._regulator.start()
+        except Exception as e:
+            print(f"[T.E.E.M.O] The hardware regulator did not start: {e}")
         self.ui.on_voice_change   = self._on_voice_change     # voice picker → rebuild session
         self.ui.on_audio_device_change = self._on_audio_device_change
         self.ui.on_briefing       = self._ask_briefing_now    # the quick access → the morning briefing
@@ -1787,6 +1844,14 @@ class TeemoLive:
             # still needs it to recognise our own voice. It is dropped when the
             # tail expires. What the guard learned about the room always stays.
             self._out_level = 0.0
+            # The barge-in detector forgets the voice it was tracking: a new
+            # reply is a new chance, and a detector still counting the blocks
+            # of the previous one would interrupt this reply before the user
+            # had said anything.
+            try:
+                self._barge_in.reset()
+            except Exception:
+                pass
         if value:
             self.ui.set_state("SPEAKING")
         elif not self.ui.muted:
@@ -1858,6 +1923,52 @@ class TeemoLive:
         except Exception:
             pass
 
+    def _barge_in_tick(self, indata) -> None:
+        """One microphone block while the assistant is talking: is this an interruption?
+
+        THE ORDER IS THE WHOLE DESIGN, and it is the plan's order:
+
+        1. THE ECHO FIRST. `core/echo.py` compares this block against what we
+           are playing right now. If it says "that is our own voice", the
+           block is dropped however loud it is — on speakers the microphone
+           hears us, and a level test alone would cut every reply off.
+        2. THE DEAD ZONE. The detector's threshold sits ABOVE the one that
+           ends a turn, so a cough or a keyboard click cannot interrupt.
+        3. THE COOLDOWN. For a moment after an interruption nothing else can
+           start one, or the tail of our own voice would begin a new turn.
+
+        When the guard cannot be consulted, nothing interrupts. Not being able
+        to tell the user from the echo is a reason to stay quiet, not a
+        reason to guess.
+        """
+        if not self._barge_in_enabled:
+            return
+        try:
+            level = _pcm_level(indata)
+            user_speech = None
+            try:
+                # While the guard is still learning the room it cannot tell the
+                # user from the echo, and "I do not know" is not "it was the
+                # echo" — the difference shows in the reason, and the reason is
+                # what the log says when a barge-in does not happen.
+                if self._echo.calibrated:
+                    user_speech = self._echo.is_user_speech(
+                        indata, SEND_SAMPLE_RATE, level)
+            except Exception:
+                user_speech = None
+            decision = self._barge_in.feed(
+                level=level,
+                now=time.monotonic(),
+                speaking=True,
+                is_user_speech=user_speech,
+            )
+            if decision.interrupted:
+                print(f"[T.E.E.M.O] ✋ Barge-in — {decision.reason} "
+                      f"({decision.since_voice_ms:.0f} ms from the first voice)")
+                self.interrupt()
+        except Exception:
+            pass      # a barge-in that fails must never take the microphone down
+
     def interrupt(self) -> None:
         """Stop the assistant mid-speech: drain queued audio and open mic immediately."""
         self._interrupted = True
@@ -1898,6 +2009,59 @@ class TeemoLive:
             ),
             self._loop
         )
+
+    def _on_resource_state(self, state) -> None:
+        """The regulator published a reading of the machine: the HUD adjusts.
+
+        It arrives from the regulator's own thread, so it goes to the
+        interface as a signal and the window hands it to the HUD on the Qt
+        thread. A failure here must never take the assistant down: a picture
+        that does not slow down is a nuisance, a crash is a disaster.
+        """
+        try:
+            self.ui.set_resource_state(state)
+        except Exception:
+            pass
+
+    def _on_emotional_state(self, name: str, prompt: str = "") -> None:
+        """The affective state changed: the live session hears about it now.
+
+        The system instruction is fixed when the session connects, so a state
+        chosen in the middle of a conversation would otherwise only take
+        effect at the next reconnect — which is exactly when it matters least.
+        The new tone is injected the way the other application messages are: a
+        tagged turn the model reads as an instruction and never quotes.
+
+        `turn_complete=False` on purpose. Every other injection asks the
+        assistant to say something; this one does not. The user changed a
+        mood, not the subject of the conversation, and hearing "sure, I'll be
+        more sceptical now" would be worse than saying nothing at all.
+        """
+        if not self._loop or not self.session:
+            return
+        text = str(prompt or "")
+        if not text:
+            try:
+                from core import emotional_spectrum as _spectrum
+                text = _spectrum.prompt_fragment()
+            except Exception:
+                return
+        message = f"[TONE_CHANGED] {text}"
+
+        async def _apply():
+            try:
+                await self.session.send_client_content(
+                    turns={"role": "user", "parts": [{"text": message}]},
+                    turn_complete=False,
+                )
+                print(f"[Tone] {name} applied to the live session.")
+            except Exception as e:
+                print(f"[Tone] could not apply the state: {e}")
+
+        try:
+            asyncio.run_coroutine_threadsafe(_apply(), self._loop)
+        except Exception as e:
+            print(f"[Tone] could not apply the state: {e}")
 
     def speak_error(self, tool_name: str, error: str):
         short = str(error)[:120]
@@ -1995,6 +2159,7 @@ class TeemoLive:
             ),
             "reply_language": _reply_language_line(),
             "region": _region_line(),
+            "emotional_state": _emotional_state_line(),
         })
 
         parts = [time_ctx, identity_ctx]
@@ -2422,13 +2587,16 @@ class TeemoLive:
             if assistant_speaking:
                 # Nothing is streamed while the assistant talks.
                 #
-                # Interrupting by voice used to live here: `EchoGuard` can pick a
-                # user out from under our own echo, and `core/echo.py` still does
-                # that for the tail below. Re-enabling is small — classify each
-                # block here and call interrupt() after `required_blocks` of
-                # agreement — but it depends on the listener's room, so it stays
-                # out until it can be tried on real hardware.
+                # But the microphone is still listened to LOCALLY: if the user
+                # starts speaking, the answer is cut short the way a person
+                # would stop when interrupted. The echo guard is consulted
+                # first, so our own voice coming back through the speakers
+                # cannot cut us off — see `_barge_in_tick`.
                 self._keep_session_warm()
+                try:
+                    self._barge_in_tick(indata)
+                except Exception:
+                    pass
                 return
 
             # ── Echo tail ────────────────────────────────────────────────────
@@ -3301,6 +3469,37 @@ class TeemoLive:
         except Exception:
             return "gemini"
 
+    def _client_capability_names(self) -> list[str]:
+        """What THIS installation can accept — asked of the machine, not assumed.
+
+        The client is this application on this computer: it can always show
+        text, it can show video, and it can call tools. Whether it can PLAY
+        audio and whether it can HEAR anything are questions about the
+        hardware, so they are asked of the hardware. A failure to ask is not
+        an answer of "no": the failure is swallowed and the capability is
+        simply not claimed, which leaves the engine free to try.
+        """
+        names = []
+        try:
+            from providers.base import (
+                CAP_AUDIO_INPUT, CAP_AUDIO_OUTPUT, CAP_TEXT_STREAM,
+                CAP_TOOLS, CAP_VIDEO_OUTPUT,
+            )
+        except Exception:
+            return names
+        names.extend([CAP_TEXT_STREAM, CAP_TOOLS, CAP_VIDEO_OUTPUT])
+        try:
+            if audio_devices.list_devices("output"):
+                names.append(CAP_AUDIO_OUTPUT)
+        except Exception:
+            pass
+        try:
+            if audio_devices.list_devices("input"):
+                names.append(CAP_AUDIO_INPUT)
+        except Exception:
+            pass
+        return names
+
     def _resolve_engine_caps(self):
         """What the chosen engine can do — or None for Gemini Live.
 
@@ -3346,6 +3545,31 @@ class TeemoLive:
 
             caps = dict(getattr(llm, "caps", {}) or {})
             caps["audio_out"] = bool(str(pipe.get("tts") or "").strip())
+
+            # THE CLIENT SAYS WHAT IT SUPPORTS, and the two sides are NEGOTIATED.
+            #
+            # The engine can produce a voice; whether the user hears it is a
+            # fact about THIS machine — there may be no speaker at all. A
+            # client that cannot play audio does not receive audio: nothing is
+            # synthesised and the seconds it would have taken are not spent.
+            # The negotiation is a list both sides declare and the intersection
+            # of the two, in a fixed order, so it can be printed and compared.
+            try:
+                from providers.base import (
+                    CAP_AUDIO_INPUT, CAP_AUDIO_OUTPUT, CAP_TEXT_STREAM,
+                    CAP_TOOLS, CAP_VIDEO_OUTPUT, client_caps, negotiate,
+                )
+                _client = client_caps(*self._client_capability_names())
+                self._negotiated_caps = negotiate(caps, _client)
+                if not self._negotiated_caps.allows_audio():
+                    caps["audio_out"] = False
+                    print("[T.E.E.M.O] No usable output device — the engine "
+                          "will not synthesise audio.")
+                else:
+                    print("[T.E.E.M.O] Capabilities: "
+                          + ", ".join(self._negotiated_caps.as_list()))
+            except Exception as e:
+                print(f"[T.E.E.M.O] Capability negotiation skipped: {e}")
             return caps
         except Exception as e:
             # A local engine that will not start must never mean no assistant.

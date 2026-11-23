@@ -263,6 +263,10 @@ class BehaviourUnchangedTests(unittest.TestCase):
         `music_player` is the twenty-third: it arrived with the second
         half of A8, when the assistant stopped insisting on playing songs
         inside its own window and opened Spotify or YouTube instead.
+
+        `emotional_spectrum` is the twenty-fourth: it arrived with FASE 8,
+        the affective spectrum — the tool that fixes the tone and the face
+        of the assistant by voice.
         """
         actions = discover_actions(BASE / "actions", logger=lambda m: None, eager=False)
         self.assertEqual(
@@ -270,7 +274,8 @@ class BehaviourUnchangedTests(unittest.TestCase):
             sorted([
                 "background_tasks", "browser_control", "code_helper",
                 "computer_control", "computer_settings", "desktop_control",
-                "dev_agent", "file_controller", "file_processor", "flight_finder",
+                "dev_agent", "emotional_spectrum",
+                "file_controller", "file_processor", "flight_finder",
                 "game_updater", "meet_control", "music_player", "open_app",
                 "reminder", "routines",
                 "screen_mark", "send_message", "task_planner", "video_player",
