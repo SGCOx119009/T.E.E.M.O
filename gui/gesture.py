@@ -2,8 +2,8 @@
 gui/gesture.py — the hands are the mouse.
 
 WHAT THIS IS
-    The cursor you steer with. A camera watches the user's hands; the
-    skeleton of each hand is drawn on the glass; the fingertip is the
+    The cursor you steer with. A camera watches the user's hand; the
+    skeleton of the hand is drawn on the glass; the fingertip is the
     cursor; pinching closes it, and the pinch is a click.
 
 WHY THE HANDS ARE DRAWN AND NOT JUST USED
@@ -32,27 +32,65 @@ THE CURSOR ACTUALLY MOVES
     does, only the hand is the keyboard: the interface does not need to
     know about it.
 
-THE VOCABULARY — WHAT THE HAND CAN SAY
+ONE HAND, NOT TWO
+    The tracker reads ONE hand (`num_hands=1`). Two hands were worse, not
+    richer: the pointer was aimed at whichever hand the tracker happened to
+    report first, so it teleported from one side of the screen to the other
+    between frames — a jump no filter can repair, because the jump is in
+    the target and not in the noise. One hand is also faster (about 25 ms
+    of model instead of 36) and one hand is enough for a full mouse. The
+    zoom that used to need two hands is now three fingers of one hand, and
+    the SHIFT that used to need a second fist is now a finger of the same
+    hand, pressed together with the pinch.
+
+THE POINTER DOES NOT SHAKE
+    The raw landmark of the fingertip is noisy — the model says the finger
+    moved four pixels when the hand did not move at all — and a pointer
+    wired straight to the camera looks like it has Parkinson's disease.
+    So the aimed point goes through a ONE-EURO FILTER (`core/pointer_filter.py`):
+    a low-pass filter whose cutoff rises with the speed of the hand, which
+    smooths the noise while the hand is still and does not smear the
+    movement while it is fast. On top of it, a deadband of 100 px/s (the
+    speed below which what the model reports is noise, not intention) and a
+    forward lead of 20 ms, which cancels most of the delay of the camera.
+    The numbers were measured, not guessed: `instrumentos/manos_calibra.py`
+    sweeps them and `instrumentos/manos_medida.py` measures the result —
+    the tremor of the model (4 px) comes out at 0.5 px, and the latency is
+    +15 ms at a slow hand and NEGATIVE (it runs ahead of the hand) at 1500
+    px/s.
+
+THE VOCABULARY — WHAT ONE HAND CAN SAY
     A hand is not a pinch. The skeleton carries twenty-one landmarks, and
     they are enough to tell a dozen things apart — so the hand is a full
-    mouse, not a single button:
+    mouse, not a single button. The fingers that are NOT making the pinch
+    are the modifiers, exactly as in a real mouse:
 
-    * `PINCH`      a click. Closed and opened quickly is a left click; a
-                   pinch that MOVES while it is closed is a drag, and that
-                   is what lets the hand pick up the floating panel and
-                   put it wherever it belongs.
+    * `PINCH`      a click, on the release of the pinch, with the position
+                   of the press as the reference. Two pinches close
+                   together are a DOUBLE CLICK.
     * `PINCH` held still for three quarters of a second is the RIGHT
                    click — the context menu, the same way a long press is
-                   the context menu on a touch screen.
+                   the context menu on a touch screen. It is the right
+                   click and NOTHING else: the left button is released
+                   first, so a long press does not select a thing AND open
+                   its menu, which is two actions out of one gesture.
+    * `PINCH` that MOVES while it is closed is a drag: that is what lets
+                   the hand pick up the floating panel and put it wherever
+                   it belongs.
+    * `PINCH`+`MIDDLE`  the SHIFT key, for selecting a group of things.
+    * `PINCH`+`RING`    the CTRL key.
+    * `PINCH`+`PINKY`   the ALT key.
+    * `PINCH`+`THREE`   the MIDDLE CLICK, the wheel of a mouse.
     * `TWO`        index and middle up, the other fingers down: the wheel.
                    Up and down scrolls, sideways scrolls sideways.
-    * `TWO HANDS`  both hands pinching and moving apart or together is the
-                   ZOOM: the same Ctrl+wheel every drawing program uses.
-    * `FIST`       one hand closed while the other works is the SHIFT key:
-                   that is how a group of things is selected instead of
-                   one thing at a time.
+    * `THREE`      index, middle and ring up: the ZOOM, the same Ctrl+wheel
+                   every drawing program uses, measured on the distance
+                   between the index and the middle finger.
     * `OPEN`       an open palm swept sideways is a swipe: back and
                    forward, the way a browser understands them.
+    * `FIST`       everything let go: the pointer is released and the
+                   modifiers are dropped, so a closed hand is never a
+                   pinch that stays pressed by accident.
     * `POINT`      one finger: move the pointer and nothing else, for the
                    moments when a click would be a mistake.
 
@@ -104,12 +142,34 @@ BONES = (
 
 _MODEL = Path(__file__).resolve().parent.parent / "models" / "hand_landmarker.task"
 
+# ── the pinch, in numbers ────────────────────────────────────────────────────
+#
+# ONE LINE, THREE NAMES, AND THE REASON IS THE SAME IN ALL THREE.
+#
+# The pinch is the button of the mouse, and a button that flickers is a
+# button that clicks by itself. The fingers close and open around a
+# line, and a single line makes the button go down and come up and go
+# down again, several times a second, while the user believes they are
+# holding it still.
+#
+# So there are two lines: the button goes DOWN at PINCH_ON and comes UP
+# at PINCH_OFF, and in between nothing happens at all. The third number
+# is not about the gap: it is about the index. In a PINCH the index is
+# out in front, in the air, and its tip is far from the knuckle of the
+# middle finger; in a FIST the index is folded onto the palm and its tip
+# is right next to that knuckle, and the thumb of a fist is touching the
+# index too. Without that third number a resting hand holds the mouse
+# button down.
+PINCH_ON = 0.78
+PINCH_OFF = 0.52
+PINCH_REACH = 0.85
+
 
 class Hand:
     """One hand, as the tracker sees it."""
 
     __slots__ = ("points", "handedness", "pinched", "closeness", "x", "y",
-                 "span", "pose", "aim_x", "aim_y")
+                 "span", "pose", "aim_x", "aim_y", "fingers", "index_reach")
 
     def __init__(self, points, handedness: str = ""):
         self.points = points            # 21 x (x, y) in normalised image space
@@ -134,6 +194,28 @@ class Hand:
         self.aim_y = 0.0
         self.span = 1.0
         self.pose = "open"
+        # WHICH FINGERS ARE OUT, ONE BY ONE.
+        #
+        # The shape of the hand is not one word: it is five answers,
+        # and the fingers that are not making the pinch are the ones
+        # that hold the modifier keys. A pinch with the middle finger
+        # up is a click with the shift down; the same pinch with the
+        # ring finger up is a click with the control down. This is how
+        # a real mouse is held, and it is the reason one hand is enough
+        # to be a whole mouse.
+        self.fingers = {"thumb": False, "index": False, "middle": False,
+                        "ring": False, "pinky": False}
+        # HOW FAR THE INDEX IS FROM THE KNUCKLE OF THE MIDDLE FINGER, IN
+        # SPANS OF THE HAND.
+        #
+        # It is what tells a PINCH from a FIST. In a pinch the index is
+        # out in front, in the air, and its tip is far from the knuckle
+        # of the middle finger. In a fist the index is folded down onto
+        # the palm and its tip is right next to that knuckle — and the
+        # thumb of a fist is also touching the index. Without this the
+        # fist was read as a pinch, and a hand that was simply resting
+        # held the mouse button down.
+        self.index_reach = 1.0
 
     def measure(self) -> None:
         """Work out the span, the aimed point and how closed the pinch is.
@@ -150,7 +232,16 @@ class Hand:
         index = self.points[INDEX_TIP]
         gap = math.hypot(thumb[0] - index[0], thumb[1] - index[1])
         self.closeness = max(0.0, min(1.0, 1.0 - gap / (self.span * 0.85)))
-        self.pinched = self.closeness > 0.72
+        # THE INDEX HAS TO BE OUT FOR THE PINCH TO BE A PINCH.
+        self.index_reach = (math.hypot(index[0] - middle[0], index[1] - middle[1])
+                            / max(1e-4, self.span))
+        self.fingers["thumb"] = self._extended(2, THUMB_TIP)
+        self.fingers["index"] = self._extended(6, INDEX_TIP)
+        self.fingers["middle"] = self._extended(10, 12)
+        self.fingers["ring"] = self._extended(14, 16)
+        self.fingers["pinky"] = self._extended(18, 20)
+        self.pinched = (self.closeness > PINCH_ON
+                        and self.index_reach > PINCH_REACH)
         self.x = (thumb[0] + index[0]) / 2.0
         self.y = (thumb[1] + index[1]) / 2.0
         self.aim_x = float(middle[0])
@@ -184,12 +275,21 @@ class Hand:
 
     def _classify(self) -> str:
         """The name of the shape."""
+        f = self.fingers
+        if self.span < 1e-3:
+            # A shape with no size at all is not a hand: it is the
+            # tracker's answer without any information in it. It is
+            # called a blob so that it is never mistaken for a pose.
+            return "blob"
         if self.pinched:
+            # The pinch wins over everything: the fingers that are not
+            # making it are the modifiers, and the modifiers are said
+            # apart when the press begins, not here.
             return "pinch"
-        index = self._extended(6, 8)
-        middle = self._extended(10, 12)
-        ring = self._extended(14, 16)
-        pinky = self._extended(18, 20)
+        index = bool(f["index"])
+        middle = bool(f["middle"])
+        ring = bool(f["ring"])
+        pinky = bool(f["pinky"])
         out = index + middle + ring + pinky
         if out == 0:
             return "fist"
@@ -255,7 +355,23 @@ def _shared_landmarker(model_path: Path):
             base_options=BaseOptions(
                 model_asset_path=str(model_path)),
             running_mode=RunningMode.VIDEO,
-            num_hands=2,
+            # ONE HAND, AND NOT TWO.
+            #
+            # The owner asked for it, and it is also the right answer:
+            #
+            # * WITH TWO HANDS THE POINTER JUMPED FROM ONE HAND TO THE
+            #   OTHER. The code picks the hand that is doing something, and
+            #   when both were in the picture that choice changed from one
+            #   picture to the next: the pointer teleported from one hand
+            #   to the other, and no amount of smoothing can hide a jump
+            #   that big.
+            # * THE MODEL IS FASTER WITH ONE HAND. It looks for one hand
+            #   instead of two, and the picture of the hand reaches the
+            #   screen sooner.
+            # * ONE HAND IS ENOUGH TO BE A WHOLE MOUSE. The fingers that
+            #   are not making the pinch are the ones that hold the
+            #   modifier keys, exactly as on a real mouse.
+            num_hands=1,
             min_hand_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
@@ -334,7 +450,7 @@ class HandTracker:
             import mediapipe as mp
             self._legacy = mp.solutions.hands.Hands(
                 static_image_mode=False,
-                max_num_hands=2,
+                max_num_hands=1,
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
             )
@@ -511,6 +627,7 @@ class PointerDriver:
     # and they do not change.
     _LEFTDOWN, _LEFTUP = 0x0002, 0x0004
     _RIGHTDOWN, _RIGHTUP = 0x0008, 0x0010
+    _MIDDLEDOWN, _MIDDLEUP = 0x0020, 0x0040
     _WHEEL, _HWHEEL = 0x0800, 0x1000
 
     # The virtual keys of the Windows keyboard.
@@ -518,6 +635,14 @@ class PointerDriver:
     _VK_CONTROL = 0x11
     _VK_MENU = 0x12
     _VK_LEFT, _VK_RIGHT = 0x25, 0x27
+    # THE MIDDLE BUTTON IS NOT A KEY, BUT IT IS USED AS A MARKER.
+    #
+    # It is the button under the wheel of a real mouse, and it is the one
+    # a gesture cannot press any other way: three fingers together make
+    # the pinch, and the two that are left over are the modifiers. When
+    # all three of them are up the pinch is not a modifier at all — it is
+    # the middle button.
+    _VK_MBUTTON = 0x1000
 
     def __init__(self):
         self._user32 = None
@@ -588,6 +713,60 @@ class PointerDriver:
             self._user32.mouse_event(self._RIGHTDOWN, 0, 0, 0, 0)
             time.sleep(0.04)
             self._user32.mouse_event(self._RIGHTUP, 0, 0, 0, 0)
+            return True
+        except Exception:
+            return False
+
+    def press_right(self) -> bool:
+        """The other button goes DOWN and stays down.
+
+        It is what a long press becomes: the right button is pressed and
+        held, and the menu opens when it comes up — the way a mouse does
+        it, and not as a right click after a left click.
+        """
+        if self._user32 is None:
+            return False
+        try:
+            self._user32.mouse_event(self._RIGHTDOWN, 0, 0, 0, 0)
+            return True
+        except Exception:
+            return False
+
+    def release_right(self) -> bool:
+        """The other button comes up, and the menu opens."""
+        if self._user32 is None:
+            return False
+        try:
+            self._user32.mouse_event(self._RIGHTUP, 0, 0, 0, 0)
+            return True
+        except Exception:
+            return False
+
+    def middle_click(self) -> bool:
+        """The button under the wheel: the one that opens things in a tab."""
+        if self._user32 is None:
+            return False
+        try:
+            self._user32.mouse_event(self._MIDDLEDOWN, 0, 0, 0, 0)
+            time.sleep(0.04)
+            self._user32.mouse_event(self._MIDDLEUP, 0, 0, 0, 0)
+            return True
+        except Exception:
+            return False
+
+    def double_click(self) -> bool:
+        """Two clicks, one after the other, in the same place.
+
+        The second click of a double click is sent here, after the first
+        one has already gone out: the system sees two clicks in a row
+        and calls it a double click, the way it does with a mouse.
+        """
+        if self._user32 is None:
+            return False
+        try:
+            self._user32.mouse_event(self._LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.03)
+            self._user32.mouse_event(self._LEFTUP, 0, 0, 0, 0)
             return True
         except Exception:
             return False
@@ -698,13 +877,30 @@ class GestureService(QObject):
     _SCROLL_PX = 18
     _SWIPE_SECONDS = 0.45
     _SWIPE_PX = 220
-    _CLICK_DEBOUNCE = 0.25
     # HOW MUCH OF THE PICTURE IS LEFT UNUSED AT THE EDGES.
     #
     # The camera sees more than the hand needs, and the corners of the
     # picture cannot be reached without the arm leaving the frame. So
     # the middle of the picture is the middle of the screen.
     _AIM_MARGIN = 0.15
+
+    # THE PINCH HAS TWO THRESHOLDS, NOT ONE.
+    #
+    # With a single threshold the pinch flickers: the fingers close a
+    # little past the line and open a little past it, and the button
+    # goes down and comes up and goes down again, several times a
+    # second. A button that chatters is a button that clicks by itself,
+    # and a click that is swallowed by the debounce is a click that never
+    # arrives — which is what made "I cannot select anything" true.
+    #
+    # So the button goes DOWN at 0.78 and comes UP at 0.52: between the
+    # two nothing happens, and the pinch has to really open to let go.
+    _PINCH_ON = 0.78
+    _PINCH_OFF = 0.52
+    # TWO PINCHES THIS CLOSE TOGETHER ARE A DOUBLE CLICK.
+    _DOUBLE_CLICK = 0.35
+    # THE SCREEN IS MEASURED EVERY SO OFTEN, NOT EVERY PICTURE.
+    _SCREEN_EVERY = 1.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -716,18 +912,48 @@ class GestureService(QObject):
         self._hands: list[Hand] = []
         self._enabled = False
         self._drive_pointer = False
-        self._last_click = 0.0
+        self._last_click_end = 0.0
         self._pointer_down = False
-        # The state of the hand as a pointer.
+        # THE STATE OF THE HAND AS A POINTER.
         self._press_at = (0, 0)
         self._press_time = 0.0
         self._press_moved = False
+        # THE PINCH IS LATCHED, WITH TWO THRESHOLDS.
+        #
+        # The latch is what stops the button from chattering: it goes down
+        # when the fingers close and comes up when they really open, and
+        # nothing that happens in between can change it.
+        self._pinch_latched = False
+        # THE PRESS THAT BECAME THE OTHER BUTTON.
+        #
+        # A press that is held still for long enough is the right click,
+        # and it must never ALSO be a left click: the two together select
+        # the thing and open its menu, which is the opposite of what was
+        # asked for.
+        self._press_is_right = False
+        # WHEN THE LAST CLICK ENDED, for the double click.
+        self._last_click_end = 0.0
+        # THE MODIFIER KEYS THAT ARE HELD DOWN RIGHT NOW.
+        self._held_keys: set[int] = set()
         self._shift_down = False
         self._scroll_anchor = None
         self._swipe_anchor = None
-        self._zoom_last = None
+        self._zoom_anchor = None
         self._screen_w = 1920
         self._screen_h = 1080
+        self._screen_checked = 0.0
+        # THE POINTER IS SMOOTHED, AND IT IS PUT A LITTLE AHEAD.
+        #
+        # Without this the pointer is exactly where the model thought the
+        # hand was, and the model is a few pixels wrong every time: the
+        # pointer trembled like a shaking hand and could not be held still
+        # on a button. With it, a hand that is still does not move the
+        # pointer at all, and a hand that moves arrives almost at once.
+        from core.pointer_filter import PointerSmoother
+
+        self._smoother = PointerSmoother()
+        self._pointer_at = (0, 0)
+        self._last_steer = 0.0
         # The tracker is used by the thread of the camera and closed by
         # the thread of the service: the two must not meet.
         self._frame_lock = threading.Lock()
@@ -854,15 +1080,15 @@ class GestureService(QObject):
             # now must be finished before the native memory is freed.
             with self._frame_lock:
                 tracker.close()
-        # The button and the modifier are let go here as well: a stop that
+        # The button and the modifiers are let go here as well: a stop that
         # leaves the shift held down is a stop that turns every later click
         # into a group selection.
         if self._pointer_down:
             self._pointer_down = False
+            self._press_is_right = False
             self._driver.release()
-        if self._shift_down:
-            self._shift_down = False
-            self._driver.key(PointerDriver._VK_SHIFT, False)
+        self._set_modifiers(set())
+        self._pinch_latched = False
         return "the camera is no longer being watched"
 
     def toggle(self) -> str:
@@ -990,12 +1216,12 @@ class GestureService(QObject):
             # to come up here.
             if self._pointer_down:
                 self._pointer_down = False
+                self._press_is_right = False
                 self._driver.release()
             # And so does a modifier that is still held: a shift left down
             # turns every click afterwards into a group selection.
-            if self._shift_down:
-                self._shift_down = False
-                self._driver.key(PointerDriver._VK_SHIFT, False)
+            self._set_modifiers(set())
+            self._pinch_latched = False
             with self._lock:
                 self._hands = []
             self.hands_sig.emit([])
@@ -1039,100 +1265,113 @@ class GestureService(QObject):
         scaled = (float(value) - self._AIM_MARGIN) / span
         return max(0.0, min(1.0, scaled))
 
+    def _measure_screen(self) -> None:
+        """How big is the screen. Asked once a second, not once a picture."""
+        now = time.monotonic()
+        if now - self._screen_checked < self._SCREEN_EVERY:
+            return
+        self._screen_checked = now
+        try:
+            self._screen_w = int(ctypes.windll.user32.GetSystemMetrics(0))
+            self._screen_h = int(ctypes.windll.user32.GetSystemMetrics(1))
+        except Exception:
+            return
+        # A SCREEN THAT CHANGED SIZE INVALIDATES THE FILTER.
+        if self._pointer_at:
+            self._smoother.reset()
+
     def _steer(self, hands: list[Hand]) -> None:
         """Move the pointer to the aimed point, and do what the hand says.
 
-        The pinch is not a click that fires and forgets: the fingers
-        closing put the button DOWN, and the fingers opening let it UP.
-        A quick pinch is therefore a click, and a pinch that moves while it
-        is closed is a drag — which is what lets the hand pick up the
-        floating panel and put it wherever it belongs.
+        ONE HAND IS ENOUGH FOR THE WHOLE MOUSE.
 
-        And the pinch is not the only thing the hand can say. The whole
-        vocabulary is decided here, from the shape of the hand:
+            PINCH                   the left button: click, double click,
+                                   right click when it is held, drag when
+                                   it moves
+            PINCH + MIDDLE          the shift, while the button is down
+            PINCH + RING            the control, while the button is down
+            PINCH + PINKY           the alt, while the button is down
+            PINCH + ALL THREE       the middle button: the wheel pressed
+            TWO FINGERS             the wheel, up and down or sideways
+            THREE FINGERS           the zoom, by how far the index and the
+                                   middle are apart
+            OPEN PALM, swept        back and forward
+            FIST                    let go of everything and rest
 
-            PINCH          left click, or a drag while it is closed
-            PINCH, held    the right click
-            TWO FINGERS    the wheel
-            TWO HANDS      the zoom
-            FIST           the shift: the group selection
-            OPEN PALM      a swipe: back and forward
+        THE POINTER IS SMOOTHED, AND IT IS PUT A LITTLE AHEAD.
+
+        The pointer used to be exactly where the model thought the hand
+        was, and the model is a few pixels wrong every single time: the
+        pointer trembled like a hand with Parkinson's and could not be
+        held still on a button. Now the point goes through a filter that
+        smooths a still hand hard and a moving hand hardly at all, and
+        the pointer is put where the hand is going to be instead of where
+        it was — which is what takes the lag of the camera out.
         """
         if not self._driver.available():
             return
-        try:
-            import ctypes
-            self._screen_w = ctypes.windll.user32.GetSystemMetrics(0)
-            self._screen_h = ctypes.windll.user32.GetSystemMetrics(1)
-        except Exception:
-            return
+        self._measure_screen()
         if not hands:
             self._rest()
             return
 
-        # THE FIST OF ONE HAND IS THE MODIFIER OF THE OTHER.
-        #
-        # A closed hand while the other hand works is the shift key: that
-        # is how a group of things is selected instead of one thing at a
-        # time. It has to be read across hands, because the hand that is
-        # closed is the hand that is NOT clicking.
-        #
-        # THE POSE IS READ WITH A DEFENSE. A hand that comes from the
-        # tracker has one; a hand that comes from anywhere else may not,
-        # and a hand without a pose is a hand that is not a fist.
-        poses = [str(getattr(h, "pose", "") or "") for h in hands]
-        self._hold_shift("fist" in poses)
-
-        # TWO HANDS BOTH PINCHING IS THE ZOOM.
-        pinched = [h for h in hands if getattr(h, "pinched", False)]
-        if len(pinched) >= 2:
-            self._zoom(pinched)
-            return
-        self._zoom_last = None
-
-        # THE HAND THAT IS WORKING.
-        #
-        # The pinched one when there is one — that is the hand that means
-        # something — and otherwise the nearest, which is the biggest one
-        # on the picture.
-        hand = pinched[0] if pinched else max(
-            hands, key=lambda h: float(getattr(h, "span", 0.0) or 0.0))
+        # ONE HAND. The one that is there.
+        hand = hands[0]
         pose = str(getattr(hand, "pose", "") or "")
-
-        # THE CAMERA IS MIRRORED FOR THE USER, SO THE X IS MIRRORED TOO.
-        #
-        # AND THE POINTER IS AIMED AT THE KNUCKLE, NOT AT THE PINCH.
-        #
-        # The pinch is where the fingers meet, and the fingers MOVE when
-        # they meet: aiming at the pinch makes the pointer jump at the
-        # exact moment of the click, and the click lands a little away
-        # from where the user was looking. The knuckle of the middle
-        # finger does not move when the hand closes, so the pointer stays
-        # where it was put and the pinch is only the button.
-        #
-        # The idea is from the gesture project the owner downloaded
-        # (`Gesture-Recognition-main`), which aims with the same knuckle.
-        x = self._map_x(getattr(hand, "aim_x", hand.x))
-        y = self._map_y(getattr(hand, "aim_y", hand.y))
-        self._driver.move(x, y)
         now = time.time()
 
-        # AN OPEN PALM IS A SWEEP.
-        if pose == "open":
-            # Opening the fingers after a long pinch is the END of a long
-            # press, so the press is judged here and not only on the way
-            # out of the pinch: the hand that releases a long pinch is
-            # usually an open one.
-            self._end_press(now)
-            self._swipe(hand, now)
-            self._set_gesture("open", "swipe")
-            return
-        self._swipe_anchor = None
+        # ── THE POINTER ────────────────────────────────────────────────────
+        raw_x = self._map_x(getattr(hand, "aim_x", hand.x))
+        raw_y = self._map_y(getattr(hand, "aim_y", hand.y))
+        dt = 1.0 / 15.0
+        if self._last_steer:
+            dt = max(0.005, min(0.25, now - self._last_steer))
+        self._last_steer = now
+        fx, fy = self._smoother(raw_x, raw_y, dt)
+        # AND IT NEVER LEAVES THE SCREEN.
+        #
+        # The prediction puts the pointer a little ahead of the hand, and
+        # at the edge of the screen "a little ahead" is outside of it. A
+        # pointer that can leave the screen is a pointer that can click on
+        # the taskbar of another thing, so the edges are the edges.
+        x = max(0, min(self._screen_w, int(round(fx))))
+        y = max(0, min(self._screen_h, int(round(fy))))
+        # AND IT IS NOT MOVED WHEN IT DID NOT MOVE.
+        #
+        # A pointer that is written to the screen sixty times a second
+        # with the same number in it is not steadier than one that is
+        # written once: it is just the same number said again.
+        if (x, y) != self._pointer_at:
+            self._pointer_at = (x, y)
+            self._driver.move(x, y)
 
-        # A CLOSED HAND IS THE SHIFT, AND NOTHING ELSE.
+        # ── THE PINCH, LATCHED ─────────────────────────────────────────────
+        closeness = float(getattr(hand, "closeness", 0.0) or 0.0)
+        reach = float(getattr(hand, "index_reach", 1.0) or 1.0)
+        can_pinch = reach > PINCH_REACH
+        if self._pinch_latched:
+            if (not can_pinch) or closeness < PINCH_OFF:
+                self._pinch_latched = False
+                self._end_press(now)
+        elif can_pinch and closeness > PINCH_ON:
+            self._pinch_latched = True
+            self._begin_press(hand, x, y, now)
+
+        # ── THE REST OF THE VOCABULARY ────────────────────────────────────
+        if self._pinch_latched:
+            self._during_press(hand, x, y, now)
+            return
+
+        # THE REST POSE LETS GO OF EVERYTHING.
+        #
+        # A closed hand is not a modifier any more: with one hand there
+        # is no second hand to hold the shift while the first one works.
+        # A closed hand is the pose of a hand that is resting, and it
+        # releases the buttons and the modifiers.
         if pose == "fist":
             self._release_pointer()
-            self._set_gesture("fist", "group")
+            self._set_modifiers(set())
+            self._set_gesture("fist", "rest")
             return
 
         # TWO FINGERS ARE THE WHEEL.
@@ -1142,37 +1381,115 @@ class GestureService(QObject):
             self._set_gesture("two", "scroll")
             return
 
-        # ONE FINGER ONLY: MOVE, AND NOTHING ELSE.
-        if pose == "point" and not getattr(hand, "pinched", False):
+        # THREE FINGERS ARE THE ZOOM.
+        #
+        # It used to be two hands pinching and moving apart. With one
+        # hand it is the index and the middle of one hand moving apart,
+        # which is the same gesture done with one hand — and the zoom
+        # is still the ctrl and the wheel that every program means by
+        # zooming.
+        if pose == "three":
             self._release_pointer()
-            self._set_gesture("point", "move")
+            self._zoom(hand)
             return
 
-        # THE PINCH.
-        if getattr(hand, "pinched", False):
-            if not self._pointer_down:
-                if now - self._last_click < self._CLICK_DEBOUNCE:
-                    return
-                self._pointer_down = True
-                self._press_at = (x, y)
-                self._press_time = now
-                self._press_moved = False
-                self._last_click = now
-                self._driver.press()
-            else:
-                drift = math.hypot(x - self._press_at[0], y - self._press_at[1])
-                if drift > self._STILL_PX:
-                    self._press_moved = True
-            self._set_gesture("pinch", "drag" if self._press_moved else "press")
+        # AN OPEN PALM IS A SWEEP.
+        if pose == "open":
+            self._swipe(hand, now)
+            self._set_gesture("open", "swipe")
             return
 
-        # THE FINGERS OPENED.
-        if self._pointer_down:
-            self._end_press(now)
-            return
-        self._set_gesture(pose, "move")
+        # ONE FINGER ONLY: MOVE, AND NOTHING ELSE.
+        self._set_gesture(pose or "point", "move")
 
-    # ── the pieces of the vocabulary ─────────────────────────────────────────
+    # ── the press ───────────────────────────────────────────────────────────
+
+    def _modifiers_of(self, hand: Hand) -> set[int]:
+        """Which modifier keys this pinch is holding.
+
+        THE FINGERS THAT ARE NOT PINCHING ARE THE MODIFIERS, exactly as
+        on a real mouse: the hand that holds the button is the hand that
+        works, and the fingers that are left over hold the keys.
+
+            middle   the shift: a range of things
+            ring     the control: many things at once
+            pinky    the alt
+        """
+        fingers = getattr(hand, "fingers", None) or {}
+        keys: set[int] = set()
+        if fingers.get("middle"):
+            keys.add(PointerDriver._VK_SHIFT)
+        if fingers.get("ring"):
+            keys.add(PointerDriver._VK_CONTROL)
+        if fingers.get("pinky"):
+            keys.add(PointerDriver._VK_MENU)
+        return keys
+
+    def _is_middle_click(self, hand: Hand) -> bool:
+        """The middle button: the one under the wheel of a real mouse.
+
+        ALL THREE OF THE FINGERS THAT ARE LEFT OVER, AT ONCE. It is not
+        three modifiers: it is a button that no other gesture reaches,
+        and a button that only exists when nobody else is holding a key.
+        """
+        fingers = getattr(hand, "fingers", None) or {}
+        return bool(fingers.get("middle") and fingers.get("ring")
+                    and fingers.get("pinky"))
+
+    def _set_modifiers(self, keys: set[int]) -> None:
+        """Hold down the modifier keys that are wanted, and let go of the rest."""
+        keys = set(int(k) for k in keys)
+        for vk in list(self._held_keys - keys):
+            self._driver.key(vk, False)
+        for vk in list(keys - self._held_keys):
+            self._driver.key(vk, True)
+        self._held_keys = keys
+        self._shift_down = PointerDriver._VK_SHIFT in keys
+
+    def _begin_press(self, hand: Hand, x: int, y: int, now: float) -> None:
+        """The button goes down."""
+        # THE MIDDLE BUTTON IS A BUTTON OF ITS OWN.
+        if self._is_middle_click(hand):
+            self._set_modifiers(set())
+            self._driver.middle_click()
+            self._set_gesture("pinch", "middle click")
+            return
+        self._set_modifiers(self._modifiers_of(hand))
+        self._press_at = (x, y)
+        self._press_time = now
+        self._press_moved = False
+        self._press_is_right = False
+        self._pointer_down = True
+        self._driver.press()
+        self._set_gesture("pinch", "press")
+
+    def _during_press(self, hand: Hand, x: int, y: int, now: float) -> None:
+        """The button is down: what is happening while it is down."""
+        if not self._pointer_down:
+            # THE MIDDLE BUTTON IS A COMPLETE GESTURE BY ITSELF: there is
+            # no button to hold down and no key to hold with it, and the
+            # three fingers that made it are not three modifiers.
+            return
+        # THE MODIFIERS CAN CHANGE WHILE THE BUTTON IS DOWN.
+        self._set_modifiers(self._modifiers_of(hand))
+        drift = math.hypot(x - self._press_at[0], y - self._press_at[1])
+        if drift > self._STILL_PX:
+            self._press_moved = True
+        # A PRESS HELD STILL FOR LONG ENOUGH IS THE OTHER BUTTON.
+        #
+        # The left button comes up and the right button goes down, so
+        # the thing is NOT selected and its menu is NOT opened: one
+        # gesture, one action. Holding the left button down for three
+        # quarters of a second and then letting it go was a click AND a
+        # right click, which is two actions out of one gesture.
+        if (not self._press_moved and not self._press_is_right
+                and now - self._press_time >= self._LONG_PRESS):
+            self._press_is_right = True
+            self._driver.release()
+            self._driver.press_right()
+            self._set_gesture("pinch", "right click")
+            return
+        self._set_gesture("pinch", "drag" if self._press_moved else "press")
 
     def _end_press(self, now: float) -> None:
         """Let the button up, and say what the press was.
@@ -1182,16 +1499,39 @@ class GestureService(QObject):
         A press that moved is a drag, and a drag is not a click.
         """
         if not self._pointer_down:
+            self._set_modifiers(set())
             return
-        held = now - self._press_time
         moved = self._press_moved
+        was_right = self._press_is_right
         self._pointer_down = False
-        self._driver.release()
-        if held >= self._LONG_PRESS and not moved:
-            self._driver.right_click()
+        self._press_is_right = False
+        if was_right:
+            # THE RIGHT BUTTON COMES UP: the menu opens now.
+            self._driver.release_right()
+            self._set_modifiers(set())
             self._set_gesture("pinch", "right click")
-        else:
-            self._set_gesture("pinch", "click")
+            return
+        self._driver.release()
+        if moved:
+            self._set_modifiers(set())
+            self._set_gesture("pinch", "drag")
+            return
+        # TWO PINCHES CLOSE TOGETHER ARE A DOUBLE CLICK.
+        #
+        # The debounce used to swallow the second one, so a double click
+        # could not be done at all: the mouse of the world does it with
+        # two quick presses and so does this one.
+        if now - self._last_click_end < self._DOUBLE_CLICK:
+            self._last_click_end = 0.0
+            self._driver.double_click()
+            self._set_modifiers(set())
+            self._set_gesture("pinch", "double click")
+            return
+        self._last_click_end = now
+        self._set_modifiers(set())
+        self._set_gesture("pinch", "click")
+
+    # ── the pieces of the vocabulary ─────────────────────────────────────────
 
     def _set_gesture(self, pose: str, action: str) -> None:
         """Say what the hand is doing, so the interface can show it."""
@@ -1199,14 +1539,6 @@ class GestureService(QObject):
             self.gesture_sig.emit(str(pose), str(action))
         except Exception:
             pass
-
-    def _hold_shift(self, on: bool) -> None:
-        """The group-selection modifier."""
-        on = bool(on)
-        if on == self._shift_down:
-            return
-        self._shift_down = on
-        self._driver.key(PointerDriver._VK_SHIFT, on)
 
     def _release_pointer(self) -> None:
         """Let the button up, whatever the hand is doing now.
@@ -1217,15 +1549,24 @@ class GestureService(QObject):
         """
         if self._pointer_down:
             self._pointer_down = False
+            self._press_is_right = False
             self._driver.release()
 
     def _rest(self) -> None:
-        """No hand: everything is let go."""
+        """No hand: everything is let go.
+
+        AND THE FILTER FORGETS THE HAND. The next hand that appears
+        starts from where it is, not from where the last one was: a
+        pointer that jumps across the screen when the hand comes back
+        is the most frightening thing a camera cursor can do.
+        """
         self._release_pointer()
-        self._hold_shift(False)
+        self._set_modifiers(set())
         self._scroll_anchor = None
         self._swipe_anchor = None
-        self._zoom_last = None
+        self._zoom_anchor = None
+        self._pinch_latched = False
+        self._smoother.reset()
 
     def _scroll(self, hand: Hand, now: float) -> None:
         """The wheel, under the two fingers.
@@ -1281,30 +1622,41 @@ class GestureService(QObject):
             else:
                 self._driver.tap(PointerDriver._VK_LEFT, alt=True)
 
-    def _zoom(self, pinched: list[Hand]) -> None:
-        """Two hands pinching, moving apart or together: the zoom."""
-        points = []
-        for hand in pinched[:2]:
-            points.append(((1.0 - hand.x) * self._screen_w,
-                           hand.y * self._screen_h))
-        if len(points) < 2:
+    def _zoom(self, hand: Hand) -> None:
+        """Three fingers: the zoom, by how far apart the index and the middle are.
+
+        IT USED TO BE TWO HANDS. Two hands pinching and moving apart or
+        together is a lovely gesture and it is also unusable: it needs
+        two hands, and the pointer was jumping from one of them to the
+        other the whole time. Now it is one hand and the same idea: the
+        index and the middle of one hand moving apart is the zoom, and
+        the zoom is still the control and the wheel that every program
+        means by zooming.
+        """
+        fingers = getattr(hand, "fingers", None) or {}
+        if not (fingers.get("index") and fingers.get("middle")):
             return
-        distance = math.hypot(points[0][0] - points[1][0],
-                              points[0][1] - points[1][1])
+        try:
+            a = hand.points[INDEX_TIP]
+            b = hand.points[12]
+        except Exception:
+            return
+        distance = math.hypot((a[0] - b[0]) * self._screen_w,
+                              (a[1] - b[1]) * self._screen_h)
         now = time.time()
-        if self._zoom_last is None:
-            self._zoom_last = (distance, now)
-            self._set_gesture("zoom", "zoom")
+        if self._zoom_anchor is None:
+            self._zoom_anchor = (distance, now)
+            self._set_gesture("three", "zoom")
             return
-        last_distance, t0 = self._zoom_last
+        last_distance, t0 = self._zoom_anchor
         if now - t0 < 0.08:
             return
-        self._zoom_last = (distance, now)
+        self._zoom_anchor = (distance, now)
         delta = distance - last_distance
-        if abs(delta) < 4:
+        if abs(delta) < 8:
             return
         self._driver.zoom(1 if delta > 0 else -1)
-        self._set_gesture("zoom", "zoom in" if delta > 0 else "zoom out")
+        self._set_gesture("three", "zoom in" if delta > 0 else "zoom out")
 
 
 # ── the overlay ────────────────────────────────────────────────────────────

@@ -2,14 +2,19 @@
 tests/test_gesture_vocabulary.py — the hand as a real mouse.
 
 WHAT IS BEING PROVED
-    The user asked for the hand to be a TRUE mouse: left and right buttons,
-    the wheel, the zoom, the drag, the group selection and the gestures
-    that mean something specific — and asked for it to be verified at a
-    hundred per cent, because he had never tried it.
+    The user asked for the hand to be a TRUE mouse: the left and right
+    buttons, the wheel, the zoom, the drag, the middle button, the
+    modifier keys and the gestures that mean something specific — and he
+    asked for ONE hand, because the pointer was jumping from one hand to
+    the other.
 
     So the vocabulary is proved here, one gesture at a time, against a
     fake pointer: every gesture has to produce exactly the calls on the
     Windows API that it is supposed to produce, and nothing else.
+
+    The tests of the POINTER itself — the tremble, the delay, the
+    selection — are in `tests/test_gesture_pointer.py`. This file is about
+    WHAT THE HAND SAYS.
 
 THE FAKE POINTER
     The real driver talks to `user32.dll`, and a test that moved the real
@@ -19,18 +24,15 @@ THE FAKE POINTER
 """
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
 import pytest
 
-BASE = Path(__file__).resolve().parent.parent
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gui.gesture import (  # noqa: E402
-    INDEX_TIP, MIDDLE_MCP, THUMB_TIP, TIPS, WRIST, GestureService, Hand,
+    INDEX_TIP, MIDDLE_MCP, THUMB_TIP, WRIST, GestureService, Hand,
 )
 
 
@@ -79,12 +81,17 @@ class FakeDriver:
 
     def __init__(self):
         self.calls = []
+        self.keys: set[int] = set()
 
     def available(self):
         return True
 
     def move(self, x, y):
         self.calls.append(("move", int(x), int(y)))
+        return True
+
+    def click(self):
+        self.calls.append(("click",))
         return True
 
     def press(self):
@@ -95,8 +102,24 @@ class FakeDriver:
         self.calls.append(("release",))
         return True
 
+    def press_right(self):
+        self.calls.append(("press_right",))
+        return True
+
+    def release_right(self):
+        self.calls.append(("release_right",))
+        return True
+
     def right_click(self):
         self.calls.append(("right",))
+        return True
+
+    def middle_click(self):
+        self.calls.append(("middle_click",))
+        return True
+
+    def double_click(self):
+        self.calls.append(("double_click",))
         return True
 
     def scroll(self, notches):
@@ -113,6 +136,10 @@ class FakeDriver:
 
     def key(self, vk, down):
         self.calls.append(("key", int(vk), bool(down)))
+        if down:
+            self.keys.add(int(vk))
+        else:
+            self.keys.discard(int(vk))
         return True
 
     def tap(self, vk, alt=False):
@@ -129,6 +156,7 @@ def service(monkeypatch):
     svc = GestureService()
     driver = FakeDriver()
     svc._driver = driver
+    svc._drive_pointer = True
     clock = {"now": 1000.0}
     monkeypatch.setattr("gui.gesture.time.time", lambda: clock["now"])
     svc._clock = clock
@@ -163,39 +191,78 @@ def test_the_pose_of_two_fingers_is_two():
     assert _make_hand(ring_up=False, pinky_up=False).pose == "two"
 
 
+def test_the_pose_of_three_fingers_is_three():
+    assert _make_hand(pinky_up=False).pose == "three"
+
+
 def test_the_pose_of_a_pinch_is_a_pinch():
     assert _make_hand(pinched=True).pose == "pinch"
+
+
+def test_a_blob_is_not_a_fist():
+    """The OpenCV fallback has no fingers to read.
+
+    A degenerate hand must never read as a pose of the vocabulary: the
+    shape it produces is a skin-coloured blob with no joints, and calling
+    it a fist would say that the user is closing his hand when he is not.
+    The OpenCV tracker says so itself, and this is the proof that the
+    shape it produces cannot be a fist either.
+    """
+    hand = Hand([(0.0, 0.0)] * 21)
+    hand.measure()
+    assert hand.pose == "blob", "a degenerate hand read as a pose"
+    hand.pose = "blob"
+    assert hand.pose != "fist"
 
 
 # ── the buttons ────────────────────────────────────────────────────────────
 
 def test_a_pinch_presses_the_left_button_and_lets_it_go(service):
-    hand = _make_hand(pinched=True)
+    """A PINCH WITH NO OTHER FINGER UP IS A PLAIN CLICK."""
+    hand = _make_hand(middle_up=False, ring_up=False, pinky_up=False,
+                      pinched=True)
     _steer(service, [hand])
     assert "press" in service._fake.kinds()
 
-    _steer(service, [_make_hand()], at=1000.2)
+    _steer(service, [_make_hand(middle_up=False, ring_up=False, pinky_up=False)],
+           at=1000.2)
     kinds = service._fake.kinds()
     assert "release" in kinds
     assert "right" not in kinds, "a quick pinch must not open the menu"
 
 
 def test_a_pinch_that_moves_while_it_is_closed_is_a_drag(service):
-    _steer(service, [_make_hand(pinched=True)])
+    _steer(service, [_make_hand(middle_up=False, ring_up=False, pinky_up=False,
+                                pinched=True)])
     # The hand moves: the aimed point is now somewhere else on the screen.
-    moved = _make_hand(pinched=True)
-    moved.x = 0.2
+    moved = _make_hand(middle_up=False, ring_up=False, pinky_up=False,
+                       pinched=True)
     moved.aim_x = 0.2
+    moved.aim_y = 0.2
     _steer(service, [moved], at=1000.2)
     assert "right" not in service._fake.kinds(), "a drag is not a long press"
 
 
 def test_a_pinch_held_still_is_the_right_click(service):
-    _steer(service, [_make_hand(pinched=True)])
+    _steer(service, [_make_hand(middle_up=False, ring_up=False, pinky_up=False,
+                                pinched=True)])
     # Long enough, and the hand has not moved.
-    _steer(service, [_make_hand(pinched=True)], at=1001.5)
-    _steer(service, [_make_hand()], at=1001.6)
-    assert "right" in service._fake.kinds()
+    _steer(service, [_make_hand(middle_up=False, ring_up=False, pinky_up=False,
+                                pinched=True)], at=1001.5)
+    _steer(service, [_make_hand(middle_up=False, ring_up=False, pinky_up=False)],
+           at=1001.6)
+    assert "right" in service._fake.kinds() or "press_right" in service._fake.kinds()
+
+
+def test_the_middle_button_is_a_button_of_its_own(service):
+    """THE THREE FINGERS THAT ARE LEFT OVER, ALL AT ONCE."""
+    hand = _make_hand(pinched=True)
+    _steer(service, [hand])
+    kinds = service._fake.kinds()
+    assert "middle_click" in kinds, f"the middle button was not pressed: {kinds}"
+    assert "press" not in kinds, \
+        f"the middle button was also a left click: {kinds}"
+    assert not service._fake.keys, "a modifier was left down"
 
 
 # ── the wheel ──────────────────────────────────────────────────────────────
@@ -205,9 +272,6 @@ def test_two_fingers_scroll(service):
     _steer(service, [hand], at=1000.0)
     # The fingers travel up the picture, so the wheel turns.
     moved = _make_hand(ring_up=False, pinky_up=False)
-    for point in moved.points:
-        if point[1] > 0:
-            pass
     moved.points = [(x, y - 0.15) for x, y in moved.points]
     moved.measure()
     _steer(service, [moved], at=1000.2)
@@ -226,53 +290,58 @@ def test_two_fingers_sideways_scroll_sideways(service):
 
 # ── the zoom ───────────────────────────────────────────────────────────────
 
-def test_two_hands_pinching_zoom(service):
-    left = _make_hand(pinched=True)
-    left.x = 0.30
-    right = _make_hand(pinched=True)
-    right.x = 0.70
-    _steer(service, [left, right], at=1000.0)
-    apart = _make_hand(pinched=True)
-    apart.x = 0.20
-    other = _make_hand(pinched=True)
-    other.x = 0.80
-    _steer(service, [apart, other], at=1000.3)
+def test_three_fingers_moving_apart_zoom_in(service):
+    """THE ZOOM OF ONE HAND.
+
+    It used to need two hands pinching and moving apart, and the pointer
+    was jumping from one hand to the other all the time. Now it is the
+    index and the middle of ONE hand moving apart.
+    """
+    _steer(service, [_make_hand(pinky_up=False)], at=1000.0)
+    apart = _make_hand(pinky_up=False)
+    apart.points = list(apart.points)
+    apart.points[8] = (apart.points[8][0] - 0.20, apart.points[8][1])
+    apart.measure()
+    _steer(service, [apart], at=1000.3)
     zooms = [c for c in service._fake.calls if c[0] == "zoom"]
-    assert zooms, "the hands moved apart and nothing zoomed"
+    assert zooms, "the fingers moved apart and nothing zoomed"
     assert zooms[0][1] > 0, "moving apart is zooming in"
 
 
-# ── the group selection ────────────────────────────────────────────────────
-
-def test_a_closed_hand_holds_the_shift_key(service):
-    fist = _make_hand(index_up=False, middle_up=False,
-                      ring_up=False, pinky_up=False)
-    _steer(service, [fist])
-    keys = [c for c in service._fake.calls if c[0] == "key"]
-    assert keys, "the fist did not hold the modifier"
-    assert keys[0][1] == 0x10, "the modifier is not the shift"
-    assert keys[0][2] is True, "the modifier was not held down"
-
-
-def test_the_modifier_is_let_go_when_the_hand_opens(service):
-    fist = _make_hand(index_up=False, middle_up=False,
-                      ring_up=False, pinky_up=False)
-    _steer(service, [fist])
-    _steer(service, [_make_hand()])
-    keys = [c for c in service._fake.calls if c[0] == "key"]
-    assert keys[-1][2] is False, "the modifier stayed down"
+def test_three_fingers_moving_together_zoom_out(service):
+    _steer(service, [_make_hand(pinky_up=False)], at=1000.0)
+    together = _make_hand(pinky_up=False)
+    together.points = list(together.points)
+    together.points[8] = (together.points[8][0] + 0.01, together.points[8][1])
+    together.measure()
+    _steer(service, [together], at=1000.3)
+    zooms = [c for c in service._fake.calls if c[0] == "zoom"]
+    assert zooms, "the fingers came together and nothing zoomed"
+    assert zooms[0][1] < 0, "coming together is zooming out"
 
 
-def test_a_fist_and_a_pinch_together_are_a_group_selection(service):
-    fist = _make_hand(index_up=False, middle_up=False,
-                      ring_up=False, pinky_up=False)
-    fist.x = 0.2
-    pinch = _make_hand(pinched=True)
-    pinch.x = 0.7
-    _steer(service, [fist, pinch])
+# ── the resting hand ───────────────────────────────────────────────────────
+
+def test_a_fist_lets_go_of_everything(service):
+    """A CLOSED HAND IS A HAND THAT IS RESTING.
+
+    It used to be the shift key, held down with a second hand. With one
+    hand there is no second hand, and a closed hand that is simply
+    resting must not leave any key pressed.
+    """
+    _steer(service, [_make_hand(index_up=False, middle_up=False,
+                                ring_up=False, pinky_up=False)])
+    assert not service._fake.keys, \
+        f"a resting hand left a key pressed: {service._fake.calls}"
+
+
+def test_the_button_is_let_go_when_the_hand_disappears(service):
+    _steer(service, [_make_hand(middle_up=False, ring_up=False, pinky_up=False,
+                                pinched=True)])
+    service._rest()
     kinds = service._fake.kinds()
-    assert "key" in kinds, "the group selection modifier was not held"
-    assert "press" in kinds, "the other hand did not click"
+    assert "release" in kinds, "the button stayed down"
+    assert not service._fake.keys, "a modifier stayed down"
 
 
 # ── the swipe ──────────────────────────────────────────────────────────────
@@ -294,32 +363,6 @@ def test_an_open_palm_that_does_not_move_does_not_swipe(service):
     _steer(service, [palm], at=1000.0)
     _steer(service, [_make_hand()], at=1000.2)
     assert "tap" not in service._fake.kinds()
-
-
-# ── the hand going away ────────────────────────────────────────────────────
-
-def test_the_button_is_let_go_when_the_hand_disappears(service):
-    _steer(service, [_make_hand(pinched=True)])
-    service._rest()
-    kinds = service._fake.kinds()
-    assert "release" in kinds, "the button stayed down"
-    keys = [c for c in service._fake.calls if c[0] == "key"]
-    assert not keys or keys[-1][2] is False, "the modifier stayed down"
-
-
-def test_a_blob_is_not_a_fist():
-    """The OpenCV fallback has no fingers to read.
-
-    A degenerate hand must never read as a fist, because a fist holds the
-    shift key down and every click afterwards would be a group selection.
-    The OpenCV tracker says so itself, and this is the proof that the
-    shape it produces cannot be a fist either.
-    """
-    hand = Hand([(0.0, 0.0)] * 21)
-    hand.measure()
-    assert hand.pose != "fist", "a degenerate hand read as a fist"
-    hand.pose = "blob"
-    assert hand.pose != "fist"
 
 
 # ── where the pointer is aimed ──────────────────────────────────────────────
@@ -354,19 +397,23 @@ def test_the_pointer_reaches_the_whole_screen(service):
     picture cannot be reached without the arm leaving the frame. So the
     middle of the picture is the middle of the screen, and the band
     around it is the whole screen.
+
+    The pointer goes through a filter, so it is let settle: the proof is
+    that the pointer ENDS UP on the edge, not that it is there on the
+    first frame of a jump that no hand ever makes.
     """
     import ctypes
 
-    # The service asks the screen how big it is, every time it steers.
     width = ctypes.windll.user32.GetSystemMetrics(0)
     height = ctypes.windll.user32.GetSystemMetrics(1)
 
-    def where(aim_x, aim_y):
+    def where(aim_x, aim_y, frames=30):
         hand = _make_hand()
         hand.aim_x = aim_x
         hand.aim_y = aim_y
         service._fake.calls.clear()
-        _steer(service, [hand])
+        for _ in range(frames):
+            _steer(service, [hand])
         moves = [c for c in service._fake.calls if c[0] == "move"]
         assert moves, "the pointer did not move at all"
         return moves[-1][1], moves[-1][2]
