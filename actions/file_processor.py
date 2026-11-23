@@ -18,6 +18,7 @@ Supported types:
 
 import os
 import re
+import threading
 import json
 import shutil
 import subprocess
@@ -27,6 +28,7 @@ from datetime import datetime
 
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
+from core.undo import push_undo
 
 def _get_api_key() -> str:
     # The Credential Locker, not the settings file: the key is not written in
@@ -82,10 +84,72 @@ def _file_size_str(path: Path) -> str:
     if size < 1024**3:     return f"{size/1024**2:.1f} MB"
     return f"{size/1024**3:.1f} GB"
 
+class ProcessingFailed(RuntimeError):
+    """The action could not do what it was asked to do.
+
+    WHY AN EXCEPTION AND NOT A STRING
+        The handlers used to answer a failure with a plain sentence — "Convert
+        failed: cannot identify image file" — and the dispatcher dressed every
+        non-empty answer as a success: `status=done ... verified=true`. The
+        model was therefore told, in the line the product reads to decide, that
+        a conversion had worked when it had not.
+
+        A failure is now an exception. It is caught once, in the dispatcher,
+        and turned into `status=failed` with the reason. A success is a
+        success; a failure is a failure; and nothing has to be guessed from a
+        sentence.
+    """
+
+
+#: Outputs created by the handler that is running right now. Handlers run in
+#: executor threads, so this is per thread.
+_pending = threading.local()
+
+
+def _pending_outputs() -> list:
+    lst = getattr(_pending, "outputs", None)
+    if lst is None:
+        lst = []
+        _pending.outputs = lst
+    return lst
+
+
+def _undo_created(path: Path):
+    """The reverse of "this file/folder did not exist and now it does"."""
+    def _fn() -> str:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+                return f"Removed the folder {path.name}."
+            if path.exists():
+                path.unlink()
+                return f"Removed {path.name}."
+            return f"There is nothing to undo: {path.name} is not there."
+        except Exception as e:
+            return f"Could not remove {path.name}: {e}"
+    return _fn
+
+
 def _output_path(src: Path, suffix: str, new_ext: str = None) -> Path:
+    """The file this action is about to create, next to the original.
+
+    It refuses to hand out a path that already exists. Every write in this
+    module goes through here, so this one check is what keeps a conversion
+    from silently overwriting a file the user still had — the policy table
+    says a local write is "silent, logged and reversible", and overwriting
+    somebody's file is none of those three things.
+    """
     ext  = new_ext or src.suffix
     name = f"{src.stem}_{suffix}{ext}"
-    return src.parent / name
+    out = src.parent / name
+    if out.exists():
+        raise ProcessingFailed(
+            f"'{out.name}' already exists next to '{src.name}', so nothing was "
+            f"written. Remove it first, or ask the user for another name."
+        )
+    _pending_outputs().append(out)
+    return out
+
 
 def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
     try:
@@ -119,7 +183,7 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
                 return f"{result[:300]}...\n\nFull result saved to: {out}"
             return result
         except Exception as e:
-            return f"AI image analysis failed: {e}"
+            raise ProcessingFailed(f"AI image analysis failed: {e}") from e
 
     if action == "resize":
         width  = int(params.get("width",  0))
@@ -142,7 +206,7 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
             img.resize(new_size, Image.LANCZOS).save(out)
             return f"Resized from {w}x{h} to {new_size[0]}x{new_size[1]}. Saved: {out.name}"
         except Exception as e:
-            return f"Resize failed: {e}"
+            raise ProcessingFailed(f"Resize failed: {e}") from e
 
     if action == "convert":
         fmt = params.get("format", "png").lower().strip(".")
@@ -155,7 +219,7 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
             img.save(out, pil_fmt)
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
         except Exception as e:
-            return f"Convert failed: {e}"
+            raise ProcessingFailed(f"Convert failed: {e}") from e
 
     if action == "compress":
         quality = int(params.get("quality", 70))
@@ -167,7 +231,7 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
             after  = _file_size_str(out)
             return f"Compressed: {before} → {after}. Saved: {out.name}"
         except Exception as e:
-            return f"Compress failed: {e}"
+            raise ProcessingFailed(f"Compress failed: {e}") from e
 
     if action == "info":
         try:
@@ -175,7 +239,7 @@ def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
             return (f"Image info: {img.format}, {img.size[0]}x{img.size[1]}px, "
                     f"mode: {img.mode}, size: {_file_size_str(path)}")
         except Exception as e:
-            return f"Info failed: {e}"
+            raise ProcessingFailed(f"Info failed: {e}") from e
 
     return _process_image(path, "describe", {"instruction": f"{action}: {params}"})
 
@@ -226,7 +290,7 @@ def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
                 return f"{result[:400]}...\n\nFull result saved: {out.name}"
             return result
         except Exception as e:
-            return f"AI analysis failed: {e}"
+            raise ProcessingFailed(f"AI analysis failed: {e}") from e
 
     if action == "info":
         try:
@@ -254,7 +318,7 @@ def _process_pdf(path: Path, action: str, params: dict, speak=None) -> str:
         except ImportError:
             return "python-docx not installed. Run: pip install python-docx"
 
-    return f"Unknown PDF action: '{action}'. Try: summarize, extract_text, info, to_word"
+    raise ProcessingFailed(f"Unknown PDF action: '{action}'. Try: summarize, extract_text, info, to_word")
 
 def _process_text_doc(path: Path, file_type: str, action: str,
                        params: dict, speak=None) -> str:
@@ -269,7 +333,7 @@ def _process_text_doc(path: Path, file_type: str, action: str,
             except ImportError:
                 return "python-docx not installed."
             except Exception as e:
-                return f"Read failed: {e}"
+                raise ProcessingFailed(f"Read failed: {e}") from e
         else:
             return path.read_text(encoding="utf-8", errors="ignore")
 
@@ -316,7 +380,7 @@ def _process_text_doc(path: Path, file_type: str, action: str,
             return f"{result[:400]}...\n\nFull result saved: {out.name}"
         return result
     except Exception as e:
-        return f"AI processing failed: {e}"
+        raise ProcessingFailed(f"AI processing failed: {e}") from e
 
 
 def _read_csv(path: Path):
@@ -371,7 +435,7 @@ def _process_data(path: Path, file_type: str, action: str,
             desc = df.describe(include="all").to_string()
             return f"Statistics:\n{desc[:2000]}"
         except Exception as e:
-            return f"Stats failed: {e}"
+            raise ProcessingFailed(f"Stats failed: {e}") from e
 
     if action == "analyze":
         preview = df.head(50).to_string()
@@ -383,7 +447,7 @@ def _process_data(path: Path, file_type: str, action: str,
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            return f"AI analysis failed: {e}"
+            raise ProcessingFailed(f"AI analysis failed: {e}") from e
 
     if action in ("convert", "to_csv", "to_excel", "to_json"):
         fmt = {"to_csv": "csv", "to_excel": "xlsx", "to_json": "json",
@@ -400,7 +464,7 @@ def _process_data(path: Path, file_type: str, action: str,
                 df.to_json(out, orient="records", force_ascii=False, indent=2)
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
         except Exception as e:
-            return f"Convert failed: {e}"
+            raise ProcessingFailed(f"Convert failed: {e}") from e
 
     if action == "filter":
         col       = params.get("column", "")
@@ -418,7 +482,7 @@ def _process_data(path: Path, file_type: str, action: str,
             filtered.to_csv(out, index=False)
             return f"Filtered: {len(filtered)} rows match. Saved: {out.name}"
         except Exception as e:
-            return f"Filter failed: {e}"
+            raise ProcessingFailed(f"Filter failed: {e}") from e
 
     if action == "sort":
         col = params.get("column", df.columns[0])
@@ -429,7 +493,7 @@ def _process_data(path: Path, file_type: str, action: str,
             sorted_df.to_csv(out, index=False)
             return f"Sorted by '{col}'. Saved: {out.name}"
         except Exception as e:
-            return f"Sort failed: {e}"
+            raise ProcessingFailed(f"Sort failed: {e}") from e
 
     preview = df.head(30).to_string()
     try:
@@ -439,7 +503,7 @@ def _process_data(path: Path, file_type: str, action: str,
         )
         return response.text.strip()
     except Exception as e:
-        return f"Processing failed: {e}"
+        raise ProcessingFailed(f"Processing failed: {e}") from e
 
 
 def _process_json(path: Path, action: str, params: dict, speak=None) -> str:
@@ -448,7 +512,7 @@ def _process_json(path: Path, action: str, params: dict, speak=None) -> str:
         content = path.read_text(encoding="utf-8")
         data    = json.loads(content)
     except Exception as e:
-        return f"Invalid JSON: {e}"
+        raise ProcessingFailed(f"Invalid JSON: {e}") from e
 
     if action == "validate":
         return f"Valid JSON. Type: {type(data).__name__}, size: {_file_size_str(path)}"
@@ -468,7 +532,7 @@ def _process_json(path: Path, action: str, params: dict, speak=None) -> str:
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            return f"AI processing failed: {e}"
+            raise ProcessingFailed(f"AI processing failed: {e}") from e
 
     if action == "to_csv":
         try:
@@ -490,19 +554,18 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
     ext     = path.suffix.lstrip(".")
 
     if action == "run":
-        if ext == "py":
-            try:
-                result = subprocess.run(
-                    ["python", str(path)],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30
-                )
-                out = result.stdout or result.stderr
-                return f"Output:\n{out[:2000]}" if out else "No output."
-            except subprocess.TimeoutExpired:
-                return "Execution timed out (30s)."
-            except Exception as e:
-                return f"Run failed: {e}"
-        return f"Direct execution not supported for .{ext} files."
+        # Running what the user brought in is CODE EXECUTION, and code
+        # execution has exactly one door in this product: the `code_helper`
+        # tool, which asks before it runs anything and says what came out.
+        # Two doors meant two ways to run a file the user dropped on the
+        # window, and this one had no sandbox of its own — it ran the file
+        # with the full rights of the user, in whatever folder it happened
+        # to be in.
+        raise ProcessingFailed(
+            "Running a file you brought in is not done here: `file_processor` "
+            "has no sandbox for it. Use the `code_helper` tool to run code — "
+            "it asks before it runs anything and says what came out."
+        )
 
     if action == "info":
         lines = content.count("\n")
@@ -540,7 +603,7 @@ def _process_code(path: Path, action: str, params: dict, speak=None) -> str:
             return f"{result[:400]}...\n\nSaved: {out.name}"
         return result
     except Exception as e:
-        return f"AI processing failed: {e}"
+        raise ProcessingFailed(f"AI processing failed: {e}") from e
 
 def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "transcribe"
@@ -558,7 +621,7 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
         except ImportError:
             return f"Audio file: {_file_size_str(path)} (install pydub for more info)"
         except Exception as e:
-            return f"Info failed: {e}"
+            raise ProcessingFailed(f"Info failed: {e}") from e
 
     if action == "transcribe":
         try:
@@ -580,7 +643,7 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
                 return f"Transcription saved: {out.name}\n\nPreview: {result[:300]}"
             return result
         except Exception as e:
-            return f"Transcription failed: {e}"
+            raise ProcessingFailed(f"Transcription failed: {e}") from e
 
     if action == "convert":
         fmt = params.get("format", "mp3").lstrip(".")
@@ -593,7 +656,7 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
         except ImportError:
             return "pydub not installed. Run: pip install pydub"
         except Exception as e:
-            return f"Convert failed: {e}"
+            raise ProcessingFailed(f"Convert failed: {e}") from e
 
     if action == "trim":
         start = float(params.get("start", 0))
@@ -609,9 +672,9 @@ def _process_audio(path: Path, action: str, params: dict, speak=None) -> str:
         except ImportError:
             return "pydub not installed."
         except Exception as e:
-            return f"Trim failed: {e}"
+            raise ProcessingFailed(f"Trim failed: {e}") from e
 
-    return f"Unknown audio action: '{action}'. Try: transcribe, info, convert, trim"
+    raise ProcessingFailed(f"Unknown audio action: '{action}'. Try: transcribe, info, convert, trim")
 
 def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "info"
@@ -656,7 +719,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             )
             return f"Audio extracted. Saved: {out.name}"
         except Exception as e:
-            return f"Extract audio failed: {e}"
+            raise ProcessingFailed(f"Extract audio failed: {e}") from e
 
     if action == "trim":
         start = params.get("start", "00:00:00")
@@ -672,7 +735,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             subprocess.run(cmd, capture_output=True, timeout=600)
             return f"Trimmed video saved: {out.name}"
         except Exception as e:
-            return f"Trim failed: {e}"
+            raise ProcessingFailed(f"Trim failed: {e}") from e
 
     if action == "extract_frame":
         timestamp = params.get("timestamp", "00:00:01")
@@ -687,7 +750,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             )
             return f"Frame extracted at {timestamp}. Saved: {out.name}"
         except Exception as e:
-            return f"Extract frame failed: {e}"
+            raise ProcessingFailed(f"Extract frame failed: {e}") from e
 
     if action == "compress":
         crf = int(params.get("quality", 28))  
@@ -706,7 +769,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             after  = _file_size_str(out)
             return f"Compressed: {before} → {after}. Saved: {out.name}"
         except Exception as e:
-            return f"Compress failed: {e}"
+            raise ProcessingFailed(f"Compress failed: {e}") from e
 
     if action == "transcribe":
         if not _ffmpeg_available():
@@ -721,7 +784,7 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             result = _process_audio(tmp_audio, "transcribe", params, speak)
             return result
         except Exception as e:
-            return f"Video transcription failed: {e}"
+            raise ProcessingFailed(f"Video transcription failed: {e}") from e
         finally:
             if tmp_audio.exists():
                 tmp_audio.unlink()
@@ -738,9 +801,9 @@ def _process_video(path: Path, action: str, params: dict, speak=None) -> str:
             )
             return f"Converted to {fmt.upper()}. Saved: {out.name}"
         except Exception as e:
-            return f"Convert failed: {e}"
+            raise ProcessingFailed(f"Convert failed: {e}") from e
 
-    return f"Unknown video action: '{action}'. Try: info, trim, extract_audio, extract_frame, compress, transcribe, convert"
+    raise ProcessingFailed(f"Unknown video action: '{action}'. Try: info, trim, extract_audio, extract_frame, compress, transcribe, convert")
 
 def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "list"
@@ -761,18 +824,28 @@ def _process_archive(path: Path, action: str, params: dict, speak=None) -> str:
             suffix  = f"\n... and {len(names)-30} more" if len(names) > 30 else ""
             return f"Archive contains {len(names)} files:\n{preview}{suffix}"
         except Exception as e:
-            return f"List failed: {e}"
+            raise ProcessingFailed(f"List failed: {e}") from e
 
     if action == "extract":
         dest = Path(params.get("destination", str(path.parent / path.stem)))
-        dest.mkdir(parents=True, exist_ok=True)
+        # Everything is checked BEFORE anything is created. An archive that
+        # turns out not to be one must not leave a folder behind, and a
+        # destination that already has things in it must not be written over.
+        if not shutil.is_archive(path):
+            raise ProcessingFailed(
+                f"'{path.name}' is not an archive, so nothing was extracted.")
+        if dest.is_dir() and any(dest.iterdir()):
+            raise ProcessingFailed(
+                f"'{dest.name}' already exists and is not empty, so nothing was "
+                f"extracted. Choose another destination, or empty that one first.")
         try:
             shutil.unpack_archive(path, dest)
-            return f"Extracted to: {dest}"
         except Exception as e:
-            return f"Extract failed: {e}"
+            raise ProcessingFailed(f"Extract failed: {e}") from e
+        _pending_outputs().append(dest)
+        return f"Extracted to: {dest}"
 
-    return f"Unknown archive action: '{action}'. Try: list, extract"
+    raise ProcessingFailed(f"Unknown archive action: '{action}'. Try: list, extract")
 
 def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
     action = action or "summarize"
@@ -804,9 +877,9 @@ def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
-            return f"AI processing failed: {e}"
+            raise ProcessingFailed(f"AI processing failed: {e}") from e
 
-    return f"Unknown PPTX action: '{action}'. Try: summarize, extract_text, analyze"
+    raise ProcessingFailed(f"Unknown PPTX action: '{action}'. Try: summarize, extract_text, analyze")
 
 from core import outcome
 
@@ -867,14 +940,30 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
         return outcome.failed("file_processor",
                               f"files of type '{file_type}' are not supported")
 
+    pending = _pending_outputs()
+    pending.clear()
     try:
         result = handler(path, action, params, speak)
-        return _report(path, action, result)
+    except ProcessingFailed as exc:
+        pending.clear()
+        return outcome.failed("file_processor", str(exc), file=path.name)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        pending.clear()
+        # Only the TYPE goes to the console. The message can carry a path or
+        # a fragment of the file, and the console is where the raw data is
+        # supposed to stay; the user gets the reason in the answer.
+        print(f"[file_processor] {type(e).__name__}")
         return outcome.failed("file_processor", f"the file could not be processed: {e}",
                               file=path.name)
+    # Everything the handler wrote is registered as undoable. The policy table
+    # says a local write is "silent, logged and reversible": the first two are
+    # the executor's job and this one is the action's, and this action was not
+    # doing it.
+    written = [p for p in pending if p.exists()]
+    pending.clear()
+    for out in written:
+        push_undo(f"created {out.name}", _undo_created(out))
+    return _report(path, action, result)
 
 
 def _report(path: Path, action: str, result: str) -> str:
