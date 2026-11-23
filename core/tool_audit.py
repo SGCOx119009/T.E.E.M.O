@@ -31,6 +31,12 @@ _TOOL_RISK = {
     "reminder": "high",
     "screen_process": "read_or_navigate",
     "weather_report": "read_or_navigate",
+    # The affective state is a presentation change and nothing else: it moves
+    # the tone, the accent colour and the face. It touches no file, no
+    # network and no permission, so it is a local state change like the
+    # volume is — and it is not "unclassified", because an unclassified tool
+    # is refused by the policy before it ever runs.
+    "emotional_spectrum": "state_change",
 }
 _DESTRUCTIVE_ACTIONS = {
     "delete",
@@ -60,6 +66,17 @@ _CONTROL_TARGET_RISK_RE = re.compile(
     r"contraseña|clave|credencial|correo|e-mail|email|phone|teléfono|"
     r"telefono|address|dirección|direccion|card|tarjeta|recipient|"
     r"destinatario|message|mensaje|account|cuenta"
+    r")\b",
+    re.IGNORECASE,
+)
+# The words that mean the thing aimed at is a SECRET. They are a subset of
+# the risky words above, but they are not the same thing: aiming at a
+# password is not "an external effect", it is "a credential is about to
+# leave this machine", and the policy has a class for exactly that.
+_CREDENTIAL_TARGET_RE = re.compile(
+    r"\b(?:"
+    r"password|passwd|secret|token|credential|private[ _]key|api[ _]key|otp|"
+    r"contraseña|clave|credencial"
     r")\b",
     re.IGNORECASE,
 )
@@ -477,6 +494,55 @@ def failure_result(tool: str, error: BaseException) -> str:
     return f"Tool '{safe_tool}' failed: {safe_type}"
 
 
+def _control_targets(args: dict, action: str) -> list:
+    """The words a routine control action is aimed at."""
+    targets = [
+        args.get(key)
+        for key in (
+            "selector", "description", "label", "target", "name",
+            "control_name", "window_name", "window_title", "title",
+        )
+    ]
+    if action in {
+        "click", "smart_click", "screen_click", "invoke_control",
+    }:
+        targets.append(args.get("text"))
+    if action == "fill_form" and isinstance(args.get("fields"), dict):
+        targets.extend(args["fields"].keys())
+    return targets
+
+
+def control_target_class(tool: str, arguments: dict | None = None) -> str:
+    """What a routine control action is aimed at.
+
+    "credential" — the target names a secret (a password field, a token).
+    "sensitive"  — the target names something with an effect that leaves
+                    this machine (Buy, Send, Delete, Shut down...).
+    "routine"    — an ordinary control: click, type, scroll.
+    ""           — this is not a routine control action, so its target says
+                    nothing about how risky it is.
+
+    This is the audit's own answer, exposed: the risk vocabulary lives here
+    and in no other module, so the policy that needs it asks for it instead
+    of growing a second, drifting copy of the same word lists.
+    """
+    name = tool.strip().lower() if isinstance(tool, str) else ""
+    args = arguments if isinstance(arguments, dict) else {}
+    action = args.get("action")
+    action = (
+        action.strip().lower().replace("-", "_")
+        if isinstance(action, str) else ""
+    )
+    if action not in _ROUTINE_CONTROL_ACTIONS.get(name, set()):
+        return ""
+    words = _flatten_text(_control_targets(args, action))
+    if any(_CREDENTIAL_TARGET_RE.search(text) for text in words):
+        return "credential"
+    if any(_CONTROL_TARGET_RISK_RE.search(text) for text in words):
+        return "sensitive"
+    return "routine"
+
+
 def classify_risk(tool: str, arguments: dict | None = None) -> str:
     """Classify a tool request without retaining or exposing its arguments."""
     name = tool.strip().lower() if isinstance(tool, str) else ""
@@ -495,23 +561,8 @@ def classify_risk(tool: str, arguments: dict | None = None) -> str:
     )
 
     if action in _ROUTINE_CONTROL_ACTIONS.get(name, set()):
-        targets = [
-            args.get(key)
-            for key in (
-                "selector", "description", "label", "target", "name",
-                "control_name", "window_name", "window_title", "title",
-            )
-        ]
-        if action in {
-            "click", "smart_click", "screen_click", "invoke_control",
-        }:
-            targets.append(args.get("text"))
-        if action == "fill_form" and isinstance(args.get("fields"), dict):
-            targets.extend(args["fields"].keys())
-        if any(
-            _CONTROL_TARGET_RISK_RE.search(text)
-            for text in _flatten_text(targets)
-        ):
+        kind = control_target_class(name, {**args, "action": action})
+        if kind in ("credential", "sensitive"):
             return "high"
         return "state_change"
 

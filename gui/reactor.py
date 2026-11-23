@@ -42,6 +42,14 @@ _N_GLOBE = 44                   # points on a globe line
 _FLOOR_Y = -1.02                # the platform, below the sphere's centre
 _SPHERE = 0.46                  # sphere radius, in core radii
 
+# HOW FAST THE MACHINE TURNS, AND HOW MUCH DUST IT SHOWS, AT EACH STEP OF THE
+# LADDER (core/hardware_equilibrium.py). A busy machine is given a smaller
+# picture and a slower one: the presentation degrades BEFORE the capacity.
+_LEVEL_RATE = {"OPTIMAL": 1.0, "BALANCED": 0.80, "THROTTLED": 0.55,
+               "CRITICAL_RECOVERY": 0.30}
+_LEVEL_MOTES = {"OPTIMAL": 1.0, "BALANCED": 0.70, "THROTTLED": 0.40,
+                "CRITICAL_RECOVERY": 0.15}
+
 
 def _rx(a):
     c, s = math.cos(a), math.sin(a)
@@ -100,10 +108,69 @@ class Reactor3D:
         self._lat_front: QPixmap | None = None  # front half of the latitudes
         self._box = QRectF()
 
+        # THE STATE OF MIND AND THE STATE OF THE MACHINE.
+        #
+        # The core is not a picture that happens to move: how it moves says
+        # what kind of mind the assistant is in, and how much of it there is
+        # to draw says how busy the machine is. Both are numbers, both come
+        # from outside, and neither one is allowed to break the frame.
+        self._emo_animation = "still"
+        self._emo_params: dict[str, float] = {}
+        self._emo_tempo = 1.0
+        self._level = "OPTIMAL"
+        self._t = 0.0
+
+    # ── what the state and the machine ask of the movement ───────────────────
+    def set_emotional_state(self, state) -> None:
+        """Take the affective state: it changes the movement, not the colour.
+
+        The state may be given as an `EmotionalState` or as its name; a name
+        that is not a state leaves the core exactly as it was."""
+        if isinstance(state, str):
+            try:
+                from core.emotional_spectrum import state_by_name
+                state = state_by_name(state)
+            except Exception:
+                return
+        animation = getattr(state, "animation", None)
+        if not animation:
+            return
+        self._emo_animation = str(animation)
+        try:
+            self._emo_params = dict(getattr(state, "animation_params", {}) or {})
+        except Exception:
+            self._emo_params = {}
+        try:
+            self._emo_tempo = float(getattr(state, "tempo", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            self._emo_tempo = 1.0
+
+    def apply_resource_state(self, state) -> None:
+        """Take a reading of the machine: less dust and a slower turn when it
+        is busy. The frame gets cheaper as the load goes up, never dearer."""
+        level = str(getattr(state, "level", "") or "")
+        if level:
+            self._level = level
+
     # ── motion ────────────────────────────────────────────────────────────────
     def step(self, dt: float, speaking: bool, thinking: bool, muted: bool) -> None:
         dt = min(0.10, max(0.0, dt))
+        self._t += dt
         rate = 0.12 if muted else 0.38 + (1.5 if thinking else 0.0) + (0.8 if speaking else 0.0)
+        # The state of mind sets the tempo of the whole machine.
+        rate *= max(0.2, min(1.8, self._emo_tempo))
+        if self._emo_animation == "still":
+            rate *= 0.22            # a still mind barely turns anything
+        elif self._emo_animation == "stutter":
+            # it moves in bursts: it holds, and then it jumps
+            try:
+                period = max(0.12, float(self._emo_params.get("period_ms", 900.0)) / 1000.0)
+            except (TypeError, ValueError):
+                period = 0.9
+            phase = (self._t % period) / period
+            rate *= (3.2 if phase < 0.35 else 0.0)
+        # The ladder of the machine.
+        rate *= _LEVEL_RATE.get(self._level, 1.0)
         self.spin += dt * rate
 
     # ── projection ────────────────────────────────────────────────────────────
@@ -197,6 +264,20 @@ class Reactor3D:
               white: QColor, amp: float, live: bool, name: str = "") -> None:
         spin = self.spin
         amp = max(0.0, min(1.0, amp))
+        # THE STATE OF MIND, in numbers: the period it beats at, how hard it
+        # beats, and where it is in the beat right now.
+        emo = self._emo_animation
+        try:
+            params = self._emo_params or {}
+            period = max(0.12, float(params.get("period_ms", 1600.0)) / 1000.0)
+            eamp = max(0.0, min(1.0, float(params.get("amplitude", 0.5))))
+        except (TypeError, ValueError):
+            period, eamp = 1.6, 0.5
+        ephase = (self._t % period) / period
+        ewave = math.sin(ephase * math.tau)
+        # A stuttering state breaks the light into bursts: the core is bright
+        # for a moment and almost dark for the next.
+        light = eamp if (emo != "stutter" or ephase < 0.30) else eamp * 0.20
         dev = p.device()
         dpr = float(dev.devicePixelRatioF()) if dev is not None else 1.0
         key = (round(cx), round(cy), round(r, 1), main.rgba(), dpr)
@@ -263,6 +344,27 @@ class Reactor3D:
         for X, Y, Z, _s in meridians:
             self._cued(p, X, Y, Z, main, 0.5, 0.16, 1.0, "back")
 
+        # the halo of the state: a wide, soft light around the core that
+        # breathes at the state's own period. It is the difference between a
+        # core that is lit and a core that is ALIVE.
+        if emo == "halo":
+            hrad = r * 0.62 * (1.0 + 0.22 * eamp * ewave)
+            hgr = QRadialGradient(QPointF(cx, cy), hrad)
+            hgr.setColorAt(0.0, _with_alpha(main, 0.0))
+            hgr.setColorAt(0.72, _with_alpha(main, 0.10 * light))
+            hgr.setColorAt(1.0, _with_alpha(main, 0.0))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(hgr))
+            p.drawEllipse(QPointF(cx, cy), hrad, hrad)
+
+        # the sweep of the state: an arc running round the core.
+        if emo == "ring_sweep":
+            srad = r * 1.22
+            sbox = QRectF(cx - srad, cy - srad, srad * 2, srad * 2)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(_with_alpha(acc if live else main, 0.30 + 0.45 * light), 1.8))
+            p.drawArc(sbox, int(-ephase * 360.0 * 16), int((50.0 + 120.0 * eamp) * 16))
+
         # the sphere — lit from the upper left, translucent like a hologram
         sr = r * _SPHERE
         shade = QRadialGradient(QPointF(cx, cy), sr, QPointF(cx - sr * 0.38, cy - sr * 0.42))
@@ -277,10 +379,11 @@ class Reactor3D:
         p.setPen(QPen(_with_alpha(main, 0.65), 1.3))
         p.drawEllipse(QPointF(cx, cy), sr, sr)
         # the heart: brightens and swells with the voice
-        hr = sr * (0.20 + 0.16 * amp) * 2.4
+        pulse = 1.0 + (0.30 * eamp * ewave if emo == "pulse" else 0.0)
+        hr = sr * (0.20 + 0.16 * amp) * 2.4 * pulse
         heart = QRadialGradient(cx, cy, hr)
         heart.setColorAt(0.0, _with_alpha(white, 0.95))
-        heart.setColorAt(0.25, _with_alpha(acc if live else main, 0.75))
+        heart.setColorAt(0.25, _with_alpha(acc if live else main, 0.75 * (0.4 + 0.6 * light)))
         heart.setColorAt(1.0, _with_alpha(main, 0.0))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(heart))
@@ -308,9 +411,14 @@ class Reactor3D:
             p.drawEllipse(QPointF(x, y), rad, rad)
 
         # drifting motes around the core
-        a = np.array([ph + spin * sp for _r0, ph, _y, sp in self._motes])
-        r0 = np.array([m[0] for m in self._motes])
-        pts = np.vstack([np.cos(a) * r0, np.array([m[2] for m in self._motes]), np.sin(a) * r0])
+        #
+        # How many of them there are is the machine's business: a busy
+        # machine is shown less dust, because the frame has to stay cheap.
+        n_motes = max(0, int(len(self._motes) * _LEVEL_MOTES.get(self._level, 1.0)))
+        motes = self._motes[:n_motes]
+        a = np.array([ph + spin * sp for _r0, ph, _y, sp in motes])
+        r0 = np.array([m[0] for m in motes])
+        pts = np.vstack([np.cos(a) * r0, np.array([m[2] for m in motes]), np.sin(a) * r0])
         MX, MY, MZ, _ = self._project(pts, cx, cy, r)
         for x, y, d in zip(MX.tolist(), MY.tolist(), MZ.tolist()):
             d = max(0.0, d)

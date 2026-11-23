@@ -143,6 +143,40 @@ class HudCanvas(QWidget):
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
 
+        # THE AFFECTIVE STATE.
+        #
+        # The state of mind is a machine state (core/emotional_spectrum.py)
+        # and it has three outputs: the prompt, the palette and the set of
+        # micro-animations. The palette belongs to gui/theme.py; the
+        # micro-animations belong here, because this is where the picture is
+        # drawn. The default is the state the assistant starts in, so a HUD
+        # that was never told anything is not a HUD without an expression.
+        self._emotion = None
+        self._emo_animation = "still"
+        self._emo_params: dict[str, float] = {}
+        self._emo_effects = 0            # things the last frame drew for it
+        try:
+            from core.emotional_spectrum import current_state as _current_state
+            self._emotion = _current_state()
+            self._emo_animation = getattr(self._emotion, "animation", "still") or "still"
+            self._emo_params = dict(getattr(self._emotion, "animation_params", {}) or {})
+        except Exception:
+            pass
+        if self._reactor is not None:
+            try:
+                self._reactor.set_emotional_state(self._emotion)
+            except Exception:
+                pass
+
+        # THE MACHINE'S LADDER.
+        #
+        # `core/hardware_equilibrium.py` publishes a reading once a second and
+        # the HUD obeys it: the frame interval is the lever it pulls. The level
+        # is kept as well, because the reactor wants to know how much of the
+        # picture it can still afford to draw.
+        self._resource_level = "OPTIMAL"
+        self._resource_interval = 16
+
         # THE CORE, WITHOUT THE ROOM.
         #
         # In the corner mode the window is a small translucent rectangle and
@@ -170,6 +204,114 @@ class HudCanvas(QWidget):
         if remaining <= 0:
             return 0.0
         return min(1.0, remaining / 0.35) * 7.0
+
+    # ── the frame interval, the state and the machine's ladder ───────────────
+    #
+    # THE TIMER IS NOT FIXED ANY MORE
+    #     The HUD used to repaint every 16 ms whatever the machine was doing.
+    #     Now the interval is a lever: the regulator (core/hardware_
+    #     equilibrium.py) walks it down its ladder — 16, 22, 33, 66 ms — and
+    #     the picture degrades BEFORE the machine is asked for more work than
+    #     it can do. The animation state keeps stepping in between, so what
+    #     the user sees is a HUD that moves a little less often, not one that
+    #     stutters.
+
+    def set_frame_interval(self, ms: int) -> None:
+        """Set the interval of the HUD's timer, in milliseconds.
+
+        Only a positive whole number inside a sane range is accepted; a bad
+        value is ignored rather than allowed to stop the HUD. A HUD whose
+        timer does not exist yet (a half-built widget) is not an error
+        either."""
+        try:
+            value = int(ms)
+        except (TypeError, ValueError):
+            return
+        if value < 1 or value > 1000:
+            return
+        timer = getattr(self, "_tmr", None)
+        if timer is None:
+            return
+        try:
+            if timer.interval() != value:
+                timer.setInterval(value)
+        except Exception:
+            pass
+
+    def frame_interval(self) -> int:
+        """The interval the HUD is currently running at, in milliseconds."""
+        timer = getattr(self, "_tmr", None)
+        try:
+            return int(timer.interval()) if timer is not None else 0
+        except Exception:
+            return 0
+
+    def set_emotional_state(self, name: str) -> None:
+        """Fix the affective state the HUD plays.
+
+        The state brings a class of micro-animation and its numbers — the
+        amplitude, the period, the angle — and those numbers are what the
+        paint code reads. An unknown name leaves the HUD exactly as it was:
+        a typo must not be able to knock the assistant out of its mood."""
+        state = None
+        try:
+            from core.emotional_spectrum import state_by_name
+            state = state_by_name(name)
+        except Exception:
+            state = None
+        if state is None:
+            return
+        self._emotion = state
+        self._emo_animation = getattr(state, "animation", "still") or "still"
+        try:
+            self._emo_params = dict(getattr(state, "animation_params", {}) or {})
+        except Exception:
+            self._emo_params = {}
+        reactor = getattr(self, "_reactor", None)
+        if reactor is not None:
+            try:
+                reactor.set_emotional_state(state)
+            except Exception:
+                pass
+        self.update()
+
+    def emotional_animation(self) -> str:
+        """The class of micro-animation the HUD is playing right now."""
+        return self._emo_animation
+
+    def emotional_effects(self) -> int:
+        """How many things the last painted frame drew for the state.
+
+        Zero for a state that asks for stillness, and a number above zero for
+        every state that asks for something to move: that is what makes the
+        animation measurable instead of a matter of opinion."""
+        return self._emo_effects
+
+    def apply_resource_state(self, state) -> None:
+        """Take a reading of the machine and live with it.
+
+        The reading carries the frame interval the HUD should run at and the
+        step of the ladder it landed on."""
+        try:
+            interval = int(getattr(state, "frame_interval_ms", 0))
+            level = str(getattr(state, "level", "") or "")
+        except Exception:
+            return
+        if interval > 0:
+            self._resource_interval = interval
+            self.set_frame_interval(interval)
+        if level:
+            self._resource_level = level
+        reactor = getattr(self, "_reactor", None)
+        if reactor is not None:
+            try:
+                reactor.apply_resource_state(state)
+            except Exception:
+                pass
+
+    def resource_level(self) -> str:
+        """The step of the ladder the HUD is living with."""
+        return self._resource_level
 
     def set_core_only(self, enabled: bool) -> None:
         """Draw only the core, over nothing at all.
@@ -359,6 +501,137 @@ class HudCanvas(QWidget):
                    _t("hud.voice_interface"))
         p.end()
         return pm
+
+    # ── the state's micro-animation ──────────────────────────────────────────
+    #
+    # FOUR ANIMATIONS THAT ARE FOUR DIFFERENT PICTURES
+    #
+    #     pulse       the halo around the core breathes, at the state's own
+    #                 period and with the state's own amplitude. A halo that
+    #                 beats faster is the difference between "calm" and
+    #                 "urgent", and it shows in a single frame.
+    #     halo        a wide, soft light around the core, breathing slower
+    #                 and deeper than the pulse: the light of a warm mood.
+    #     grid_tilt   the reticle of the TOP QUADRANT leans by the state's
+    #                 angle (+14°, -14°) while the rest of the screen stays
+    #                 straight. Only the quadrant moves — the mark of a
+    #                 squint, the brow coming down.
+    #     stutter     the signal breaks: a short blink along the top of the
+    #                 projection, the way a link that is struggling breaks
+    #                 into syllables.
+    #     ring_sweep  an arc runs round the core at the state's period.
+    #     scan_sweep  a band of light travels down the projection.
+    #     still       nothing moves. Quiet is an expression too, and it is
+    #                 what a state with nothing to say should look like.
+    #
+    # Everything here is software: a QPainter and a handful of strokes. The
+    # overlay costs a fraction of a millisecond and it is drawn over the
+    # cached backdrop, never instead of it.
+
+    def _paint_emotional_overlay(self, p: QPainter, W: float, H: float,
+                                  cx: float, cy: float, r: float,
+                                  band_t: float, band_h: float) -> None:
+        """Draw the micro-animation of the active affective state."""
+        self._emo_effects = 0
+        anim = self._emo_animation
+        if not anim or anim == "still":
+            return
+        params = self._emo_params or {}
+        try:
+            period = max(120.0, float(params.get("period_ms", 1600.0)))
+            amp = max(0.0, min(1.0, float(params.get("amplitude", 0.5))))
+            angle = float(params.get("angle", 0.0))
+        except (TypeError, ValueError):
+            period, amp, angle = 1600.0, 0.5, 0.0
+        # The clock is the integrated one (`_core_phase`), never the wall
+        # clock: a rate that changed with the state would jump the picture
+        # the instant the assistant started talking.
+        phase = ((self._core_phase * 1000.0) % period) / period
+        wave = math.sin(phase * math.tau)
+
+        if anim == "pulse":
+            rad = r * (0.98 + 0.10 * amp * wave)
+            a = 0.10 + 0.18 * amp * (0.5 + 0.5 * wave)
+            p.setPen(Qt.PenStyle.NoPen)
+            g = QRadialGradient(QPointF(cx, cy), rad)
+            g.setColorAt(0.0, with_alpha(C.PRI, 0.0))
+            g.setColorAt(0.70, with_alpha(C.PRI, a * 0.45))
+            g.setColorAt(1.0, with_alpha(C.PRI, a))
+            p.setBrush(QBrush(g))
+            p.drawEllipse(QPointF(cx, cy), rad, rad)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(with_alpha(C.PRI, 0.22 + 0.50 * amp * (0.5 + 0.5 * wave)), 1.4))
+            p.drawEllipse(QRectF(cx - rad, cy - rad, rad * 2, rad * 2))
+            self._emo_effects = 2
+
+        elif anim == "halo":
+            # a wide, soft light around the core that breathes: the core is
+            # lit and the core is ALIVE, and the difference is the halo.
+            rad = r * (1.02 + 0.16 * amp * wave)
+            p.setPen(Qt.PenStyle.NoPen)
+            g = QRadialGradient(QPointF(cx, cy), rad)
+            g.setColorAt(0.0, with_alpha(C.PRI, 0.0))
+            g.setColorAt(0.62, with_alpha(C.PRI, 0.05 + 0.07 * amp * (0.5 + 0.5 * wave)))
+            g.setColorAt(1.0, with_alpha(C.PRI, 0.0))
+            p.setBrush(QBrush(g))
+            p.drawEllipse(QPointF(cx, cy), rad, rad)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(with_alpha(C.PRI, 0.10 + 0.22 * amp * (0.5 + 0.5 * wave)), 1.0))
+            p.drawEllipse(QRectF(cx - rad, cy - rad, rad * 2, rad * 2))
+            self._emo_effects = 2
+
+        elif anim == "grid_tilt":
+            if self._core_only:
+                return          # a corner HUD has no room for a reticle
+            p.save()
+            p.setClipRect(QRectF(0, band_t, W, max(1.0, band_h)))
+            p.translate(cx, band_t + band_h)
+            p.rotate(angle)
+            lines = []
+            rows = 7
+            for i in range(1, rows + 1):
+                y = -band_h * i / (rows + 1)
+                lines.append(QLineF(-W, y, W, y))
+            for i in range(-4, 5):
+                x = i * (W / 9.0)
+                lines.append(QLineF(x, -band_h * 1.2, x, 0.0))
+            p.setPen(QPen(blend(C.PRI, 0.16 + 0.24 * amp), 1))
+            p.drawLines(lines)
+            p.restore()
+            self._emo_effects = len(lines)
+
+        elif anim == "stutter":
+            on = phase < 0.18
+            a = 0.85 if on else 0.10
+            bh = max(2.0, H * 0.006)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(with_alpha(C.PRI, a)))
+            p.drawRect(QRectF(0, 0, W, bh))
+            p.setPen(QPen(with_alpha(C.PRI, a * 0.55), 1))
+            p.drawLine(QLineF(0, bh, W, bh))
+            self._emo_effects = 2
+
+        elif anim == "ring_sweep":
+            rad = r * 1.06
+            box = QRectF(cx - rad, cy - rad, rad * 2, rad * 2)
+            start = -phase * 360.0
+            span = 40.0 + 110.0 * amp
+            p.setPen(QPen(with_alpha(C.PRI, 0.28 + 0.45 * amp), 2.0))
+            p.drawArc(box, int(start * 16), int(span * 16))
+            p.setPen(QPen(with_alpha(C.PRI, 0.11), 1.0))
+            p.drawArc(box, int((start + span + 40.0) * 16), int((300.0 - span) * 16))
+            self._emo_effects = 2
+
+        elif anim == "scan_sweep":
+            y = band_t + band_h * phase
+            p.setPen(Qt.PenStyle.NoPen)
+            g = QLinearGradient(0, y - 28.0, 0, y + 28.0)
+            g.setColorAt(0.0, with_alpha(C.PRI, 0.0))
+            g.setColorAt(0.5, with_alpha(C.PRI, 0.20 + 0.22 * amp))
+            g.setColorAt(1.0, with_alpha(C.PRI, 0.0))
+            p.setBrush(QBrush(g))
+            p.drawRect(QRectF(0, y - 28.0, W, 56.0))
+            self._emo_effects = 1
 
     def _step(self):
         self._tick += 1
@@ -717,6 +990,9 @@ class HudCanvas(QWidget):
         span = self._avatar.SPAN if self._avatar is not None else 1.6
         r_head = min(fw * 0.42, band_h / (span + 0.08))
         head_cy = band_t + (band_h - span * r_head) / 2.0 + r_head
+        # Where the centrepiece ended up — the micro-animation is drawn
+        # around whatever is in the middle, whichever centrepiece it is.
+        core_cy, core_r = head_cy, r_head
 
         # THE RINGS.
         #
@@ -762,10 +1038,18 @@ class HudCanvas(QWidget):
             ext = Reactor3D.TOP + Reactor3D.BOTTOM
             r = min(W * 0.25, band_h / ext)
             core_cy = band_t + (band_h - ext * r) / 2.0 + Reactor3D.TOP * r
+            core_r = r
             self._paint_core(p, cx, core_cy, r, W, band_h)
         else:
             r = min(W * 0.46, band_h / 2.0)
+            core_cy, core_r = band_t + band_h / 2.0, r
             self._paint_core_classic(p, cx, band_t + band_h / 2.0, r, W, band_h)
+
+        # THE STATE'S MICRO-ANIMATION, drawn over the picture.
+        #
+        # It goes on top of the core and under the caption, and it is the one
+        # thing on screen that says what kind of mind the assistant is in.
+        self._paint_emotional_overlay(p, W, H, cx, core_cy, core_r, band_t, band_h)
 
         # The core mode ends here: no caption, no waveform, no rules.
         if self._core_only:
