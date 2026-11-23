@@ -147,23 +147,56 @@ def test_every_group_opens_and_shows_something(window):
         assert page.layout().count() > 1, f"the group {key} is empty"
 
 
-def test_the_gear_opens_the_tools_and_the_sliders_open_the_voice(window):
-    window._toggle_drawer(True)
+def test_one_door_opens_the_drawer_on_the_group_that_was_used_last(window):
+    """The gear and the sliders opened the same drawer on two pages, and the
+    user could not tell the two buttons apart."""
+    # The quick access reaches the two pages on purpose.
+    window._open_tools()
     assert window._group_rail.current == "tools"
     assert window._ctrl_drawer.isVisible()
 
+    window._open_controls()
+    assert window._group_rail.current == "voice"
+    assert window._ctrl_drawer.isVisible()
+
+    # And the door of the header opens the group that was open last.
+    window._drawer_btn.setChecked(False)
     window._toggle_controls(True)
     assert window._group_rail.current == "voice"
     assert window._ctrl_drawer.isVisible()
 
+    window._select_group("hand")
+    window._drawer_btn.setChecked(False)
+    window._toggle_controls(True)
+    assert window._group_rail.current == "hand"
+
 
 def test_the_window_modes_are_named_separately(window):
     """One button that toggled full screen left the other wishes unnamed."""
-    for name in ("_maximize_btn", "_fullscreen_btn", "_restore_btn",
-                 "_minimize_btn"):
+    for name in ("_maximize_btn", "_fullscreen_btn", "_minimize_btn"):
         button = getattr(window, name, None)
         assert button is not None, f"the button {name} does not exist"
         assert button.text(), f"the button {name} says nothing"
+
+
+def test_no_two_window_buttons_say_the_same_thing(window):
+    """Two buttons named VENTANA, side by side, with nothing to tell them apart.
+
+    The maximize button used to turn into "VENTANA" when the window was
+    maximized, and the button under it already said "VENTANA".
+    """
+    names = ("_maximize_btn", "_fullscreen_btn", "_minimize_btn")
+    for state in ("normal", "maximized", "fullscreen"):
+        if state == "maximized":
+            window.showMaximized()
+        elif state == "fullscreen":
+            window.showFullScreen()
+        else:
+            window.showNormal()
+        window._refresh_window_btns()
+        labels = [getattr(window, name).text() for name in names]
+        assert len(set(labels)) == len(labels), (
+            f"in the {state} window two buttons say the same thing: {labels}")
 
 
 # ── 2. the notification ─────────────────────────────────────────────────────

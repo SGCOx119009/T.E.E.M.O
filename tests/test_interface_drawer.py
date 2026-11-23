@@ -196,6 +196,56 @@ def test_the_quick_access_is_not_cut(window):
             f"the switch {btn.text()!r} hangs out of the panel")
 
 
+def test_the_drawer_never_covers_the_report(window, qt_app):
+    """The drawer was drawn on top of the report, and the report could not
+    be read while the drawer was open."""
+    from PyQt6.QtCore import QPoint
+
+    window._ctrl_btn.setChecked(True)
+    window._toggle_controls(True)
+    qt_app.processEvents()
+    window._show_content("NOTICIA", "Algo que pasó.")
+    qt_app.processEvents()
+
+    central = window.centralWidget()
+    drawer = window._ctrl_drawer
+    panel = window._content_panel
+    d = drawer.geometry()
+    p = panel.geometry()
+    d_top_left = drawer.mapTo(central, QPoint(0, 0))
+    p_top_left = panel.mapTo(central, QPoint(0, 0))
+    drawer_rect = (d_top_left.x(), d_top_left.y(),
+                   d_top_left.x() + d.width(), d_top_left.y() + d.height())
+    panel_rect = (p_top_left.x(), p_top_left.y(),
+                   p_top_left.x() + p.width(), p_top_left.y() + p.height())
+    overlaps = not (drawer_rect[2] <= panel_rect[0] or drawer_rect[0] >= panel_rect[2]
+                    or drawer_rect[3] <= panel_rect[1] or drawer_rect[1] >= panel_rect[3])
+    assert not overlaps, (
+        f"the drawer is drawn over the report: drawer={drawer_rect} "
+        f"panel={panel_rect}")
+
+
+def test_the_drawer_never_goes_past_the_footer(window, qt_app):
+    """The user said it went all the way down, and it did."""
+    window.show()
+    window._ctrl_btn.setChecked(True)
+    window._toggle_controls(True)
+    window._select_group("look")
+    qt_app.processEvents()
+    drawer = window._ctrl_drawer
+    bottom = drawer.mapTo(window.centralWidget(), drawer.rect().bottomLeft()).y()
+    assert bottom <= window.height(), (
+        f"the drawer reaches {bottom} and the window is {window.height()}")
+
+
+def test_an_empty_report_does_not_open(window, qt_app):
+    """The panel opened with nothing in it, and the user asked what that was."""
+    window._show_content("NOTICIA", "   ")
+    qt_app.processEvents()
+    assert not window._content_panel.isVisible(), (
+        "an empty report opened a panel with nothing in it")
+
+
 # ── 4. the panel of the hands ──────────────────────────────────────────────
 
 def test_the_hands_panel_is_as_tall_as_its_rows(qt_app):

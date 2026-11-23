@@ -561,6 +561,16 @@ class MainWindow(QMainWindow):
         # Clipboard panel (child of central widget, bottom-center)
         self._clipboard_panel = ClipboardPanel(self.centralWidget())
         self._clipboard_panel.action_requested.connect(self._on_clipboard_action)
+        # WHAT WAS ALREADY IN THE CLIPBOARD IS NOT NEWS.
+        #
+        # Windows hands the clipboard over as soon as anybody looks at
+        # it, and the program looks at it when it starts. The text the
+        # user had copied BEFORE the program was opened came back as if
+        # it were a new copy, and the panel offered to translate it, or
+        # summarise it, or correct it — for a text nobody had copied
+        # while the program was running. The user asked what that was:
+        # it was the program greeting them with their own clipboard.
+        self._last_clip_text = self._current_clipboard_text()
         QApplication.clipboard().dataChanged.connect(self._on_clipboard_changed)
 
         # THE DECK.
@@ -1310,10 +1320,20 @@ class MainWindow(QMainWindow):
             self.showFullScreen()
 
     def _maximize_window(self):
-        """Big, with the taskbar still there."""
+        """Big, with the taskbar still there — and back again.
+
+        IT IS A PAIR OF STATES AND NOT ONE. The button used to maximize
+        and nothing else, so pressing it on a window that was already
+        maximized did nothing at all — and its own label changed to
+        "VENTANA", the word of a button that sat right below it.
+        """
         self._was_fullscreen = False
-        self._was_maximized = True
-        self.showMaximized()
+        if self.isMaximized():
+            self._was_maximized = False
+            self.showNormal()
+        else:
+            self._was_maximized = True
+            self.showMaximized()
         self._raise_window()
 
     def _restore_window(self):
@@ -1362,10 +1382,17 @@ class MainWindow(QMainWindow):
         super().changeEvent(event)
 
     def _refresh_window_btns(self) -> None:
-        """The four buttons say what the window is doing."""
+        """The buttons say what the window is doing.
+
+        NO BUTTON SAYS THE SAME THING AS ANOTHER. It used to happen: the
+        maximize button changed its words to "VENTANA" when the window
+        was maximized, and there was already a button that said
+        "VENTANA" — two buttons with the same name, and the user could
+        not tell which one was which.
+        """
         try:
             if self.isFullScreen():
-                self._fullscreen_btn.setText(_t("window.restore"))
+                self._fullscreen_btn.setText(_t("window.leave_fullscreen"))
             else:
                 self._fullscreen_btn.setText(_t("controls.fullscreen"))
             if self.isMaximized():
@@ -1701,26 +1728,28 @@ class MainWindow(QMainWindow):
         lay.addLayout(name_col)
         lay.addSpacing(8)
 
-        # Two drawers, and the split is by how often a thing is touched: the
-        # ones you set once behind the gear, the everyday switches behind the
-        # sliders. Separating them is what keeps each list short enough to
-        # read at a glance.
+        # ONE DOOR, NOT TWO.
+        #
+        # The header had three buttons and the user was right about all
+        # three: the gear and the sliders opened the SAME drawer on two
+        # different pages, and the third one — the deck — opened a
+        # column of cards that was already on the screen, so it looked
+        # like a button that did nothing.
+        #
+        # Now there is one. It opens the drawer on the group that was
+        # open last, which is the one the user is most likely to want,
+        # and the rail inside the drawer carries the seven groups.
         self._drawer_btn = IconButton("gear", 32)
         self._drawer_btn.setCheckable(True)
-        self._drawer_btn.setToolTip(_t("window.setup_drawer_tip"))
-        self._drawer_btn.clicked.connect(self._toggle_drawer)
+        self._drawer_btn.setToolTip(_t("window.controls_drawer_tip"))
+        self._drawer_btn.clicked.connect(self._toggle_controls)
         lay.addWidget(self._drawer_btn)
-        self._ctrl_btn = IconButton("sliders", 32)
-        self._ctrl_btn.setCheckable(True)
-        self._ctrl_btn.setToolTip(_t("window.controls_drawer_tip"))
-        self._ctrl_btn.clicked.connect(self._toggle_controls)
-        lay.addWidget(self._ctrl_btn)
-        # The deck: everything the assistant has said this session, one
-        # card each, one key away.
-        self._deck_btn = IconButton("deck", 32)
-        self._deck_btn.setToolTip(_t("window.deck_tip"))
-        self._deck_btn.clicked.connect(self._toggle_blades)
-        lay.addWidget(self._deck_btn)
+        # THE OLD NAME OF THE SAME BUTTON. There were two doors and now
+        # there is one; the name the code used for the second one is
+        # kept pointing at it, so nothing that reaches for it opens a
+        # drawer that is not there.
+        self._ctrl_btn = self._drawer_btn
+        lay.addSpacing(8)
         lay.addStretch()
 
         self._state_chip = StateChip()
@@ -1947,13 +1976,11 @@ class MainWindow(QMainWindow):
 
     def _open_controls(self) -> None:
         """The drawer of the everyday switches, from the quick access."""
-        self._ctrl_btn.setChecked(True)
-        self._toggle_controls(True)
+        self._open_group("voice")
 
     def _open_tools(self) -> None:
         """The drawer of the tools, from the quick access."""
-        self._drawer_btn.setChecked(True)
-        self._toggle_drawer(True)
+        self._open_group("tools")
 
 
     def _build_left_panel(self) -> QWidget:
@@ -2535,13 +2562,20 @@ class MainWindow(QMainWindow):
             for _c in ("bottom-right", "bottom-left", "top-right", "top-left")
         ], _t("appearance.corner_tip"), self._save_corner)
 
-        # THE FOUR SHAPES OF THE WINDOW, each one named.
+        # THE THREE SHAPES OF THE WINDOW, each one named.
         #
         # One button that toggled "the whole screen" left the user guessing
         # what the other half of the pair did, and there was no way at all to
         # ask for "make it big but keep the taskbar" without leaving the
-        # drawer and hunting for the buttons of Windows. Four named buttons
-        # answer the four real wishes.
+        # drawer and hunting for the buttons of Windows. Three named buttons
+        # answer the three real wishes.
+        #
+        # AND NONE OF THEM REPEATS ANOTHER. There were four: "maximizar",
+        # "pantalla completa", "ventana" and "minimizar" — and the first
+        # one turned into "ventana" when the window was maximized, so two
+        # buttons said the same word and the user could not tell which was
+        # which. Now the maximize button is the one that goes there and
+        # comes back, and the word that tells it to is on it.
         self._maximize_btn = _row(look, QPushButton(_t("window.maximize")),
                                   self._BTN_DIM)
         self._maximize_btn.clicked.connect(self._maximize_window)
@@ -2549,9 +2583,6 @@ class MainWindow(QMainWindow):
                                     self._BTN_DIM)
         self._fullscreen_btn.setToolTip(_t("window.fullscreen_tip"))
         self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
-        self._restore_btn = _row(look, QPushButton(_t("window.restore")),
-                                 self._BTN_DIM)
-        self._restore_btn.clicked.connect(self._restore_window)
         self._minimize_btn = _row(look, QPushButton(_t("window.minimize")),
                                   self._BTN_DIM)
         self._minimize_btn.clicked.connect(self._minimize_window)
@@ -2707,6 +2738,10 @@ class MainWindow(QMainWindow):
         page = self._group_pages.get(key)
         if page is None:
             return
+        # THE LAST GROUP IS REMEMBERED, because the button of the header
+        # opens the drawer on it: one door, and it opens on the group
+        # the user was using last.
+        self._last_group = key
         self._group_stack.setCurrentWidget(page)
         rail = getattr(self, "_group_rail", None)
         if rail is not None:
@@ -2738,32 +2773,49 @@ class MainWindow(QMainWindow):
             self._wake_btns_sig.emit()
         threading.Thread(target=work, daemon=True, name="wake-state-warm").start()
 
-    # ── the two doors of the drawer ──────────────────────────────────────────
-
-    def _toggle_drawer(self, checked: bool):
-        """The gear: the drawer of the tools."""
-        if checked:
-            self._ctrl_btn.setChecked(False)
-            self._close_controls()
-            self._select_group("tools")
-            self._position_ctrl_drawer()
-            self._ctrl_drawer.show()
-            self._ctrl_drawer.raise_()
-        else:
-            self._ctrl_drawer.hide()
+    # ── the one door of the drawer ──────────────────────────────────────────
 
     def _toggle_controls(self, checked: bool):
-        """The sliders: the drawer of the everyday switches."""
+        """The gear: the drawer of the controls.
+
+        ONE DOOR FOR SEVEN GROUPS. It used to be two doors — the gear
+        for the tools and the sliders for the everyday switches — and the
+        user could not tell them apart: two buttons, the same drawer. The
+        drawer has a rail of seven groups inside it, so the button does
+        not have to choose; it opens the group that was open last.
+        """
+        drawer = getattr(self, "_ctrl_drawer", None)
+        if drawer is None:
+            return
         if checked:
-            self._drawer_btn.setChecked(False)
-            self._close_setup()
             self._refresh_wake_btns()   # cheap now: the state was warmed at boot
-            self._select_group("voice")
+            self._select_group(getattr(self, "_last_group", "") or "voice")
             self._position_ctrl_drawer()
-            self._ctrl_drawer.show()
-            self._ctrl_drawer.raise_()
+            drawer.show()
+            drawer.raise_()
         else:
-            self._ctrl_drawer.hide()
+            drawer.hide()
+
+    def _open_group(self, key: str) -> None:
+        """Open the drawer on one group in particular."""
+        self._drawer_btn.setChecked(True)
+        self._refresh_wake_btns()
+        self._select_group(key)
+        self._position_ctrl_drawer()
+        drawer = getattr(self, "_ctrl_drawer", None)
+        if drawer is not None:
+            drawer.show()
+            drawer.raise_()
+
+    def _toggle_drawer(self, checked: bool):
+        """The old name of the one door: the drawer of the tools."""
+        if checked:
+            self._open_group("tools")
+        else:
+            drawer = getattr(self, "_ctrl_drawer", None)
+            if drawer is not None:
+                drawer.hide()
+            self._drawer_btn.setChecked(False)
 
     def _close_setup(self):
         if hasattr(self, "_quick_drawer"):
@@ -2774,8 +2826,8 @@ class MainWindow(QMainWindow):
     def _close_controls(self):
         if hasattr(self, "_ctrl_drawer"):
             self._ctrl_drawer.hide()
-        if hasattr(self, "_ctrl_btn"):
-            self._ctrl_btn.setChecked(False)
+        if hasattr(self, "_drawer_btn"):
+            self._drawer_btn.setChecked(False)
 
     def _place_drawer(self, drawer, left: int):
         # Wide enough for the column of names and for a sentence of help
@@ -2856,10 +2908,7 @@ class MainWindow(QMainWindow):
             return
 
         left = 12
-        button = self._ctrl_btn
-        if getattr(self, "_drawer_btn", None) is not None \
-                and self._drawer_btn.isChecked():
-            button = self._drawer_btn
+        button = self._drawer_btn
         try:
             left = max(12, button.mapTo(self.centralWidget(),
                                          QPoint(0, 0)).x() - 8)
@@ -2868,7 +2917,14 @@ class MainWindow(QMainWindow):
         drawer.setFixedWidth(self._DRAWER_W)
         drawer.adjustSize()
         top = self._header.height() + 2 if hasattr(self, "_header") else 60
-        room = max(220, self.height() - top - 24)
+        # IT NEVER GOES PAST THE FOOTER.
+        #
+        # The drawer is as tall as the group it shows, and the group
+        # with the four modes of the window is the tallest of the seven.
+        # Without a ceiling the drawer reached the bottom of the window
+        # and covered the bar with the clock — the user called it "it
+        # goes all the way down", and it was true.
+        room = max(220, self.height() - top - 52)
         drawer.setGeometry(left, top, self._DRAWER_W,
                            min(drawer.sizeHint().height(), room))
 
@@ -3032,6 +3088,26 @@ class MainWindow(QMainWindow):
             # face is smaller than it was and nothing says why. The room
             # the notification was using goes back to the head.
             self._shrink_below_hud()
+        # And the drawer goes back into the room it was standing in.
+        self._reposition_drawer()
+
+    def _reposition_drawer(self) -> None:
+        """Put the drawer where it belongs after the room under the head
+        has changed.
+
+        The drawer stands in the empty room under the head while that
+        room is empty, and hangs from its button when the room is
+        taken. Whenever the room changes — a report, a review, the
+        viewer — the drawer has to be told, or it keeps standing in a
+        room that is no longer there.
+        """
+        drawer = getattr(self, "_ctrl_drawer", None)
+        if drawer is None or not drawer.isVisible():
+            return
+        try:
+            self._position_ctrl_drawer()
+        except Exception:
+            pass
 
     def _shrink_below_hud(self) -> None:
         """Give the room under the head back to the head."""
@@ -3059,7 +3135,16 @@ class MainWindow(QMainWindow):
         closes the others. Checked every time, not only the first: the
         panels are given room by the splitter, and the next search result,
         review or finished task has to land in a panel that is really
-        there."""
+        there.
+
+        AND THE DRAWER GETS OUT OF THE WAY. The drawer of the controls
+        stands in the empty room under the head while that room is
+        empty; the moment a panel takes the room, the drawer has to go
+        back to hanging under its button. It used to stay where it was,
+        and the user was looking at the drawer drawn over the report —
+        two panels on top of each other, and the one underneath was
+        unreadable.
+        """
         stack = getattr(self, "_lower_stack", None)
         if stack is None:
             panel.show()
@@ -3069,17 +3154,27 @@ class MainWindow(QMainWindow):
         split = self._center_split
         idx = split.indexOf(stack)
         sizes = split.sizes()
-        if idx < 0 or sizes[idx] >= want:
-            return
-        total = sum(sizes) or split.height()
-        new = [0] * len(sizes)
-        new[0] = max(total - want, 120)
-        new[idx] = want
-        split.setSizes(new)
+        if idx >= 0 and sizes[idx] < want:
+            total = sum(sizes) or split.height()
+            new = [0] * len(sizes)
+            new[0] = max(total - want, 120)
+            new[idx] = want
+            split.setSizes(new)
+        self._reposition_drawer()
 
     def _show_content(self, title: str, text: str):
         """Slot — runs on Qt main thread. Updates and shows the content panel."""
         import time as _time
+        # AN EMPTY REPORT IS NOT A REPORT.
+        #
+        # The panel used to open with nothing in it: the user saw a big
+        # empty box under the head, with a title and a cross, and no
+        # text to read — and they were right to ask what that was. A
+        # result that carries nothing says nothing, so nothing is shown.
+        text = str(text or "")
+        if not text.strip():
+            self._hide_content()
+            return
         # The panel opens below the head, so the head looks down at it. It is a
         # tiny thing that answers "did that land?" before you read a word.
         self.hud.glance(0.0, -0.85, hold=1.3)
@@ -4807,6 +4902,14 @@ class MainWindow(QMainWindow):
 
     # ── Clipboard intelligence ───────────────────────────────────────────────────
 
+    @staticmethod
+    def _current_clipboard_text() -> str:
+        """The text of the clipboard, or an empty string."""
+        try:
+            return QApplication.clipboard().text().strip()
+        except Exception:
+            return ""
+
     def _on_clipboard_changed(self):
         """The clipboard changed: the panel offers what to do with it.
 
@@ -4819,10 +4922,7 @@ class MainWindow(QMainWindow):
         panel that pops up over the field they are typing in is worse than no
         panel at all.
         """
-        try:
-            text = QApplication.clipboard().text().strip()
-        except Exception:
-            return
+        text = self._current_clipboard_text()
         if len(text) < 10:
             return
         if text == getattr(self, "_last_clip_text", ""):
@@ -5036,13 +5136,19 @@ class MainWindow(QMainWindow):
 
         The first time only: after that the deck follows whatever the
         user did with it, because a panel that opens itself every time
-        something happens is a panel the user learns to close.
+        something happens is a panel the user learns to close — and a
+        card that comes back on its own is a card that cannot be thrown
+        away.
         """
         if not getattr(self, "_blades", None):
             return
         try:
+            # AN EMPTY DECK OPENS AGAIN. The deck that the user emptied
+            # by hand is a deck with nothing in it, and the next card is
+            # a reason to open it once more.
+            was_empty = self._blades.count == 0
             self._blades.push(title, text, code)
-            if not self._deck_seen:
+            if was_empty or not self._deck_seen:
                 self._deck_seen = True
                 self._blades.open_deck()
                 self._blades.show()

@@ -549,18 +549,28 @@ class _CameraPreview(QWidget):
         self.hide()
 
     def show_frame(self, img_bytes: bytes) -> None:
+        """Show one camera frame — and only a real one.
+
+        AN EMPTY BOX IS NOT A PICTURE. The preview used to appear even
+        when the bytes could not be read: a little frame with the title
+        "ENTRADA VISUAL" and nothing inside it, sitting in the corner of
+        the interface with no explanation. The user asked what that was.
+        It was the camera preview, showing a picture that never came.
+        """
         px = QPixmap()
         px.loadFromData(img_bytes)
-        if not px.isNull():
-            max_w = self._W - 12
-            scaled = px.scaled(
-                max_w, 160,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self._img_lbl.setPixmap(scaled)
-            self._img_lbl.setFixedSize(scaled.width(), scaled.height())
-            self.adjustSize()
+        if px.isNull():
+            self.hide()
+            return
+        max_w = self._W - 12
+        scaled = px.scaled(
+            max_w, 160,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._img_lbl.setPixmap(scaled)
+        self._img_lbl.setFixedSize(scaled.width(), scaled.height())
+        self.adjustSize()
         self.show()
         self.raise_()
         self._timer.start(6_000)   # auto-dismiss after 6 s

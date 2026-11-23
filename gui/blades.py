@@ -34,7 +34,7 @@ THE COST
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
 from PyQt6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
@@ -46,6 +46,7 @@ STRIP_H = 26        # the height of a folded card
 GAP = 5             # the space between two cards
 PAD = 10            # the padding inside an open card
 ANIM_MS = 180       # how long a card takes to open or close
+CLOSE_W = 22        # the width of the cross that closes a card
 
 
 class Blade:
@@ -72,6 +73,17 @@ class BladeStack(QWidget):
         self._accent = C.PRI
         self._width = int(width)
         self._lines_cache: dict[int, list[str]] = {}
+        # WHETHER THE DECK IS ON SCREEN.
+        #
+        # It used to be guessed from the open card: "the deck is open"
+        # meant "there is an open card", and those are not the same
+        # thing. After the user folded the deck away, the next card
+        # that arrived put an open card back, and the deck said it was
+        # open — so the button that opens it could not open it any
+        # more, and the button that closes it did nothing. The screen
+        # and the card are two different questions and now they have two
+        # different answers.
+        self._shown = False
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setMouseTracking(True)
         self.hide()
@@ -91,21 +103,63 @@ class BladeStack(QWidget):
         return self._active
 
     def is_open(self) -> bool:
-        return self._active >= 0
+        """Whether the deck is on screen.
+
+        It is the screen that says it, and not the card: a deck that is
+        folded away is a deck that is closed, whatever card it had open.
+        """
+        return self._shown
 
     def push(self, title: str, text: str = "", code: str = "", kind: str = "info") -> int:
-        """Put a card into the deck and open it."""
+        """Put a card into the deck.
+
+        IT DOES NOT WAKE THE DECK UP. A card that arrives while the user
+        has folded the deck away stays out of the way: the deck opens
+        the first time there is something to show, and after that it
+        stays where the user left it.
+        """
         self._blades.append(Blade(title, text, code, kind))
         index = len(self._blades) - 1
-        self._active = index
-        self._anim = 0.0
-        self._anim_target = 1.0
         self._lines_cache.clear()
-        self._timer.start(16)
+        if self._shown:
+            # The user is looking at the deck: the newest card is the
+            # one that opens.
+            self._active = index
+            self._anim = 0.0
+            self._anim_target = 1.0
+            self._timer.start(16)
         self._ensure_visible()
-        self.raise_()
         self.update()
         return index
+
+    def remove_blade(self, index: int) -> bool:
+        """Throw one card away for good.
+
+        The cross on the card. A card that cannot be thrown away is a
+        card the user has to live with: the news of the morning stayed
+        on the screen all day, three of them, and there was no way to
+        say "that one is done".
+        """
+        if not (0 <= index < len(self._blades)):
+            return False
+        self._blades.pop(index)
+        self._lines_cache.clear()
+        if self._active >= len(self._blades):
+            self._active = len(self._blades) - 1
+        if self._active < 0:
+            self._anim = 0.0
+            self._anim_target = 0.0
+            self._timer.stop()
+            if not self._blades:
+                self._shown = False
+                self.hide()
+        else:
+            self._anim = 0.0
+            self._anim_target = 1.0
+            self._timer.start(16)
+        self._ensure_visible()
+        self.update()
+        return True
 
     def clear(self) -> None:
         """Empty the deck."""
@@ -113,6 +167,7 @@ class BladeStack(QWidget):
         self._active = -1
         self._anim = 0.0
         self._anim_target = 0.0
+        self._shown = False
         self._timer.stop()
         self.update()
 
@@ -122,6 +177,7 @@ class BladeStack(QWidget):
         """Open the deck on the last card."""
         if not self._blades:
             return
+        self._shown = True
         self._active = len(self._blades) - 1
         self._anim_target = 1.0
         self._timer.start(16)
@@ -132,6 +188,7 @@ class BladeStack(QWidget):
 
     def close_deck(self) -> None:
         """Fold the deck away."""
+        self._shown = False
         self._active = -1
         self._anim_target = 0.0
         self._timer.start(16)
@@ -153,24 +210,30 @@ class BladeStack(QWidget):
         """The card after this one."""
         if not self._blades:
             return
+        self._shown = True
         self._active = (self._active + 1) % len(self._blades)
         self._anim = 0.0
         self._anim_target = 1.0
         self._lines_cache.clear()
         self._timer.start(16)
         self._ensure_visible()
+        self.show()
+        self.raise_()
         self.update()
 
     def prev_blade(self) -> None:
         """The card before this one."""
         if not self._blades:
             return
+        self._shown = True
         self._active = (self._active - 1) % len(self._blades)
         self._anim = 0.0
         self._anim_target = 1.0
         self._lines_cache.clear()
         self._timer.start(16)
         self._ensure_visible()
+        self.show()
+        self.raise_()
         self.update()
 
     def set_accent(self, colour: str) -> None:
@@ -237,9 +300,45 @@ class BladeStack(QWidget):
             self._anim = max(self._anim_target, self._anim - step)
         else:
             self._timer.stop()
-            if self._anim_target == 0.0 and self._active < 0:
+            if self._anim_target == 0.0 and not self._shown:
                 self.hide()
         self.update()
+
+    # ── where the cards are ─────────────────────────────────────────────────
+
+    def _positions(self) -> list[tuple[int, float, float]]:
+        """Where every card starts and how tall it is.
+
+        ONE LIST FOR THE PAINTING AND FOR THE MOUSE. They used to be
+        computed twice, and the two answers were not the same: the mouse
+        believed that the open card was a strip and a half tall, so
+        clicking on the text of a card did nothing at all.
+        """
+        y = 0.0
+        positions: list[tuple[int, float, float]] = []
+        for index, blade in enumerate(self._blades):
+            if index == self._active:
+                body = self._body_height(blade, index)
+                height = STRIP_H + PAD + body * self._anim
+            else:
+                height = STRIP_H
+            positions.append((index, y, height))
+            y += height + GAP
+        return positions
+
+    def _close_rect(self, top: float, height: float) -> QRectF:
+        """Where the cross that closes a card is."""
+        width = self._deck_width()
+        return QRectF(width - CLOSE_W, top, CLOSE_W, height)
+
+    def _card_at(self, x: float, y: float) -> tuple[int, bool]:
+        """Which card is under the pointer, and whether it is the cross."""
+        for index, top, height in self._positions():
+            if y < top or y > top + height:
+                continue
+            close = self._close_rect(top, height)
+            return index, bool(close.contains(x, y))
+        return -1, False
 
     # ── the painting ────────────────────────────────────────────────────────
 
@@ -304,16 +403,7 @@ class BladeStack(QWidget):
 
         # Where each card starts. The open one is tall; the folded ones are
         # a strip each, and they stack downwards from the top.
-        y = 0.0
-        positions: list[tuple[int, float, float]] = []   # (index, y, height)
-        for index, blade in enumerate(self._blades):
-            if index == self._active:
-                body = self._body_height(blade, index)
-                height = STRIP_H + PAD + body * self._anim
-            else:
-                height = STRIP_H
-            positions.append((index, y, height))
-            y += height + GAP
+        positions = self._positions()
 
         # The cards behind, so the open one draws over them.
         for index, top, height in positions:
@@ -334,6 +424,22 @@ class BladeStack(QWidget):
         lines = self._wrap(blade.text, width - 2 * PAD - 4, index)
         return max(0.0, len(lines) * 16.0)
 
+    def _draw_close(self, p: QPainter, top: float, height: float) -> None:
+        """The cross that throws a card away.
+
+        IT IS DRAWN ON EVERY CARD, FOLDED OR OPEN. The news of the
+        morning was three cards in a column with no way to dismiss any
+        of them: the user asked for a way to close them and there was
+        none.
+        """
+        box = self._close_rect(top, height)
+        p.setPen(QPen(QColor(C.TEXT_DIM), 1.4))
+        cx = box.center().x()
+        cy = box.center().y()
+        r = 4.0
+        p.drawLine(QPointF(cx - r, cy - r), QPointF(cx + r, cy + r))
+        p.drawLine(QPointF(cx - r, cy + r), QPointF(cx + r, cy - r))
+
     def _draw_strip(self, p: QPainter, index: int, top: float, height: float) -> None:
         blade = self._blades[index]
         rect = QRectF(0, top, self._deck_width(), height)
@@ -348,16 +454,19 @@ class BladeStack(QWidget):
                    int(rect.left() + 5), int(rect.bottom() - 6))
         p.setFont(px_font(10, spacing=1.4))
         p.setPen(QPen(QColor(C.TEXT_MED)))
-        p.drawText(QRectF(rect.left() + 14, rect.top(), rect.width() - 20, height),
+        p.drawText(QRectF(rect.left() + 14, rect.top(),
+                          rect.width() - 20 - CLOSE_W, height),
                    Qt.AlignmentFlag.AlignVCenter,
                    p.fontMetrics().elidedText(blade.title, Qt.TextElideMode.ElideRight,
-                                              int(rect.width() - 30)))
+                                              int(rect.width() - 30 - CLOSE_W)))
         if blade.code:
             p.setFont(mono_font(9))
             p.setPen(QPen(QColor(C.TEXT_DIM)))
-            p.drawText(QRectF(rect.left(), rect.top(), rect.width() - 10, height),
+            p.drawText(QRectF(rect.left(), rect.top(),
+                              rect.width() - 10 - CLOSE_W, height),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        blade.code)
+        self._draw_close(p, top, height)
 
     def _draw_card(self, p: QPainter, index: int, top: float, height: float) -> None:
         blade = self._blades[index]
@@ -375,16 +484,19 @@ class BladeStack(QWidget):
         # The header.
         p.setFont(px_font(11, spacing=1.8))
         p.setPen(QPen(QColor(C.PRI)))
-        p.drawText(QRectF(rect.left() + PAD, rect.top(), rect.width() - 2 * PAD, STRIP_H),
+        p.drawText(QRectF(rect.left() + PAD, rect.top(),
+                          rect.width() - 2 * PAD - CLOSE_W, STRIP_H),
                    Qt.AlignmentFlag.AlignVCenter,
                    p.fontMetrics().elidedText(blade.title, Qt.TextElideMode.ElideRight,
                                               int(rect.width() - 2 * PAD - 60)))
         if blade.code:
             p.setFont(mono_font(9))
             p.setPen(QPen(QColor(C.TEXT_DIM)))
-            p.drawText(QRectF(rect.left(), rect.top(), rect.width() - PAD, STRIP_H),
+            p.drawText(QRectF(rect.left(), rect.top(),
+                              rect.width() - PAD - CLOSE_W, STRIP_H),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                        blade.code)
+        self._draw_close(p, top, height)
 
         # The body, clipped to what the card is actually showing.
         if self._anim > 0.02 and blade.text:
@@ -414,23 +526,26 @@ class BladeStack(QWidget):
     # ── the mouse ───────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
-        """Clicking a folded card opens it."""
-        pos = event.position().y()
-        y = 0.0
-        for index, blade in enumerate(self._blades):
-            height = STRIP_H if index != self._active else STRIP_H + PAD
-            if y <= pos <= y + height:
-                if index != self._active:
-                    self._active = index
-                    self._anim = 0.0
-                    self._anim_target = 1.0
-                    self._lines_cache.clear()
-                    self._timer.start(16)
-                    self._ensure_visible()
-                    self.update()
-                return
-            y += height + GAP
-        super().mousePressEvent(event)
+        """The cross throws the card away; the card itself opens."""
+        pos = event.position()
+        index, on_cross = self._card_at(pos.x(), pos.y())
+        if index < 0:
+            super().mousePressEvent(event)
+            return
+        if on_cross:
+            self.remove_blade(index)
+            return
+        if index != self._active:
+            self._shown = True
+            self._active = index
+            self._anim = 0.0
+            self._anim_target = 1.0
+            self._lines_cache.clear()
+            self._timer.start(16)
+            self._ensure_visible()
+            self.show()
+            self.raise_()
+            self.update()
 
     def sizeHint(self) -> QSize:
         return QSize(self._deck_width(), 320)

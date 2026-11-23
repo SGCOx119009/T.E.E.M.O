@@ -285,9 +285,14 @@ def test_the_letters_of_the_deck_do_not_eat_what_is_being_written(window):
     assert deck.active == before, "con el mazo cerrado, las teclas no hacen nada"
 
 
-def test_the_deck_button_is_in_the_header(window):
-    assert window._deck_btn is not None
-    assert window._deck_btn.text() == "" or window._deck_btn.text()
+def test_the_header_has_one_door_and_no_ghost_buttons(window):
+    """The header had three buttons: two that opened the same drawer, and a
+    third that opened a column of cards that was already on the screen."""
+    assert getattr(window, "_deck_btn", None) is None, (
+        "the deck button is still in the header; the deck lives in the "
+        "right column and in the quick access")
+    assert window._ctrl_btn is window._drawer_btn, (
+        "there are two buttons for the same drawer again")
 
 
 # ── the panel that stays on top ────────────────────────────────────────────
