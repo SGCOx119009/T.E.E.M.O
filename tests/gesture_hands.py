@@ -114,6 +114,23 @@ class FakeDriver:
         self.calls.append(("tap", int(vk), bool(alt)))
         return True
 
+    # LAS COMBINACIONES QUE UN RATÓN NO PUEDE HACER.
+    #
+    # The gestures that touch the desktop — switching windows, maximising,
+    # minimising and the screenshot — are not the mouse: they are the
+    # keyboard, and they have to be written down here as well.
+    def alt_tab(self):
+        self.calls.append(("alt_tab",))
+        return True
+
+    def win_tap(self, vk):
+        self.calls.append(("win_tap", int(vk)))
+        return True
+
+    def screenshot(self):
+        self.calls.append(("screenshot",))
+        return True
+
     # LA POSICION REAL DEL CURSOR. El servo la lee para saber si el
     # raton de verdad se ha movido por su cuenta.
     def cursor_pos(self):

@@ -120,6 +120,7 @@ from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
+from core.gesture_spec import GestureSpec
 from gui import fx
 from gui.style import px_font
 from gui.theme import C
@@ -659,6 +660,13 @@ class PointerDriver:
     _VK_CONTROL = 0x11
     _VK_MENU = 0x12
     _VK_LEFT, _VK_RIGHT = 0x25, 0x27
+    _VK_UP, _VK_DOWN = 0x26, 0x28
+    # THE WINDOWS KEY AND THE TAB.
+    #
+    # These two are the combinations that a hand cannot do with a mouse:
+    # the windows of Windows, and the maximise and the minimise.
+    _VK_WIN = 0x5B
+    _VK_TAB = 0x09
     # THE MIDDLE BUTTON IS NOT A KEY, BUT IT IS USED AS A MARKER.
     #
     # It is the button under the wheel of a real mouse, and it is the one
@@ -874,6 +882,66 @@ class PointerDriver:
         except Exception:
             return False
 
+    # ── the combinations that a mouse cannot do ────────────────────────────
+
+    def alt_tab(self) -> bool:
+        """The windows of Windows, one after the other.
+
+        Alt and the tab together, the way every keyboard has done it for
+        forty years. The tab is pressed and let go between the two
+        presses of the alt, so the system sees one combination and not
+        two.
+        """
+        if self._user32 is None:
+            return False
+        try:
+            self._user32.keybd_event(self._VK_MENU, 0, 0, 0)
+            time.sleep(0.05)
+            self._user32.keybd_event(self._VK_TAB, 0, 0, 0)
+            time.sleep(0.04)
+            self._user32.keybd_event(self._VK_TAB, 0, 2, 0)
+            time.sleep(0.04)
+            self._user32.keybd_event(self._VK_MENU, 0, 2, 0)
+            return True
+        except Exception:
+            return False
+
+    def win_tap(self, vk: int) -> bool:
+        """The Windows key with an arrow: maximise, minimise, restore."""
+        if self._user32 is None:
+            return False
+        try:
+            self._user32.keybd_event(self._VK_WIN, 0, 0, 0)
+            time.sleep(0.04)
+            self._user32.keybd_event(int(vk), 0, 0, 0)
+            time.sleep(0.04)
+            self._user32.keybd_event(int(vk), 0, 2, 0)
+            time.sleep(0.04)
+            self._user32.keybd_event(self._VK_WIN, 0, 2, 0)
+            return True
+        except Exception:
+            return False
+
+    def screenshot(self) -> bool:
+        """The snipping tool: the Windows key, the shift and the S."""
+        if self._user32 is None:
+            return False
+        try:
+            self._user32.keybd_event(self._VK_WIN, 0, 0, 0)
+            time.sleep(0.03)
+            self._user32.keybd_event(self._VK_SHIFT, 0, 0, 0)
+            time.sleep(0.03)
+            self._user32.keybd_event(0x53, 0, 0, 0)
+            time.sleep(0.03)
+            self._user32.keybd_event(0x53, 0, 2, 0)
+            time.sleep(0.03)
+            self._user32.keybd_event(self._VK_SHIFT, 0, 2, 0)
+            time.sleep(0.03)
+            self._user32.keybd_event(self._VK_WIN, 0, 2, 0)
+            return True
+        except Exception:
+            return False
+
     def tap(self, vk: int, alt: bool = False) -> bool:
         """Press a key and let it go, with Alt held down while it does.
 
@@ -907,6 +975,15 @@ class GestureService(QObject):
     hands_sig = pyqtSignal(object)          # list[Hand]
     state_sig = pyqtSignal(str)             # a sentence for the log
     gesture_sig = pyqtSignal(str, str)      # (pose, action) for the viewer
+    # WHAT THE HAND SAYS THAT IS NOT ABOUT THE MOUSE.
+    #
+    # These four cross to the Qt thread, because they touch the interface
+    # and the voice of the assistant, and neither may be touched from the
+    # thread that reads the camera.
+    confirm_sig = pyqtSignal(bool)          # True approves, False rejects
+    interrupt_sig = pyqtSignal()            # stop the assistant mid-speech
+    wake_sig = pyqtSignal()                 # wake T.E.E.M.O. up
+    sleep_sig = pyqtSignal()                # sleep, and lock the HUD
 
     # ── the vocabulary, in numbers ───────────────────────────────────────────
     #
@@ -957,6 +1034,20 @@ class GestureService(QObject):
     # THE SCREEN IS MEASURED EVERY SO OFTEN, NOT EVERY PICTURE.
     _SCREEN_EVERY = 1.0
 
+    # THE GESTURES THAT ARE ARMED ONLY IN THE ADVANCED MODE.
+    #
+    # These touch the desktop of the user: they change the window, they
+    # take a screenshot, they approve a thing that is waiting for an
+    # answer. A gesture that is armed by accident is a gesture that
+    # closes a window that was not meant to be closed — so these stay
+    # off until the user asks for them, with the switch of the drawer.
+    _ADVANCED = frozenset({
+        "fist_confirm", "thumb_up_approve", "thumb_down_reject",
+        "three_switch", "palm_maximize", "palm_minimize", "l_dictation",
+        "frame_screenshot", "two_pinch_area", "two_pinch_zoom",
+        "palm_clap_sleep",
+    })
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._thread: threading.Thread | None = None
@@ -969,6 +1060,32 @@ class GestureService(QObject):
         self._drive_pointer = False
         self._last_click_end = 0.0
         self._pointer_down = False
+        # THE RECOGNISER OF THE WHOLE VOCABULARY.
+        #
+        # The mouse is decided by the measured implementation of this
+        # file, because the button has to be HELD DOWN while the fingers
+        # are closed, and a recogniser that only says what it saw cannot
+        # hold anything down. The rest of the vocabulary — the clutch of
+        # the open palm, the fist that confirms, the thumb that approves,
+        # the swipes of the palm, the L and the gestures of two hands —
+        # is decided by `core/gesture_spec.py`, which has the whole
+        # specification written down and three checks for every gesture
+        # of it.
+        self._spec = GestureSpec()
+        # THE ADVANCED MODE: the gestures that touch the desktop.
+        self._advanced = False
+        # THE CLUTCH: the open palm freezes the cursor where it is, so
+        # that the arm can be moved without moving the mouse.
+        self._clutched = False
+        # THE TWO-HANDED GESTURES ARE IN THE MIDDLE OF SOMETHING.
+        self._two_active = False
+        self._area_anchor: tuple[int, int] | None = None
+        self._area_last: tuple[int, int] | None = None
+        self._zoom_spread = None
+        # THE WHEEL OR THE ZOOM: WHERE THE GESTURE STARTED, AND WHICH OF
+        # THE TWO THE HAND IS DOING.
+        self._rueda_anchor = None
+        self._rueda_modo = ""
         # THE STATE OF THE HAND AS A POINTER.
         self._press_at = (0, 0)
         self._press_time = 0.0
@@ -1111,6 +1228,168 @@ class GestureService(QObject):
         else:
             self._servo.stop()
             self._target = None
+
+    # -- the advanced mode ---------------------------------------------------
+
+    @property
+    def advanced(self) -> bool:
+        """Whether the gestures that touch the desktop are armed."""
+        return self._advanced
+
+    def set_advanced(self, on: bool) -> None:
+        """Arm the gestures that change the desktop, or disarm them.
+
+        THE SWITCH IS OFF BY DEFAULT, and it stays off until the user
+        turns it on: a palm that is pushed up while the hand is resting
+        should not maximise a window that the user was reading.
+        """
+        self._advanced = bool(on)
+        if not self._advanced:
+            # DISARMING LETS GO OF EVERYTHING THAT WAS STILL HELD.
+            self._clutched = False
+            self._two_active = False
+            if self._area_anchor is not None:
+                self._area_anchor = None
+                self._driver.release()
+            self._zoom_spread = None
+
+    # -- what the hand says --------------------------------------------------
+
+    def _procesa(self, hands: list[Hand], now: float | None = None) -> None:
+        """Read the hands, say what they are doing, and do it.
+
+        THE RECOGNISER IS FED ON EVERY PICTURE, whether the hand is
+        driving the pointer or not: the fist that confirms and the thumb
+        that approves are useful even when the mouse is left alone.
+        """
+        if now is None:
+            now = time.time()
+        eventos = self._spec.feed(hands or [], now)
+        if eventos:
+            self._ejecuta(eventos, hands or [])
+        # THE CLUTCH ENDS WHEN THE PALM IS NOT A PALM ANY MORE.
+        if self._clutched:
+            abierta = any(str(getattr(h, "pose", "")) == "open" for h in (hands or []))
+            if not abierta:
+                self._clutched = False
+        if self._drive_pointer and hands:
+            self._steer(hands, now)
+
+    def _ejecuta(self, eventos, hands: list[Hand]) -> None:
+        """Do what the hand said."""
+        for evento in eventos:
+            nombre = str(evento.name)
+            if nombre in self._ADVANCED and not self._advanced:
+                # IT IS NOT ARMED. The gesture is not even said out loud:
+                # a gesture that is not armed must not be seen, or the
+                # user would think it had failed.
+                continue
+            if nombre == "open_clutch":
+                # LA PALMA QUIETA: EL EMBRAGUE.
+                #
+                # The cursor freezes where it is, so the arm can be moved
+                # without moving the mouse — and T.E.E.M.O. goes quiet,
+                # because a hand that is resting is a hand that is not
+                # asking for anything.
+                self._clutched = True
+                self.interrupt_sig.emit()
+                self._set_gesture("open", "clutch")
+            elif nombre == "fist_confirm":
+                self.confirm_sig.emit(True)
+                self._set_gesture("fist", "confirm")
+            elif nombre == "thumb_up_approve":
+                self.confirm_sig.emit(True)
+                self._set_gesture("thumb_up", "approve")
+            elif nombre == "thumb_down_reject":
+                self.confirm_sig.emit(False)
+                self._set_gesture("thumb_down", "reject")
+            elif nombre == "three_switch":
+                self._driver.alt_tab()
+                self._set_gesture("three", "switch window")
+            elif nombre == "palm_maximize":
+                self._driver.win_tap(PointerDriver._VK_UP)
+                self._set_gesture("open", "maximize")
+            elif nombre == "palm_minimize":
+                self._driver.win_tap(PointerDriver._VK_DOWN)
+                self._set_gesture("open", "minimize")
+            elif nombre == "l_dictation":
+                self.wake_sig.emit()
+                self._set_gesture("l", "dictation")
+            elif nombre == "frame_screenshot":
+                self._driver.screenshot()
+                self._set_gesture("two", "screenshot")
+            elif nombre == "two_pinch_area":
+                self._area(hands, evento)
+            elif nombre == "two_pinch_zoom":
+                self._zoom_dos(evento)
+            elif nombre == "two_pinch_end":
+                self._area_fin()
+                self._zoom_spread = None
+                self._two_active = False
+            elif nombre == "palm_clap_sleep":
+                self.sleep_sig.emit()
+                self._set_gesture("open", "sleep")
+
+    def _area(self, hands: list[Hand], evento) -> None:
+        """THE SELECTION OF AN AREA: one hand holds still, the other moves.
+
+        The still hand is the corner, and the moving hand is the other
+        corner: the mouse goes down at the first one and is carried to
+        the second one, and it comes up when the hands let go.
+
+        THE CENTRE OF THE PALM IS WHAT IS COMPARED, because that is what
+        the recogniser measured: the ninth point, the knuckle of the
+        middle finger. Comparing the ancla with any other point of the
+        hand would be comparing two different things.
+        """
+        self._two_active = True
+        datos = evento.data or {}
+        ancla = datos.get("anchor")
+        quieta = None
+        movida = None
+        for mano in hands:
+            puntos = getattr(mano, "points", None) or []
+            if len(puntos) < 10:
+                continue
+            centro = (float(puntos[9][0]), float(puntos[9][1]))
+            if (ancla is not None
+                    and abs(centro[0] - ancla[0]) < 1e-6
+                    and abs(centro[1] - ancla[1]) < 1e-6):
+                quieta = centro
+            else:
+                movida = centro
+        if quieta is None or movida is None:
+            return
+        if self._area_anchor is None:
+            self._area_anchor = (self._map_x(quieta[0]), self._map_y(quieta[1]))
+            self._area_last = self._area_anchor
+            self._driver.press()
+            return
+        punto = (self._map_x(movida[0]), self._map_y(movida[1]))
+        if punto != self._area_last:
+            self._area_last = punto
+            self._driver.move(punto[0], punto[1])
+
+    def _area_fin(self) -> None:
+        """The selection is over: the button comes up."""
+        if self._area_anchor is not None:
+            self._area_anchor = None
+            self._area_last = None
+            self._driver.release()
+
+    def _zoom_dos(self, evento) -> None:
+        """THE ZOOM OF TWO HANDS: how far apart they are."""
+        self._two_active = True
+        separacion = float((evento.data or {}).get("spread", 0.0) or 0.0)
+        if self._zoom_spread is None:
+            self._zoom_spread = separacion
+            return
+        antes = self._zoom_spread
+        self._zoom_spread = separacion
+        if abs(separacion - antes) < 0.01:
+            return
+        self._driver.zoom(1 if separacion > antes else -1)
+        self._set_gesture("two", "zoom in" if separacion > antes else "zoom out")
 
     def start(self) -> str:
         """Start watching. Returns a sentence saying what happened."""
@@ -1278,8 +1557,9 @@ class GestureService(QObject):
                 with self._lock:
                     self._hands = hands
                 self.hands_sig.emit(hands)
-                if self._drive_pointer and hands:
-                    self._steer(hands)
+                # THE HAND IS READ, AND WHAT IT SAYS IS DONE — WHETHER IT
+                # IS DRIVING THE POINTER OR NOT.
+                self._procesa(hands)
         finally:
             # THE TRACKER IS ALWAYS CLOSED, AND NEVER UNDER A PICTURE.
             #
@@ -1374,7 +1654,7 @@ class GestureService(QObject):
         if self._pointer_at:
             self._smoother.reset()
 
-    def _steer(self, hands: list[Hand]) -> None:
+    def _steer(self, hands: list[Hand], now: float | None = None) -> None:
         """Move the pointer to the aimed point, and do what the hand says.
 
         ONE HAND IS ENOUGH FOR THE WHOLE MOUSE.
@@ -1409,7 +1689,7 @@ class GestureService(QObject):
             self._rest()
             return
 
-        now = time.time()
+        now = time.time() if now is None else float(now)
 
         # ── WHICH HAND THE POINTER FOLLOWS ────────────────────────────────
         #
@@ -1463,6 +1743,13 @@ class GestureService(QObject):
         if len(pinched) >= 2:
             self._release_pointer()
             self._set_modifiers(set())
+            if self._advanced:
+                # IN THE ADVANCED MODE THE TWO HANDS BELONG TO THE
+                # SPECIFICATION: the area, the zoom, and nothing else.
+                # The mouse is left alone, because a click that happens
+                # at the same time as a zoom is a click in the wrong
+                # place.
+                return
             self._zoom_pair(pinched[:2])
             return
 
@@ -1495,24 +1782,29 @@ class GestureService(QObject):
             self._set_gesture("fist", "rest")
             return
 
-        # TWO FINGERS ARE THE WHEEL.
-        if pose == "two":
-            self._release_pointer()
-            self._scroll(hand, now)
-            self._set_gesture("two", "scroll")
-            return
-
-        # THREE FINGERS ARE THE ZOOM.
+        # THE INDEX AND THE MIDDLE: THE WHEEL OR THE ZOOM.
         #
-        # It used to be two hands pinching and moving apart. With one
-        # hand it is the index and the middle of one hand moving apart,
-        # which is the same gesture done with one hand — and the zoom
-        # is still the ctrl and the wheel that every program means by
-        # zooming.
-        if pose == "three":
+        # THE RING FINGER DOES NOT DECIDE, AND THAT IS A MEASUREMENT.
+        #
+        # In the live session of the real hand, a two-finger scroll was
+        # read as THREE fingers seventy-two times out of a hundred: the
+        # ring rests half out on a relaxed hand, and the machine was
+        # counting fingers. The scroll became a zoom, and the zoom
+        # became nothing at all.
+        #
+        # What DOES tell them apart is the index and the middle: the
+        # wheel is those two travelling together with the hand, and the
+        # zoom is those two getting further apart from each other.
+        fingers = getattr(hand, "fingers", None) or {}
+        if (fingers.get("index") and fingers.get("middle")
+                and not (fingers.get("ring") and fingers.get("pinky"))):
             self._release_pointer()
-            self._zoom(hand)
+            self._rueda_o_zoom(hand, now)
             return
+        # THE HAND IS NOT IN THE WHEEL OR THE ZOOM: THE NEXT ONE STARTS
+        # FROM SCRATCH.
+        self._rueda_anchor = None
+        self._rueda_modo = ""
 
         # AN OPEN PALM IS A SWEEP.
         if pose == "open":
@@ -1590,6 +1882,13 @@ class GestureService(QObject):
         """
         target = self._target
         if target is None:
+            return
+        # THE CLUTCH: THE CURSOR STAYS WHERE IT IS.
+        #
+        # The open palm is the brake: the hand can be moved, lowered, or
+        # rested on the table without the cursor going anywhere, which is
+        # what stops the arm from getting tired.
+        if self._clutched:
             return
         now = time.monotonic()
         # THE MOUSE OF THE USER, IF HE MOVED IT.
@@ -1849,6 +2148,64 @@ class GestureService(QObject):
         self._scroll_side_acc = 0.0
         self._pinch_latched = False
         self._smoother.reset()
+
+    # HOW FAR THE HAND HAS TO GO, IN PIXELS, TO BE A WHEEL OR A ZOOM.
+    #
+    # Twenty-five pixels is a movement that a hand makes on purpose and
+    # that a hand at rest never makes. It is measured from where the
+    # gesture started, not from the last picture, so a slow scroll
+    # accumulates and a trembling hand does not.
+    _RUEDA_PX = 25
+
+    def _rueda_o_zoom(self, hand: Hand, now: float) -> None:
+        """The wheel or the zoom: the index and the middle, and what they do.
+
+        THE WHEEL is the two fingers travelling with the hand.
+        THE ZOOM is the two fingers getting further apart from each other.
+
+        Whichever of the two the hand starts is the one it is doing, and
+        it stays that one until the hand leaves the position: a scroll
+        that turns into a zoom halfway is neither of them.
+        """
+        try:
+            a = hand.points[INDEX_TIP]
+            b = hand.points[12]
+            mid_x = (hand.points[8][0] + hand.points[12][0]) / 2.0
+            mid_y = (hand.points[8][1] + hand.points[12][1]) / 2.0
+        except Exception:
+            return
+        distancia = math.hypot((a[0] - b[0]) * self._screen_w,
+                               (a[1] - b[1]) * self._screen_h)
+        # THE MOVEMENT IS MEASURED ON THE PALM, NOT ON THE FINGERTIPS.
+        #
+        # Separating the fingers moves the middle of the fingertips too,
+        # so a zoom looked like a scroll: the hand had "moved" thirty
+        # pixels when all that had happened is that the two fingers had
+        # come apart. The palm does not move when the fingers spread,
+        # and that is the difference between the wheel and the zoom.
+        px, py = self._map_x(hand.aim_x), self._map_y(hand.aim_y)
+        if self._rueda_anchor is None:
+            self._rueda_anchor = (distancia, mid_x, mid_y, px, py, now)
+            self._rueda_modo = ""
+            return
+        d0, mx0, my0, px0, py0, t0 = self._rueda_anchor
+        if self._rueda_modo == "":
+            if math.hypot(px - px0, py - py0) > self._RUEDA_PX:
+                # LA MANO SE MUEVE: LA RUEDA.
+                self._rueda_modo = "rueda"
+                self._scroll_anchor = (mx0, my0, t0)
+            elif abs(distancia - d0) > self._RUEDA_PX:
+                # LOS DEDOS SE SEPARAN: EL ZOOM.
+                self._rueda_modo = "zoom"
+                self._zoom_anchor = (d0, t0)
+            else:
+                return
+        self._rueda_anchor = (distancia, mid_x, mid_y, px, py, now)
+        if self._rueda_modo == "rueda":
+            self._scroll(hand, now)
+            self._set_gesture("two", "scroll")
+        else:
+            self._zoom(hand)
 
     def _scroll(self, hand: Hand, now: float) -> None:
         """The wheel, under the two fingers.

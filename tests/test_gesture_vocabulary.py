@@ -165,6 +165,31 @@ def test_a_wheel_that_moves_a_little_does_not_turn(service):
         "the wheel turned with a movement too small to be a notch")
 
 
+def test_a_scroll_with_the_ring_finger_out_is_a_scroll_and_not_a_zoom(service):
+    """EL ANULAR MEDIO FUERO NO CONVIERTE LA RUEDA EN UN ZOOM.
+
+    THIS IS WHAT THE LIVE SESSION FOUND. On a real hand the ring finger
+    rests half out, and the machine read THREE fingers where the user
+    meant two: the scroll came out as a zoom. What tells them apart is
+    not the number of fingers but what they are doing — the wheel is the
+    palm travelling, and the zoom is the two fingers coming apart.
+    """
+    _steer(service, [mano("three", spread=0.0)], at=1000.0)
+    _steer(service, [mano("three", spread=0.0, dy=-0.15)], at=1000.2)
+    kinds = service._fake.kinds()
+    assert "scroll" in kinds, "the two-finger scroll was read as a zoom"
+    assert "zoom" not in kinds, "the scroll was read as a zoom"
+
+
+def test_a_hand_that_does_not_move_but_spreads_its_fingers_is_a_zoom(service):
+    """LA MANO QUIETA Y LOS DEDOS QUE SE SEPARAN: EL ZOOM."""
+    _steer(service, [mano("three", spread=0.0)], at=1000.0)
+    _steer(service, [mano("three", spread=0.06)], at=1000.2)
+    kinds = service._fake.kinds()
+    assert "zoom" in kinds, "the fingers came apart and nothing zoomed"
+    assert "scroll" not in kinds, "the zoom was read as a scroll"
+
+
 # ── the zoom ───────────────────────────────────────────────────────────────
 
 def test_three_fingers_moving_apart_zoom_in(service):

@@ -34,7 +34,7 @@ THE FINGERS
 """
 from __future__ import annotations
 
-__all__ = ["CANONICAL", "POSES", "hand_points", "mirrored_points"]
+__all__ = ["CANONICAL", "POSES", "hand_points", "mirrored_points", "placed"]
 
 # THE CANONICAL HAND, the right one, in the normalised space of the
 # picture: x to the right, y downwards, the wrist at the bottom.
@@ -72,7 +72,8 @@ _FINGERS = (
 )
 
 # THE POSES THE VOCABULARY KNOWS.
-POSES = ("open", "pinch", "fist", "point", "two", "three")
+POSES = ("open", "pinch", "fist", "point", "two", "three",
+         "thumb_up", "thumb_down", "l_shape")
 
 # WHICH FINGERS ARE OUT IN EACH POSE.
 _OUT = {
@@ -82,6 +83,12 @@ _OUT = {
     "point": (True, False, False, False),
     "two": (True, True, False, False),
     "three": (True, True, True, False),
+    # THE THUMB IS A POSE ON ITS OWN: the four fingers are folded and
+    # the thumb is the only thing that says something.
+    "thumb_up": (False, False, False, False),
+    "thumb_down": (False, False, False, False),
+    # THE L: the index up and the thumb sideways.
+    "l_shape": (True, False, False, False),
 }
 
 # THE TIP OF A FINGER THAT IS HALF-CURVED: the shape a hand has while it
@@ -153,6 +160,44 @@ def hand_points(pose: str = "open",
         points[4] = (0.300, 0.575)
         return points
 
+    if pose == "thumb_up":
+        # THE THUMB ALONE, POINTING UP.
+        #
+        # The four fingers are folded — including the index, which the
+        # loop above skips because the index is dealt with by the poses
+        # that need it — and the thumb is raised: its tip is high above
+        # the knuckles and the chain of the thumb is long enough to be
+        # read as a pointing thumb and not as the thumb of a resting hand.
+        for index, (mcp, pip, dip, tip) in enumerate(_FINGERS):
+            points[dip] = _folded_tip(points[pip], _FOLDED * 0.55)
+            points[tip] = _folded_tip(points[pip], _FOLDED)
+        points[2] = (0.46, 0.68)
+        points[3] = (0.44, 0.56)
+        points[4] = (0.42, 0.44)
+        return points
+
+    if pose == "thumb_down":
+        # THE THUMB ALONE, POINTING DOWN: the tip is BELOW the knuckles
+        # and below the palm, which is what says "down" and not "up".
+        for index, (mcp, pip, dip, tip) in enumerate(_FINGERS):
+            points[dip] = _folded_tip(points[pip], _FOLDED * 0.55)
+            points[tip] = _folded_tip(points[pip], _FOLDED)
+        points[2] = (0.44, 0.66)
+        points[3] = (0.43, 0.76)
+        points[4] = (0.42, 0.86)
+        return points
+
+    if pose == "l_shape":
+        # THE L: THE INDEX UP AND THE THUMB SIDEWAYS.
+        #
+        # The two of them are perpendicular, which is what makes it an L
+        # and not a pointing finger: the angle between the chain of the
+        # index and the chain of the thumb is a right angle.
+        points[2] = (0.40, 0.70)
+        points[3] = (0.31, 0.66)
+        points[4] = (0.22, 0.66)
+        return points
+
     if spread:
         # THE MIDDLE FINGER WALKS AWAY FROM THE INDEX: the zoom, without
         # moving the hand itself. Only the chain of the middle finger
@@ -166,3 +211,39 @@ def hand_points(pose: str = "open",
 def mirrored_points(points) -> list[tuple[float, float]]:
     """The same hand, seen in a mirror."""
     return [(1.0 - x, y) for x, y in points]
+
+
+def placed(points,
+           dx: float = 0.0,
+           dy: float = 0.0,
+           scale: float = 1.0,
+           origin: tuple[float, float] | None = None,
+           ) -> list[tuple[float, float]]:
+    """The same hand, somewhere else, and bigger or smaller.
+
+    WHY THE SIZE IS A PARAMETER AND NOT A LUCKY ACCIDENT
+
+        A hand that is twice as far from the camera is half as big in the
+        picture, and every distance measured in pixels changes with it. A
+        vocabulary that measures in pixels therefore breaks when the user
+        moves their arm: the same pinch stops being a pinch.
+
+        So the numbers of the vocabulary are ratios — the gap of the pinch
+        divided by the size of the palm — and this function is how a test
+        says "the same gesture, from twice as far away". The hand grows
+        about its own wrist, and every measurement made of it must come
+        out the same.
+
+        The same function places the second hand of the two-handed
+        gestures: one hand here, the other there.
+    """
+    pts = [tuple(p) for p in points]
+    if not pts:
+        return pts
+    ox, oy = origin if origin is not None else pts[0]
+    out: list[tuple[float, float]] = []
+    for x, y in pts:
+        nx = ox + (float(x) - ox) * float(scale) + float(dx)
+        ny = oy + (float(y) - oy) * float(scale) + float(dy)
+        out.append((nx, ny))
+    return out

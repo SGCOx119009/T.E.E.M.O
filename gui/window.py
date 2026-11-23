@@ -271,6 +271,16 @@ class MainWindow(QMainWindow):
         self._gesture.hands_sig.connect(self._gesture_overlay.set_hands)
         self._gesture.state_sig.connect(self._log_sig.emit)
         self._gesture.gesture_sig.connect(self._on_gesture)
+        # WHAT THE HAND SAYS THAT IS NOT ABOUT THE MOUSE.
+        #
+        # These four arrive on the Qt thread, because they touch the
+        # interface and the voice of the assistant: the answer to a
+        # question, the silence of the barge-in, the wake-up and the
+        # sleep of the HUD.
+        self._gesture.confirm_sig.connect(self._on_gesture_confirm)
+        self._gesture.interrupt_sig.connect(self._do_interrupt)
+        self._gesture.wake_sig.connect(self._on_gesture_wake)
+        self._gesture.sleep_sig.connect(self._on_gesture_sleep)
         self._content_panel = self._build_content_panel()
         self._quiz_panel = self._build_quiz_panel()
         self._viewer_panel = self._build_viewer_panel()
@@ -2747,6 +2757,17 @@ class MainWindow(QMainWindow):
         self._gesture_pointer_btn.setToolTip(_t("controls.gesture_pointer_tip"))
         self._gesture_pointer_btn.clicked.connect(self._toggle_gesture_pointer)
 
+        # THE GESTURES THAT TOUCH THE DESKTOP.
+        #
+        # These change the window, take a screenshot and answer what is
+        # waiting on screen, so they are OFF until the user says so: a
+        # palm that is pushed up while the hand is resting should not
+        # maximise a window that the user was reading.
+        self._gesture_advanced_btn = _row(
+            hand, QPushButton(_t("controls.gesture_advanced")), self._BTN_DIM)
+        self._gesture_advanced_btn.setToolTip(_t("controls.gesture_advanced_tip"))
+        self._gesture_advanced_btn.clicked.connect(self._toggle_gesture_advanced)
+
         # THE LEGEND, because a gesture nobody can check is a guess.
         self._gesture_legend = QLabel(_t("gesture.legend"))
         self._gesture_legend.setFont(px_font(9))
@@ -4655,6 +4676,68 @@ class MainWindow(QMainWindow):
         if pointer is not None:
             pointer.setText(_t("controls.gesture_pointer")
                             + (" · ON" if service.drives_pointer else ""))
+        advanced = getattr(self, "_gesture_advanced_btn", None)
+        if advanced is not None:
+            advanced.setText(_t("controls.gesture_advanced")
+                             + (" · ON" if service.advanced else ""))
+
+    def _toggle_gesture_advanced(self):
+        """The gestures that change the desktop: armed, or disarmed.
+
+        THE SWITCH IS THE USER'S. It is off when the program starts, and
+        the button says which way it is, because a gesture that is armed
+        behind the user's back is a gesture that can close a window.
+        """
+        service = getattr(self, "_gesture", None)
+        if service is None:
+            return
+        service.set_advanced(not service.advanced)
+        self._log_sig.emit(
+            f"SYS: {_t('controls.gesture_advanced_on' if service.advanced
+                      else 'controls.gesture_advanced_off')}")
+        self._refresh_gesture_btn()
+
+    # ── what the hand says ────────────────────────────────────────────────
+
+    def _on_gesture_confirm(self, accepted: bool) -> None:
+        """The thumb, or the fist, has answered what was on screen.
+
+        WHEN SOMETHING IS WAITING FOR AN ANSWER, the gesture is the
+        answer. When nothing is waiting, the fist closes the drawer of
+        the controls, which is what a closed hand means everywhere else.
+        """
+        from core import confirm as confirm_gate
+
+        if confirm_gate.pending_title():
+            confirm_gate.resolve(bool(accepted))
+            self._log_sig.emit(
+                f"SYS: {_t('gesture.confirmed' if accepted else 'gesture.rejected')}")
+            return
+        if accepted:
+            self._close_controls()
+
+    def _on_gesture_wake(self) -> None:
+        """The L: wake T.E.E.M.O. up, or put it back to sleep."""
+        if self.on_wake_manual:
+            try:
+                self.on_wake_manual()
+            except Exception as exc:                   # noqa: BLE001
+                self._log_sig.emit(f"SYS: {type(exc).__name__}")
+            return
+        self._do_interrupt()
+
+    def _on_gesture_sleep(self) -> None:
+        """The clap: T.E.E.M.O. goes to sleep and the hands are let go.
+
+        The tracking is stopped, because a hand that is asleep should
+        not keep the camera open: the HUD is locked until the user asks
+        for the hands again.
+        """
+        service = getattr(self, "_gesture", None)
+        if service is not None and service.enabled:
+            service.stop()
+        self._log_sig.emit(f"SYS: {_t('gesture.asleep')}")
+        self._refresh_gesture_btn()
 
     def _refresh_language_combo(self):
         """Show the language that is actually stored."""
