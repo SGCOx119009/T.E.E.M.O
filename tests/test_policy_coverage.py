@@ -71,13 +71,22 @@ PLUGIN_TOOLS = ("calendar_control", "gmail_control", "spotify_control")
 
 
 def catalog() -> list[tuple[str, str, str]]:
-    """Every (tool, action, class) the fine table declares."""
+    """Every (tool, action, class) the fine table declares.
+
+    The empty action is the class of the REST of the tool. When the table
+    also names the actions one by one, the empty action adds nothing new
+    and is not a row of its own: the rows are the actions.
+    """
     rows: list[tuple[str, str, str]] = []
     for tool, table in policy._ACTION_CLASS.items():
+        others = [action for action in table if action]
         for action, klass in table.items():
+            if action == "" and others:
+                continue
             rows.append((tool, action, klass))
     for tool, klass in policy._TOOL_DEFAULT.items():
-        rows.append((tool, "", klass))
+        if tool not in policy._ACTION_CLASS:
+            rows.append((tool, "", klass))
     return rows
 
 
@@ -318,6 +327,7 @@ class PolicyCoverageTests(unittest.TestCase):
                 self.assertTrue(
                     "confirm.request" in source
                     or "request_confirmation" in source
+                    or "ask_once" in source
                     or "_IRREVERSIBLE" in source,
                     f"{tool} is delegated to, and it has no gate of its own",
                 )
@@ -331,7 +341,7 @@ class PolicyCoverageTests(unittest.TestCase):
         # running with nobody seeing it.
         self.assertEqual(
             set(action_policy._HANDLER_OWN_GATE),
-            {"computer_settings", "meet_control"},
+            {"computer_settings", "meet_control", "game_updater"},
         )
 
     @staticmethod

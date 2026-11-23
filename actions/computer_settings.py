@@ -23,7 +23,7 @@ def _configure_pyautogui(module) -> None:
 pyautogui = LazyModule("pyautogui", _configure_pyautogui)
 pyperclip = LazyModule("pyperclip")
 
-from core import confirm, outcome
+from core import action_policy, confirm, outcome
 from core.undo import push_undo
 
 # Windows only. There is no OS switch here any more: T.E.E.M.O. is a
@@ -1334,9 +1334,9 @@ def computer_settings(
                 "there is already a confirmation waiting on screen - the user "
                 "has to answer that one first",
                 wanted=action)
-        return confirm.request(
-            key=action, title=title, detail=detail,
-            run=lambda f=func, a=action: _run_confirmed(f, a),
+        return action_policy.ask_once(
+            "computer_settings", action, title, detail,
+            lambda f=func, a=action: _run_confirmed(f, a),
         )
 
     if action in ("volume_set", "set_volume"):

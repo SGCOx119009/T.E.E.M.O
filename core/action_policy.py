@@ -23,14 +23,17 @@ _HANDLER_OWN_GATE: dict[str, set[str]] = {
     # The list is SHORT on purpose, and every entry in it is checked by
     # `tests/test_policy_coverage.py`: a delegation to a handler that does
     # NOT ask is a hole in the gate, and a hole is how "delete the file"
-    # ended up running with nobody seeing it. Only two handlers in this
+    # ended up running with nobody seeing it. Only three handlers in this
     # product have a gate of their own:
     #   * `computer_settings` — for the three it cannot take back (restart,
     #     shutdown, toggle_wifi), with a warning that says why;
     #   * `meet_control` — because the preview of a call is the recipient
-    #     and the message, and only the handler knows them.
+    #     and the message, and only the handler knows them;
+    #   * `game_updater` — because the preview is the game, the platform and
+    #     whether the machine will be shut down afterwards.
     "computer_settings": {"restart", "shutdown", "toggle_wifi"},
     "meet_control": {"create", "new"},
+    "game_updater": {"install", "update", "schedule"},
 }
 _SENSITIVE_NAME_RE = re.compile(
     r"(?:password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key|otp)",
@@ -197,7 +200,9 @@ def request_confirmation(
             action=action,
         )
     if voice_handler is None and (
-        _CONFIRMED_TOOL.get() == tool or _plan_authorizes(tool, arguments or {})
+        _CONFIRMED_TOOL.get() == tool
+        or _plan_authorizes(tool, arguments or {})
+        or _is_granted(tool, action)
     ):
         return run()
     if voice_handler is None:
@@ -240,6 +245,39 @@ def run_or_confirm(
 def is_confirmed(tool: str) -> bool:
     """Whether this dispatch is running inside its HUD-approved callback."""
     return _CONFIRMED_TOOL.get() == tool
+
+
+def _is_granted(tool: str, action: str = "") -> bool:
+    """Whether the user has already allowed this tool in the panel."""
+    try:
+        from core import policy as _policy
+        return bool(_policy.is_granted(tool, action))
+    except Exception:
+        return False
+
+
+def ask_once(
+    tool: str,
+    action: str,
+    title: str,
+    detail: str,
+    run: Callable[[], str],
+    arguments: dict | None = None,
+) -> str:
+    """Ask the user, unless the user has already said yes.
+
+    The handlers that know the preview better than the executor does — the
+    three that cannot be taken back, the call that shows the recipient and
+    the message, the game update that shows the game and the platform —
+    ask through here. So a concession granted in the permissions panel means
+    the same thing whoever asks: the user is not asked twice for the same
+    permission, in two different words.
+    """
+    if _CONFIRMED_TOOL.get() == tool or _is_granted(tool, action):
+        return run()
+    return confirm.request(
+        key=f"{tool}-{action}", title=title, detail=detail, run=run,
+    )
 
 
 def _request_signature(tool: str, arguments: dict) -> str:

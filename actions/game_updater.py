@@ -8,6 +8,8 @@ import threading
 from pathlib import Path
 from datetime import datetime
 
+from core import action_policy, confirm
+
 _CNW: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
 
 _KNOWN_APPIDS: dict[str, tuple[str, str]] = {
@@ -744,7 +746,93 @@ def _get_schedule_status() -> str:
     return "Game update is scheduled."
 
 
-def game_updater(parameters: dict, player=None, speak=None) -> str:
+def _game_updater_execute(action: str, platform: str, game_name, app_id,
+                          shutdown: bool, speak=None, player=None) -> str:
+    """The work itself: install or update, on the platforms that were asked for.
+
+    This is the ONLY part that touches the games. The gate in front of it
+    is what asks the user, and the gate is what makes this function safe
+    to reach: nothing arrives here without a human having seen what was
+    going to happen.
+    """
+    results = []
+    if platform in ("steam", "both"):
+        steam_path = _find_steam_path()
+        if not steam_path:
+            results.append("Steam: Not installed.")
+        else:
+            if game_name:
+                installed  = _get_steam_games(steam_path)
+                name_lower = game_name.lower()
+                is_installed = any(
+                    name_lower in g["name"].lower() for g in installed
+                )
+                if not is_installed:
+                    msg = _install_steam_game(
+                        steam_path, game_name=game_name, app_id=app_id
+                    )
+                    if shutdown:
+                        threading.Thread(
+                            target=_watch_and_shutdown,
+                            kwargs={"steam_path": steam_path, "speak": speak},
+                            daemon=True
+                        ).start()
+                        msg += " Auto-shutdown enabled."
+                    if player: player.write_log(f"[GameUpdater] {msg[:100]}")
+                    if speak:  speak(msg)
+                    return msg
+                else:
+                    results.append(
+                        f"Steam: {_update_steam_games(steam_path, game_name=game_name)}"
+                    )
+            else:
+                if action == "install":
+                    results.append("Steam: Please specify a game name to install.")
+                else:
+                    results.append(f"Steam: {_update_steam_games(steam_path)}")
+
+            if shutdown:
+                threading.Thread(
+                    target=_watch_and_shutdown,
+                    kwargs={"steam_path": steam_path, "speak": speak},
+                    daemon=True
+                ).start()
+                results.append("Auto-shutdown enabled.")
+
+    if platform in ("epic", "both"):
+        epic_exe = _find_epic_exe()
+        if epic_exe:
+            results.append(
+                f"Epic: {_update_epic_games(epic_exe, game_name=game_name)}"
+            )
+        else:
+            results.append("Epic: Not installed.")
+
+    output = " | ".join(results) or "Nothing to do."
+    if player: player.write_log(f"[GameUpdater] {output[:100]}")
+    if speak:  speak(output)
+    return output
+
+
+def _update_preview(action: str, platform: str, game_name, shutdown: bool) -> str:
+    """What the user is about to allow, in words.
+
+    The whole point of the banner is that it says what is going to happen
+    and not what the tool is called: a game, a platform, and whether the
+    machine will be shut down afterwards.
+    """
+    target = game_name or "every game"
+    lines = [
+        f"Game: {target}",
+        f"Platform: {platform}",
+        f"Action: {'install' if action == 'install' else 'update'}",
+        f"Shutdown after completion: {'yes' if shutdown else 'no'}",
+    ]
+    return "\n".join(lines)
+
+
+def game_updater(parameters: dict, player=None, speak=None,
+                 _scheduled: bool = False) -> str:
     p         = parameters or {}
     action    = p.get("action",    "update").lower().strip()
     platform  = p.get("platform",  "both").lower().strip()
@@ -756,7 +844,27 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
 
     results = []
 
-    if action == "schedule":        return _schedule_daily_update(hour=hour, minute=minute)
+    if action == "schedule":
+        # The bounds are checked BEFORE the banner: a schedule that cannot
+        # happen must not ask the user to approve it.
+        if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+            return (
+                "The time is out of range. The hour must be between 00:00 "
+                "and 23:59."
+            )
+        if not _scheduled:
+            detail = (
+                f"A daily game update will be scheduled at {hour:02d}:{minute:02d} "
+                f"daily.\nPlatform: {platform}\n"
+                f"Shutdown after completion: {'yes' if shutdown else 'no'}"
+            )
+            return action_policy.ask_once(
+                "game_updater", "schedule",
+                f"Schedule a daily game update at {hour:02d}:{minute:02d}?",
+                detail,
+                lambda: _schedule_daily_update(hour=hour, minute=minute),
+            )
+        return _schedule_daily_update(hour=hour, minute=minute)
     if action == "cancel_schedule": return _cancel_scheduled_update()
     if action == "schedule_status": return _get_schedule_status()
 
@@ -794,62 +902,25 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
         return " ".join(results)
 
     if action in ("install", "update"):
-        if platform in ("steam", "both"):
-            steam_path = _find_steam_path()
-            if not steam_path:
-                results.append("Steam: Not installed.")
-            else:
-                if game_name:
-                    installed  = _get_steam_games(steam_path)
-                    name_lower = game_name.lower()
-                    is_installed = any(
-                        name_lower in g["name"].lower() for g in installed
-                    )
-                    if not is_installed:
-                        msg = _install_steam_game(
-                            steam_path, game_name=game_name, app_id=app_id
-                        )
-                        if shutdown:
-                            threading.Thread(
-                                target=_watch_and_shutdown,
-                                kwargs={"steam_path": steam_path, "speak": speak},
-                                daemon=True
-                            ).start()
-                            msg += " Auto-shutdown enabled."
-                        if player: player.write_log(f"[GameUpdater] {msg[:100]}")
-                        if speak:  speak(msg)
-                        return msg
-                    else:
-                        results.append(
-                            f"Steam: {_update_steam_games(steam_path, game_name=game_name)}"
-                        )
-                else:
-                    if action == "install":
-                        results.append("Steam: Please specify a game name to install.")
-                    else:
-                        results.append(f"Steam: {_update_steam_games(steam_path)}")
-
-                if shutdown:
-                    threading.Thread(
-                        target=_watch_and_shutdown,
-                        kwargs={"steam_path": steam_path, "speak": speak},
-                        daemon=True
-                    ).start()
-                    results.append("Auto-shutdown enabled.")
-
-        if platform in ("epic", "both"):
-            epic_exe = _find_epic_exe()
-            if epic_exe:
-                results.append(
-                    f"Epic: {_update_epic_games(epic_exe, game_name=game_name)}"
-                )
-            else:
-                results.append("Epic: Not installed.")
-
-        output = " | ".join(results) or "Nothing to do."
-        if player: player.write_log(f"[GameUpdater] {output[:100]}")
-        if speak:  speak(output)
-        return output
+        if _scheduled:
+            # The scheduled run was approved when it was scheduled. Asking
+            # again at three in the morning, with nobody in front of the
+            # screen, would be a banner nobody can answer.
+            return _game_updater_execute(
+                action, platform, game_name, app_id, shutdown,
+                speak=speak, player=player,
+            )
+        detail = _update_preview(action, platform, game_name, shutdown)
+        return action_policy.ask_once(
+            "game_updater", action,
+            ("Install " if action == "install" else "Update ")
+            + (game_name or "every game") + "?",
+            detail,
+            lambda: _game_updater_execute(
+                action, platform, game_name, app_id, shutdown,
+                speak=speak, player=player,
+            ),
+        )
 
     return f"Unknown action: '{action}'."
 
@@ -857,7 +928,12 @@ def game_updater(parameters: dict, player=None, speak=None) -> str:
 if __name__ == "__main__":
     if "--scheduled" in sys.argv:
         print(f"[GameUpdater] 🕐 Scheduled run at {datetime.now().strftime('%H:%M')}")
-        result = game_updater({"action": "update", "platform": "both"})
+        # The user approved this run when they scheduled it. Asking again at
+        # three in the morning, with nobody in front of the screen, would be
+        # a banner nobody can answer.
+        result = game_updater(
+            {"action": "update", "platform": "both"}, _scheduled=True
+        )
         print(f"[GameUpdater] ✅ {result}")
 
 
