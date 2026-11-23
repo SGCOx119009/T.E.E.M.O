@@ -9,6 +9,8 @@ try:
 except ImportError:
     _SEND2TRASH = False
 
+from core import allowed_dirs as allowed_policy
+from core import outcome
 from core.undo import push_undo
 
 _OS = "Windows"
@@ -149,6 +151,29 @@ def _is_safe_path(target: Path) -> bool:
     except Exception:
         return False
 
+
+def _allowed_dir_failure(path: Path, kind: str) -> str | None:
+    """None when the path may be touched; otherwise an actionable refusal.
+
+    The user can narrow the assistant to a set of folders with "allowed_dirs"
+    in config/api_keys.json. When that is configured, a path that RESOLVES
+    outside those folders — through a junction, a symbolic link or a mount
+    point — is refused BEFORE anything is written, moved, copied or deleted.
+
+    With no "allowed_dirs" configured this returns None for every path: the
+    assistant works on the whole computer, exactly as it always has.
+    """
+    try:
+        allowed_policy.require_allowed(path, kind=kind)
+    except PermissionError as exc:
+        return outcome.failed(
+            "file_controller",
+            str(exc),
+            kind=kind,
+            path=str(path),
+        )
+    return None
+
 def _known_folder(registry_name: str, fallback: str) -> Path:
     """The real Windows folder, wherever the user moved it to.
 
@@ -279,6 +304,9 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
+        denied = _allowed_dir_failure(target, "target path")
+        if denied:
+            return denied
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -301,6 +329,9 @@ def create_folder(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
+        denied = _allowed_dir_failure(target, "target path")
+        if denied:
+            return denied
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         already = target.exists()
@@ -319,6 +350,9 @@ def delete_file(path: str, name: str = "") -> str:
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
+        denied = _allowed_dir_failure(target, "target path")
+        if denied:
+            return denied
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         if not target.exists():
@@ -355,6 +389,12 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
             return f"Source not found: {src.name}"
         if dst is None:
             return "No destination specified."
+        denied = _allowed_dir_failure(src, "source path")
+        if denied:
+            return denied
+        denied = _allowed_dir_failure(dst, "destination path")
+        if denied:
+            return denied
         if not _is_safe_path(src):
             return f"Access denied (source): {src}"
         if not _is_safe_path(dst):
@@ -384,6 +424,12 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
             return f"Source not found: {src.name}"
         if dst is None:
             return "No destination specified."
+        denied = _allowed_dir_failure(src, "source path")
+        if denied:
+            return denied
+        denied = _allowed_dir_failure(dst, "destination path")
+        if denied:
+            return denied
         if not _is_safe_path(src):
             return f"Access denied (source): {src}"
         if not _is_safe_path(dst):
@@ -421,6 +467,9 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
     try:
         base     = _resolve_path(path)
         target   = (base / name) if name else base
+        denied = _allowed_dir_failure(target, "target path")
+        if denied:
+            return denied
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         if not target.exists():
@@ -429,6 +478,9 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
             return "No new name provided."
 
         new_path = target.parent / new_name
+        denied = _allowed_dir_failure(new_path, "destination path")
+        if denied:
+            return denied
         if new_path.exists():
             return f"A file named '{new_name}' already exists here."
 
@@ -467,6 +519,9 @@ def write_file(path: str, name: str = "", content: str = "",
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
+        denied = _allowed_dir_failure(target, "target path")
+        if denied:
+            return denied
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -604,6 +659,9 @@ def organize_desktop() -> str:
     journal: list[tuple[Path, Path]] = []   # (where it was, where it went)
 
     try:
+        denied = _allowed_dir_failure(desktop, "desktop path")
+        if denied:
+            return denied
         for item in desktop.iterdir():
             # Leave folders, hidden files and organize-folders untouched
             if item.is_dir() or item.name.startswith("."):

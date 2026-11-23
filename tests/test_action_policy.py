@@ -4,7 +4,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from core import action_policy, confirm
+from core import action_policy, confirm, policy
 
 
 class ActionPolicyTests(unittest.TestCase):
@@ -22,18 +22,31 @@ class ActionPolicyTests(unittest.TestCase):
             confirm._pending = None
         confirm.bind(None, None)
 
-    def test_requires_confirmation_only_for_high_and_external_risks(self) -> None:
-        self.assertTrue(action_policy.requires_confirmation(
-            "file_controller", "write"
-        ))
+    def test_only_the_four_gated_classes_ask(self) -> None:
+        # The plan's table of classes, and the treatment of each one:
+        # READ, WRITE_LOCAL and REVERSIBLE_SYS are silent; EXTERNAL,
+        # IRREVERSIBLE, CREDENTIAL and PRIVACY go through the door.
+        #
+        # This is the change of the FASE 9: the coarse vocabulary of the
+        # audit called "write a file" and "delete a file" the same thing,
+        # and asked about both. The fine table tells them apart.
         self.assertTrue(action_policy.requires_confirmation(
             "send_message", "send"
+        ))
+        self.assertTrue(action_policy.requires_confirmation(
+            "file_controller", "delete"
+        ))
+        self.assertTrue(action_policy.requires_confirmation(
+            "camera", ""
         ))
         self.assertFalse(action_policy.requires_confirmation(
             "file_controller", "read"
         ))
         self.assertFalse(action_policy.requires_confirmation(
-            "computer_control", "unknown_action"
+            "file_controller", "write"
+        ))
+        self.assertFalse(action_policy.requires_confirmation(
+            "computer_settings", "volume_up"
         ))
 
     def test_gate_fails_closed_for_an_unclassified_action(self) -> None:
@@ -101,20 +114,28 @@ class ActionPolicyTests(unittest.TestCase):
 
         result = action_policy.request_confirmation(
             "file_controller",
-            "write",
-            "Write file?",
+            "delete",
+            "Delete file?",
             "Synthetic file contents",
             lambda: ran.set() or "written",
-            arguments={"action": "write"},
+            arguments={"action": "delete"},
         )
 
         self.assertIn("[CONFIRMATION_PENDING]", result)
-        self.assertEqual(self.prompts, [("Write file?", "Synthetic file contents")])
+        self.assertEqual(self.prompts, [("Delete file?", "Synthetic file contents")])
         self.assertFalse(ran.is_set())
 
         confirm.resolve(False)
 
         self.assertFalse(ran.wait(0.1))
+
+    def test_a_local_write_is_not_asked_about(self) -> None:
+        # WRITE_LOCAL is silent, recorded and undoable: the permission for
+        # it comes from the read-only mode and from the concessions, not
+        # from a banner on every keystroke.
+        self.assertFalse(action_policy.requires_confirmation(
+            "file_controller", "write", {"action": "write"}
+        ))
 
     def test_voice_confirmation_is_not_bypassed_by_authorized_task_plan(self) -> None:
         ran = threading.Event()
@@ -139,59 +160,66 @@ class ActionPolicyTests(unittest.TestCase):
         self.assertFalse(ran.wait(0.1))
 
     def test_confirmation_masks_secret_form_values(self) -> None:
-        result = action_policy.dispatch(
-            "task_planner",
-            {
-                "mode": "execute",
-                "task": "fill login form",
-                "steps": [
-                    {
-                        "tool": "browser_control",
-                        "arguments": {
-                            "action": "fill_form",
-                            "fields": {
-                                'input[name="email"]': "person@example.test",
-                                'input[name="password"]': "private-password",
-                                'input[name="credential"]': "private-credential",
-                            },
-                        },
-                        "purpose": "fill fields",
-                        "verification": {
+        # READ-ONLY OFF: this test is about the CONFIRMATION gate, and the
+        # permission gate is in front of it (the FASE 9 puts read-only first).
+        # What a secret looks like ON the banner is the other test file's job.
+        with patch.object(policy, "read_only_enabled", return_value=False):
+            result = action_policy.dispatch(
+                "task_planner",
+                {
+                    "mode": "execute",
+                    "task": "fill login form",
+                    "steps": [
+                        {
                             "tool": "browser_control",
-                            "arguments": {"action": "get_url"},
-                            "expect": "https://example.test",
-                        },
-                    }
-                ],
-            },
-            lambda: "not executed",
-        )
+                            "arguments": {
+                                "action": "fill_form",
+                                "fields": {
+                                    'input[name="email"]': "person@example.test",
+                                    'input[name="password"]': "private-password",
+                                    'input[name="credential"]': "private-credential",
+                                },
+                            },
+                            "purpose": "fill fields",
+                            "verification": {
+                                "tool": "browser_control",
+                                "arguments": {"action": "get_url"},
+                                "expect": "https://example.test",
+                            },
+                        }
+                    ],
+                },
+                lambda: "not executed",
+            )
 
         self.assertIn("[CONFIRMATION_PENDING]", result)
         detail = self.prompts[-1][1]
         self.assertIn("person@example.test", detail)
-        self.assertIn("[REDACTED]", detail)
+        # The secret is MASKED AND PRESENT: the user has to see that a
+        # credential is being sent, without the credential being readable.
+        self.assertIn("…", detail)
         self.assertNotIn("private-password", detail)
         self.assertNotIn("private-credential", detail)
 
     def test_confirmation_masks_text_for_sensitive_desktop_targets(self) -> None:
-        result = action_policy.dispatch(
-            "computer_control",
-            {
-                "action": "type",
-                "selector": {
-                    "window_name": "Synthetic login",
-                    "name": "Password",
-                    "control_type": "Edit",
+        with patch.object(policy, "read_only_enabled", return_value=False):
+            result = action_policy.dispatch(
+                "computer_control",
+                {
+                    "action": "type",
+                    "selector": {
+                        "window_name": "Synthetic login",
+                        "name": "Password",
+                        "control_type": "Edit",
+                    },
+                    "text": "private-password-value",
                 },
-                "text": "private-password-value",
-            },
-            lambda: "not executed",
-        )
+                lambda: "not executed",
+            )
 
         self.assertIn("[CONFIRMATION_PENDING]", result)
         detail = self.prompts[-1][1]
-        self.assertIn("[REDACTED]", detail)
+        self.assertIn("…", detail)
         self.assertNotIn("private-password-value", detail)
 
     def test_sensitive_action_refuses_if_hud_is_unavailable(self) -> None:
@@ -200,11 +228,11 @@ class ActionPolicyTests(unittest.TestCase):
 
         result = action_policy.request_confirmation(
             "file_controller",
-            "write",
-            "Write file?",
+            "delete",
+            "Delete file?",
             "Synthetic file contents",
             lambda: ran.set() or "written",
-            arguments={"action": "write"},
+            arguments={"action": "delete"},
         )
 
         self.assertIn("interface is not available", result)
@@ -221,11 +249,11 @@ class ActionPolicyTests(unittest.TestCase):
 
         result = action_policy.request_confirmation(
             "file_controller",
-            "write",
-            "Write file?",
+            "delete",
+            "Delete file?",
             "Synthetic file contents",
             action,
-            arguments={"action": "write"},
+            arguments={"action": "delete"},
         )
         self.assertIn("[CONFIRMATION_PENDING]", result)
 
@@ -238,11 +266,12 @@ class ActionPolicyTests(unittest.TestCase):
         ran = threading.Event()
         args = {"mode": "clear_history"}
 
-        result = action_policy.dispatch(
-            "task_planner",
-            args,
-            lambda: ran.set() or "status=done action=clear_history",
-        )
+        with patch.object(policy, "read_only_enabled", return_value=False):
+            result = action_policy.dispatch(
+                "task_planner",
+                args,
+                lambda: ran.set() or "status=done action=clear_history",
+            )
 
         self.assertIn("[CONFIRMATION_PENDING]", result)
         self.assertFalse(ran.is_set())

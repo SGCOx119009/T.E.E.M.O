@@ -4020,6 +4020,190 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "pip a échoué",
         "zh": "pip 安装失败",
     },
+    # -- the permissions panel
+    "controls.permissions": {
+        "en": "🔐  PERMISSIONS",
+        "es": "🔐  PERMISOS",
+        "pt": "🔐  PERMISSÕES",
+        "fr": "🔐  DROITS D'ACCÈS",
+        "zh": "🔐  权限",
+    },
+    "drawer.tool.permissions": {
+        "en": "What the assistant is allowed to do.",
+        "es": "Lo que el asistente tiene permitido hacer.",
+        "pt": "O que o assistente tem permissão para fazer.",
+        "fr": "Ce que l'assistant est autorisé à faire.",
+        "zh": "助手被允许做什么。",
+    },
+    "permissions.title": {
+        "en": "PERMISSIONS",
+        "es": "PERMISOS",
+        "pt": "PERMISSÕES",
+        "fr": "AUTORISATIONS",
+        "zh": "权限",
+    },
+    "permissions.explain": {
+        "en": "T.E.E.M.O. starts read-only: it may look and listen, but it changes "
+              "nothing until you allow it here, one capability at a time. The "
+              "grants are kept in config/api_keys.json, and a timed grant dies "
+              "when its clock runs out, even across a restart.",
+        "es": "T.E.E.M.O. arranca en solo lectura: puede mirar y escuchar, pero no "
+              "cambia nada hasta que lo permitas aquí, capacidad por capacidad. Las "
+              "concesiones se guardan en config/api_keys.json, y una concesión con "
+              "caducidad muere cuando su reloj se acaba, incluso tras reiniciar.",
+        "pt": "O T.E.E.M.O. arranca apenas em leitura: pode ver e ouvir, mas não muda "
+              "nada até você permitir aqui, uma capacidade de cada vez. As concessões "
+              "ficam em config/api_keys.json, e uma concessão com validade acaba "
+              "quando o relógio acaba, mesmo depois de reiniciar.",
+        "fr": "T.E.E.M.O. démarre en lecture seule : il peut regarder et écouter, mais "
+              "il ne change rien tant que vous ne l'autorisez pas ici, capacité par "
+              "capacité. Les autorisations sont conservées dans config/api_keys.json, "
+              "et une autorisation limitée expire quand son heure est écoulée, même "
+              "après un redémarrage.",
+        "zh": "T.E.E.M.O. 默认为只读：它可以看和听，但在你在这里逐项允许之前不会做任何改动。"
+              "授予记录保存在 config/api_keys.json 中，有期限的授权到期即失效，重启后也是如此。",
+    },
+    "permissions.read_only": {
+        "en": "READ-ONLY",
+        "es": "SOLO LECTURA",
+        "pt": "SOMENTE LEITURA",
+        "fr": "LECTURE SEULE",
+        "zh": "只读",
+    },
+    "permissions.read_only_explain": {
+        "en": "While this is on, every action above READ is refused.",
+        "es": "Mientras esté activo, se rechaza toda acción por encima de READ.",
+        "pt": "Enquanto estiver ligado, toda ação acima de READ é recusada.",
+        "fr": "Tant qu'il est actif, toute action au-dessus de READ est refusée.",
+        "zh": "开启时，高于 READ 的所有操作都会被拒绝。",
+    },
+    "permissions.read_only_off_notice": {
+        "en": "Read-only is OFF: the assistant may now act on the capabilities "
+              "granted below.",
+        "es": "El modo solo lectura está DESACTIVADO: el asistente ya puede actuar "
+              "con las capacidades concedidas abajo.",
+        "pt": "O modo somente leitura está DESLIGADO: o assistente já pode agir com "
+              "as capacidades concedidas abaixo.",
+        "fr": "Le mode lecture seule est DÉSACTIVÉ : l'assistant peut agir selon les "
+              "capacités accordées ci-dessous.",
+        "zh": "只读模式已关闭：助手现在可以使用下面授予的能力。",
+    },
+    "permissions.granted_title": {
+        "en": "GRANTED RIGHT NOW",
+        "es": "CONCEDIDO AHORA",
+        "pt": "CONCEDIDO AGORA",
+        "fr": "ACCORDÉ MAINTENANT",
+        "zh": "当前已授予",
+    },
+    "permissions.never": {
+        "en": "no expiry",
+        "es": "sin caducidad",
+        "pt": "sem validade",
+        "fr": "sans expiration",
+        "zh": "永不过期",
+    },
+    "permissions.expires_in": {
+        "en": "expires in {time}",
+        "es": "caduca en {time}",
+        "pt": "expira em {time}",
+        "fr": "expire dans {time}",
+        "zh": "{time} 后过期",
+    },
+    "permissions.close": {
+        "en": "CLOSE",
+        "es": "CERRAR",
+        "pt": "FECHAR",
+        "fr": "FERMER",
+        "zh": "关闭",
+    },
+    "permissions.unavailable": {
+        "en": "The permission policy is not available right now, so nothing can be "
+              "granted from this panel.",
+        "es": "La política de permisos no está disponible ahora mismo, así que desde "
+              "este panel no se puede conceder nada.",
+        "pt": "A política de permissões não está disponível agora, por isso nada "
+              "pode ser concedido a partir deste painel.",
+        "fr": "La politique d'autorisations n'est pas disponible pour le moment : rien "
+              "ne peut être accordé depuis ce panneau.",
+        "zh": "当前没有可用的权限策略，因此此面板无法授予任何权限。",
+    },
+    "permissions.class.read": {
+        "en": "READ",
+        "es": "LECTURA",
+        "pt": "LEITURA",
+        "fr": "LECTURE",
+        "zh": "读取",
+    },
+    "permissions.class.write_local": {
+        "en": "WRITE LOCAL",
+        "es": "ESCRITURA LOCAL",
+        "pt": "ESCRITA LOCAL",
+        "fr": "ÉCRITURE LOCALE",
+        "zh": "本地写入",
+    },
+    "permissions.class.reversible_sys": {
+        "en": "REVERSIBLE SYSTEM",
+        "es": "SISTEMA REVERSIBLE",
+        "pt": "SISTEMA REVERSÍVEL",
+        "fr": "SYSTÈME RÉVERSIBLE",
+        "zh": "可逆系统操作",
+    },
+    "permissions.class.external": {
+        "en": "EXTERNAL",
+        "es": "EXTERNO",
+        "pt": "EXTERNO",
+        "fr": "EXTERNE",
+        "zh": "外部操作",
+    },
+    "permissions.class.irreversible": {
+        "en": "IRREVERSIBLE",
+        "es": "ACCIÓN IRREVERSIBLE",
+        "pt": "AÇÃO IRREVERSÍVEL",
+        "fr": "IRRÉVERSIBLE",
+        "zh": "不可逆操作",
+    },
+    "permissions.class.credential": {
+        "en": "CREDENTIAL",
+        "es": "CREDENCIAL",
+        "pt": "CREDENCIAL",
+        "fr": "IDENTIFIANT",
+        "zh": "凭据",
+    },
+    "permissions.class.privacy": {
+        "en": "PRIVACY",
+        "es": "PRIVACIDAD",
+        "pt": "PRIVACIDADE",
+        "fr": "CONFIDENTIALITÉ",
+        "zh": "隐私",
+    },
+    "permissions.grant": {
+        "en": "GRANT",
+        "es": "CONCEDER",
+        "pt": "CONCEDER",
+        "fr": "ACCORDER",
+        "zh": "授予",
+    },
+    "permissions.revoke": {
+        "en": "REVOKE",
+        "es": "REVOCAR",
+        "pt": "REVOGAR",
+        "fr": "RÉVOQUER",
+        "zh": "撤销",
+    },
+    "permissions.expiry.forever": {
+        "en": "No expiry",
+        "es": "Sin caducidad",
+        "pt": "Sem validade",
+        "fr": "Sans échéance",
+        "zh": "永不过期",
+    },
+    "permissions.expiry.hour": {
+        "en": "One hour",
+        "es": "Una hora",
+        "pt": "Uma hora",
+        "fr": "Une heure",
+        "zh": "一小时",
+    },
 }
 
 CATALOG.update(_GUI_CATALOG)

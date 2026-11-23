@@ -1,8 +1,9 @@
-"""gui/overlays.py — Panels that open over the HUD: setup, customise, plugins, confirm, audio, memory, remote.
+"""gui/overlays.py — Panels that open over the HUD: setup, customise, plugins, confirm, audio, memory, remote, permissions.
 
 Split out of ui.py in the previous chassis; behaviour unchanged."""
 from __future__ import annotations
 
+import importlib
 import json
 import math
 import os
@@ -39,7 +40,7 @@ from gui.theme import (
     qcol,
 )
 
-from gui.style import hud_font
+from gui.style import hud_font, mono_font, scroll_css
 
 from core.localization import t as _t
 
@@ -1866,5 +1867,649 @@ class RemoteKeyOverlay(QWidget):
         self._ctimer.stop()
         self.hide()
         self.closed.emit()
+
+
+# ── The permissions panel ───────────────────────────────────────────────────
+
+def _permission_policy():
+    """The module that holds the permission policy, or None.
+
+    `core/policy.py` is the one the plan names, but it may not be there, and
+    it may be a module without the policy API in it. So the candidates are
+    checked for the functions this panel needs — the ones that read the
+    catalogue, the ones that grant and the ones that take back — and the
+    first one that has all of them is the policy.
+
+    None means "there is no policy", and the panel says exactly that instead
+    of guessing. A permissions panel that guesses is worse than no panel.
+    """
+    needed = ("tools_above_read", "grant", "revoke", "read_only_enabled",
+              "set_read_only")
+    for name in ("core.policy", "core.action_policy"):
+        try:
+            module = importlib.import_module(name)
+        except Exception:
+            continue
+        try:
+            if all(callable(getattr(module, fn, None)) for fn in needed):
+                return module
+        except Exception:
+            continue
+    return None
+
+
+class PermissionsOverlay(_HudOverlay):
+    """The permissions panel — what the assistant may do, and what the user allows.
+
+    THE ASSISTANT STARTS WITH ITS HANDS TIED
+        T.E.E.M.O. is read-only until the user says otherwise: it may look
+        and listen, and it changes nothing. This panel is where the user
+        says otherwise — one tool at a time, with the class of risk each
+        tool carries written next to it — and where a grant can be taken
+        back with the same click.
+
+    THE POLICY IS NOT OURS TO GUESS AT
+        The policy lives in `core/policy.py`, which is written by somebody
+        else and may not even be there: a missing module, an empty
+        catalogue, a call that raises. Every access to it in this file is
+        inside a try/except, and the panel shows what it can prove — "the
+        policy is not available" — instead of taking the application down
+        with it. A permissions panel that crashes is a permissions panel
+        nobody can use to say no.
+
+    THE EXPIRY IS A CLOCK, NOT A PROMISE
+        Two expiries are offered: none at all, and one hour. "Until the app
+        restarts" is deliberately NOT offered, because the grants are kept
+        in `config/api_keys.json` — they outlive the restart of the
+        programme, and nothing here can make them die with it. A timed
+        grant expires when its clock runs out, whatever the machine does.
+
+    THE LIFECYCLE IS THE WINDOW'S
+        The other overlays are hidden and freed by the window
+        (`_close_overlays`), and this one is the same: the button here hides
+        the panel and says so, and the window deletes it. The panel does not
+        delete itself, because the window keeps the reference and would be
+        left pointing at a widget that no longer exists.
+    """
+
+    closed = pyqtSignal()
+
+    _OW = 540
+
+    #: The classes of risk and the colour each one wears.
+    #: READ is the safe one (green); the two reversible ones are amber; the
+    #: four that cannot be taken back are red.
+    _RISK_COLOURS = {
+        "READ": C.GREEN,
+        "WRITE_LOCAL": C.ACC2,
+        "REVERSIBLE_SYS": C.ACC2,
+        "EXTERNAL": C.RED,
+        "IRREVERSIBLE": C.RED,
+        "CREDENTIAL": C.RED,
+        "PRIVACY": C.RED,
+    }
+
+    #: The expiries the policy really supports, in seconds.
+    #: None is "no expiry"; 3600 is one hour.
+    _EXPIRIES = (None, 3600)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            PermissionsOverlay {{
+                background: rgba(0, 6, 10, 246);
+                border: 1px solid {C.BORDER_B};
+                border-radius: 6px;
+            }}
+        """)
+        self.setFixedWidth(self._OW)
+
+        self._lay = QVBoxLayout(self)
+        self._lay.setContentsMargins(20, 16, 20, 16)
+        self._lay.setSpacing(6)
+
+        #: tool -> {"combo": the expiry picker, "button": the grant button}
+        self._rows: dict[str, dict] = {}
+        #: the master switch, kept so the window (and the tests) can find it
+        self._read_only_button = None
+
+        self.refresh()
+
+    # ── The public face ──────────────────────────────────────────────────────
+
+    def refresh(self) -> None:
+        """Read the policy again and draw the list."""
+        try:
+            self._rebuild()
+        except RuntimeError:
+            # The widget was closed and freed while the panel was open.
+            pass
+        except Exception:
+            # A panel that cannot draw itself must not take the app with it.
+            pass
+
+    # ── Drawing ──────────────────────────────────────────────────────────────
+
+    def _rebuild(self):
+        before = self.geometry()
+        self._clear()
+        self._rows = {}
+
+        title = QLabel(_t("permissions.title"))
+        title.setFont(hud_font(13, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self._lay.addWidget(title)
+
+        explain = QLabel(_t("permissions.explain"))
+        explain.setWordWrap(True)
+        explain.setFont(hud_font(8))
+        explain.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        self._lay.addWidget(explain)
+
+        self._lay.addWidget(self._separator())
+
+        policy = _permission_policy()
+        if policy is None:
+            self._lay.addWidget(self._unavailable())
+        else:
+            self._build_master(policy)
+            self._build_tools(policy)
+            self._build_granted(policy)
+
+        self._lay.addWidget(self._close_button())
+
+        self._settle(before)
+        # …and again once Qt has polished the new children, because the size
+        # hint is not final until then. Harmless when the first pass already
+        # got it right.
+        QTimer.singleShot(0, lambda g=before: self._safe_settle(g))
+
+    def _unavailable(self) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        note = QLabel(_t("permissions.unavailable"))
+        note.setWordWrap(True)
+        note.setFont(hud_font(9, QFont.Weight.Bold))
+        note.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        lay.addWidget(note)
+        return box
+
+    def _build_master(self, policy):
+        """The master switch: read-only, on by default."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+
+        head = QHBoxLayout(); head.setSpacing(8)
+
+        name = QLabel(_t("permissions.read_only"))
+        name.setFont(hud_font(10, QFont.Weight.Bold))
+        name.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        head.addWidget(name, stretch=1)
+
+        read_only = self._read_only_state(policy)
+        btn = QPushButton()
+        btn.setFixedSize(86, 26)
+        btn.setFont(hud_font(8, QFont.Weight.Bold))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._style_switch(btn, read_only)
+        btn.clicked.connect(lambda: self._toggle_read_only(policy))
+        head.addWidget(btn)
+        self._read_only_button = btn
+
+        lay.addLayout(head)
+
+        explain = QLabel(_t("permissions.read_only_explain"))
+        explain.setWordWrap(True)
+        explain.setFont(hud_font(8))
+        explain.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+        lay.addWidget(explain)
+
+        if not read_only:
+            # Turning read-only off is a decision with consequences, and the
+            # panel says so in the same colour as the risk it carries.
+            notice = QLabel(_t("permissions.read_only_off_notice"))
+            notice.setWordWrap(True)
+            notice.setFont(hud_font(8, QFont.Weight.Bold))
+            notice.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+            lay.addWidget(notice)
+
+        self._lay.addWidget(box)
+
+    def _build_tools(self, policy):
+        """One row for every tool whose class is not READ."""
+        self._lay.addWidget(self._separator())
+
+        try:
+            tools = [str(t).strip() for t in (policy.tools_above_read() or [])]
+        except Exception:
+            tools = []
+        tools = [t for t in tools if t]
+        if not tools:
+            return
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(min(340, 46 * len(tools) + 14))
+        scroll.setStyleSheet(
+            f"QScrollArea {{ border: 1px solid {C.BORDER}; border-radius: 3px; "
+            f"background: transparent; }}" + scroll_css()
+        )
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        ilay = QVBoxLayout(inner)
+        ilay.setContentsMargins(6, 6, 6, 6)
+        ilay.setSpacing(4)
+
+        for tool in tools:
+            ilay.addWidget(self._build_tool_row(policy, tool))
+
+        ilay.addStretch()
+        scroll.setWidget(inner)
+        self._transparent_scroll(scroll)
+        self._lay.addWidget(scroll)
+
+    def _build_tool_row(self, policy, tool: str) -> QWidget:
+        holder = QWidget()
+        box = QVBoxLayout(holder)
+        box.setContentsMargins(4, 2, 4, 4)
+        box.setSpacing(2)
+
+        top = QHBoxLayout(); top.setSpacing(8)
+
+        name = QLabel(self._tool_name(tool))
+        name.setFont(hud_font(9, QFont.Weight.Bold))
+        name.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        name.setToolTip(self._describe(policy, tool))
+        top.addWidget(name, stretch=1)
+
+        risk = self._risk_of(policy, tool)
+        colour = self._risk_colour(risk)
+        badge = QLabel(self._class_label(risk))
+        badge.setFont(hud_font(7, QFont.Weight.Bold))
+        badge.setStyleSheet(
+            f"color: {colour}; background: transparent; "
+            f"border: 1px solid {colour}; border-radius: 3px; padding: 1px 5px;"
+        )
+        top.addWidget(badge)
+        box.addLayout(top)
+
+        low = QHBoxLayout(); low.setSpacing(6)
+
+        raw = QLabel(tool)
+        raw.setFont(mono_font(7))
+        raw.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        low.addWidget(raw)
+
+        combo = QComboBox()
+        combo.setFixedHeight(22)
+        combo.setFixedWidth(112)
+        combo.setFont(hud_font(7))
+        combo.setStyleSheet(
+            f"QComboBox {{ background: {C.INPUT_BG}; color: {C.TEXT}; "
+            f"border: 1px solid {C.BORDER}; border-radius: 3px; padding: 1px 6px; }}"
+            f"QComboBox:hover {{ border-color: {C.BORDER_B}; }}"
+            f"QComboBox QAbstractItemView {{ background: {C.INPUT_BG}; color: {C.TEXT}; "
+            f"selection-background-color: {C.PRI_GHO}; border: 1px solid {C.BORDER}; }}"
+        )
+        combo.addItem(_t("permissions.expiry.forever"))
+        combo.addItem(_t("permissions.expiry.hour"))
+        low.addWidget(combo)
+
+        granted = self._is_granted(policy, tool)
+        btn = QPushButton()
+        btn.setFixedHeight(22)
+        btn.setMinimumWidth(78)
+        btn.setFont(hud_font(7, QFont.Weight.Bold))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._style_grant(btn, granted)
+        btn.clicked.connect(
+            lambda _=False, t=tool, c=combo: self._toggle_grant(policy, t, c))
+        low.addWidget(btn)
+        low.addStretch()
+
+        box.addLayout(low)
+
+        self._rows[tool] = {"combo": combo, "button": btn}
+        return holder
+
+    def _build_granted(self, policy):
+        """What is granted right now, and when it dies."""
+        self._lay.addWidget(self._separator())
+
+        title = QLabel(_t("permissions.granted_title"))
+        title.setFont(hud_font(9, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        self._lay.addWidget(title)
+
+        try:
+            live = list(policy.grants() or [])
+        except Exception:
+            live = []
+        if not live:
+            return
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(min(160, 26 * len(live) + 10))
+        scroll.setStyleSheet(
+            f"QScrollArea {{ border: 1px solid {C.BORDER}; border-radius: 3px; "
+            f"background: transparent; }}" + scroll_css()
+        )
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        ilay = QVBoxLayout(inner)
+        ilay.setContentsMargins(6, 4, 6, 4)
+        ilay.setSpacing(2)
+
+        for g in live:
+            ilay.addWidget(self._grant_line(g))
+
+        ilay.addStretch()
+        scroll.setWidget(inner)
+        self._transparent_scroll(scroll)
+        self._lay.addWidget(scroll)
+
+    def _grant_line(self, grant) -> QWidget:
+        holder = QWidget()
+        line = QHBoxLayout(holder)
+        line.setContentsMargins(2, 0, 2, 0)
+        line.setSpacing(6)
+
+        tool = str(getattr(grant, "tool", "") or "")
+        action = str(getattr(grant, "action", "") or "")
+        text = self._tool_name(tool)
+        if action:
+            text = f"{text} · {action}"
+
+        name = QLabel(text)
+        name.setFont(hud_font(8))
+        name.setStyleSheet(f"color: {C.TEXT}; background: transparent;")
+        line.addWidget(name, stretch=1)
+
+        expires = getattr(grant, "expires_at", None)
+        when = QLabel(self._expiry_text(expires))
+        when.setFont(hud_font(7))
+        when.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        line.addWidget(when)
+
+        return holder
+
+    # ── What the panel does ──────────────────────────────────────────────────
+
+    def _toggle_read_only(self, policy):
+        try:
+            current = bool(policy.read_only_enabled())
+        except Exception:
+            current = True
+        try:
+            policy.set_read_only(not current)
+        except Exception:
+            pass
+        self._schedule_refresh()
+
+    def _toggle_grant(self, policy, tool: str, combo: QComboBox):
+        try:
+            granted = bool(policy.is_granted(tool, ""))
+        except Exception:
+            granted = False
+        try:
+            if granted:
+                policy.revoke(tool, "")
+            else:
+                index = max(0, min(combo.currentIndex(), len(self._EXPIRIES) - 1))
+                policy.grant(tool, "", self._EXPIRIES[index])
+        except Exception:
+            pass
+        self._schedule_refresh()
+
+    def _schedule_refresh(self):
+        """Redraw on the NEXT event-loop turn.
+
+        The rebuild destroys the very button that was clicked, and Qt is
+        entitled to touch the sender after a slot returns; tearing it down
+        mid-emission is how a widget ends up half-alive on screen.
+        """
+        QTimer.singleShot(0, self.refresh)
+
+    # ── Reading the policy ───────────────────────────────────────────────────
+
+    def _read_only_state(self, policy) -> bool:
+        try:
+            return bool(policy.read_only_enabled())
+        except Exception:
+            # Unknown means the safe thing: read-only.
+            return True
+
+    def _is_granted(self, policy, tool: str) -> bool:
+        try:
+            return bool(policy.is_granted(tool, ""))
+        except Exception:
+            return False
+
+    def _risk_of(self, policy, tool: str) -> str:
+        """The class the badge shows: the WORST of the tool's actions.
+
+        A tool is not one class — `file_controller` reads, writes and
+        deletes — so the badge is the worst of them, which is the one the
+        user has to decide about. `tool_class` is the policy's own answer
+        when it has one; the older `risk_class_of` is the fallback.
+        """
+        try:
+            worst = getattr(policy, "tool_class", None)
+            if callable(worst):
+                return str(worst(tool) or "").strip()
+        except Exception:
+            pass
+        try:
+            return str(policy.risk_class_of(tool, "") or "").strip()
+        except Exception:
+            return ""
+
+    def _describe(self, policy, tool: str) -> str:
+        try:
+            return str(policy.describe(tool, "") or "")
+        except Exception:
+            return tool
+
+    # ── Words ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _tool_name(tool: str) -> str:
+        """A short human name for a tool key: "file_controller" -> "File controller".
+
+        The catalogue has no name per tool, and it cannot have one for a
+        tool this build has never heard of, so the name is derived from the
+        key the tool already carries. The key itself is shown next to it, so
+        nothing is hidden behind the prettifying.
+        """
+        raw = str(tool or "").strip()
+        if not raw:
+            return ""
+        words = [w for w in raw.replace("-", "_").replace(".", "_").split("_") if w]
+        if not words:
+            return raw
+        first = words[0]
+        return first[:1].upper() + first[1:] + " " + " ".join(words[1:])
+
+    def _class_label(self, risk: str) -> str:
+        name = str(risk or "").strip()
+        if not name:
+            return ""
+        key = f"permissions.class.{name.lower()}"
+        text = _t(key)
+        # A class the catalogue does not know about shows its own name,
+        # which is more honest than a key on the screen.
+        return text if text != key else name.upper()
+
+    def _risk_colour(self, risk: str) -> str:
+        return self._RISK_COLOURS.get(str(risk or "").strip().upper(), C.TEXT_MED)
+
+    def _expiry_text(self, expires_at) -> str:
+        if expires_at is None:
+            return _t("permissions.never")
+        try:
+            remaining = float(expires_at) - time.time()
+        except (TypeError, ValueError):
+            return _t("permissions.never")
+        if remaining <= 0:
+            # It is already dead; the policy should have dropped it.
+            return _t("permissions.never")
+        return _t("permissions.expires_in", time=self._fmt_delta(remaining))
+
+    @staticmethod
+    def _fmt_delta(seconds: float) -> str:
+        total = int(max(0.0, float(seconds or 0.0)))
+        if total < 60:
+            return f"{total} s"
+        minutes = total // 60
+        if minutes < 60:
+            return f"{minutes} min"
+        return f"{minutes // 60} h {minutes % 60:02d} min"
+
+    # ── The look ─────────────────────────────────────────────────────────────
+
+    def _style_switch(self, btn: QPushButton, on: bool):
+        if on:
+            btn.setText(_t("overlay.on"))
+            btn.setStyleSheet(f"""
+                QPushButton {{ background: {C.GREEN_BG}; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-radius: 3px; }}
+                QPushButton:hover {{ background: {C.GREEN_BG_HOVER}; }}
+            """)
+        else:
+            btn.setText(_t("overlay.off"))
+            btn.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {C.RED};
+                    border: 1px solid {C.RED}; border-radius: 3px; }}
+                QPushButton:hover {{ color: {C.WHITE}; }}
+            """)
+
+    def _style_grant(self, btn: QPushButton, granted: bool):
+        if granted:
+            btn.setText(_t("permissions.revoke"))
+            btn.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {C.RED};
+                    border: 1px solid {C.RED}; border-radius: 3px; }}
+                QPushButton:hover {{ color: {C.WHITE}; }}
+            """)
+        else:
+            btn.setText(_t("permissions.grant"))
+            btn.setStyleSheet(f"""
+                QPushButton {{ background: {C.PANEL2}; color: {C.GREEN};
+                    border: 1px solid {C.GREEN_D}; border-left: 3px solid {C.GREEN};
+                    border-radius: 3px; }}
+                QPushButton:hover {{ color: {C.WHITE}; }}
+            """)
+
+    @staticmethod
+    def _transparent_scroll(scroll: QScrollArea) -> QScrollArea:
+        """A scroll area that scrolls down and not sideways, and whose viewport
+        does not paint the window colour.
+
+        The default viewport is the light grey of the desktop, which on a
+        dark panel reads as a hole in the middle of the window.
+        """
+        try:
+            scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.viewport().setStyleSheet("background: transparent;")
+        except RuntimeError:
+            pass
+        return scroll
+
+    def _separator(self) -> QFrame:
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {C.BORDER}; margin: 2px 0;")
+        return sep
+
+    def _close_button(self) -> QPushButton:
+        close = QPushButton(_t("permissions.close"))
+        close.setFixedHeight(30)
+        close.setFont(hud_font(9))
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.setStyleSheet(f"""
+            QPushButton {{ background: transparent; color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER}; border-radius: 3px; }}
+            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+        """)
+        close.clicked.connect(self._on_close)
+        return close
+
+    def _on_close(self):
+        """Hide the panel and say so. The window frees it, like the rest."""
+        try:
+            self.hide()
+        except RuntimeError:
+            pass
+        try:
+            self.closed.emit()
+        except RuntimeError:
+            pass
+
+    # ── Housekeeping ─────────────────────────────────────────────────────────
+
+    def _clear(self):
+        """Take every item out of the layout and detach it from the tree.
+
+        deleteLater() on its own is not enough: it queues the destruction for
+        the next event-loop pass, and until then the old rows are still
+        children of this widget and still paint — which is what draws half
+        of the previous panel over the new one.
+        """
+        while self._lay.count():
+            item = self._lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+                continue
+            sub = item.layout()
+            if sub is not None:
+                while sub.count():
+                    si = sub.takeAt(0)
+                    sw = si.widget()
+                    if sw is not None:
+                        sw.hide()
+                        sw.deleteLater()
+                sub.deleteLater()
+
+    def _settle(self, before):
+        """Size the panel to its content and repaint what the old size covered."""
+        try:
+            self.setMinimumHeight(0)
+            self._lay.invalidate()
+            self._lay.activate()
+            hint = self._lay.sizeHint()
+            if hint.height() > 0:
+                # The panel must not be squeezed. A scroll area with a fixed
+                # height that is given less room than it asked for is drawn
+                # OVER the rows below it, and the words land on top of each
+                # other. The minimum height is what stops that.
+                self.setMinimumHeight(hint.height())
+            self.updateGeometry()
+            self.adjustSize()
+        except RuntimeError:
+            return
+
+        p = self.parentWidget()
+        if p is None:
+            self.update()
+            return
+        self.move(max(0, (p.width() - self.width()) // 2),
+                  max(0, (p.height() - self.height()) // 2))
+        p.update(before.united(self.geometry()))
+        self.update()
+
+    def _safe_settle(self, before):
+        try:
+            self._settle(before)
+        except RuntimeError:
+            pass
 
 

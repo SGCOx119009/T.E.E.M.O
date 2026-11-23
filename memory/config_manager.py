@@ -8,6 +8,8 @@ import threading
 import time
 from pathlib import Path
 
+from core import secure_credentials
+
 def get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -16,12 +18,6 @@ def get_base_dir() -> Path:
 BASE_DIR    = get_base_dir()
 CONFIG_DIR  = BASE_DIR / "config"
 CONFIG_FILE = CONFIG_DIR / "api_keys.json"
-
-# The secure store is the Windows Credential Locker (via `keyring`). The service
-# name is the product's own identity — never a predecessor's — so the entries in
-# the vault belong to T.E.E.M.O. and to nothing else.
-_KEYRING_SERVICE = "T.E.E.M.O."
-_KEYRING_ACCOUNT = "gemini_api_key"
 
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -98,43 +94,46 @@ def _read_for_write() -> dict:
 # ── Secure credential storage ───────────────────────────────────────────────
 # A key typed into the settings panel is a long-lived secret. In a JSON file
 # next to the application it is one backup, one sync folder or one stray
-# screenshot away from being exposed. The Credential Locker is what Windows
-# offers for this, and `keyring` is how Python reaches it.
+# screenshot away from being exposed. The credentials live in
+# `core/secure_credentials.py`, which keeps them in Windows DPAPI (user
+# scope) — the ciphertext belongs to the Windows account, so a copy of the
+# store on another machine decrypts to nothing — and uses the Windows
+# Credential Locker as the second store, where the keys of previous versions
+# already live.
 #
-# There is NO plaintext fallback. If the vault is unavailable, the honest answer
-# is that the credential cannot be stored — not that it can be stored somewhere
-# less safe and mentioned in a log.
+# There is NO plaintext fallback and NO Base64 fallback: Base64 is not
+# encryption, it is a secret written down and called protected. If neither
+# store is usable the honest answer is that the credential cannot be stored —
+# not that it can be stored somewhere less safe and mentioned in a log.
 _CREDENTIAL_LOCK = threading.RLock()
+
+# The service name is the product's own identity — never a predecessor's — so
+# the entries in the vault belong to T.E.E.M.O. and to nothing else.
+_KEYRING_SERVICE = secure_credentials.SERVICE
+_KEYRING_ACCOUNT = "gemini_api_key"
+
+
+def _secret_store_path() -> Path:
+    """Where the protected credentials live: `config/secrets.bin`.
+
+    Next to `config/api_keys.json`, which keeps the settings that are not
+    secrets.
+    """
+    return CONFIG_DIR / secure_credentials.STORE_FILENAME
 
 
 def _secure_keyring():
     """Return a credential backend that meets this platform's storage policy."""
-    try:
-        import keyring
-
-        backend = keyring.get_keyring()
-    except Exception as exc:
-        raise RuntimeError(
-            f"Secure credential storage is unavailable ({type(exc).__name__})."
-        ) from exc
-
-    backend_type = type(backend)
-    if backend_type.__name__.casefold().startswith("plaintext"):
-        raise RuntimeError("Plaintext credential backends are not supported.")
-    if backend_type.__name__ != "WinVaultKeyring":
-        raise RuntimeError(
-            "Windows credential storage requires the Windows Credential Locker."
-        )
-    priority = getattr(backend, "priority", None)
-    if not isinstance(priority, (int, float)) or priority < 0:
-        raise RuntimeError("The configured secure credential backend is unavailable.")
-    return keyring
+    return secure_credentials.vault_module()
 
 
 def _read_secure_secret(account: str) -> str | None:
-    keyring = _secure_keyring()
     try:
-        return keyring.get_password(_KEYRING_SERVICE, account)
+        return secure_credentials.read_secret(
+            account, store_path=_secret_store_path()
+        )
+    except secure_credentials.SecureStoreError:
+        raise
     except Exception as exc:
         raise RuntimeError(
             f"Secure credential lookup failed ({type(exc).__name__})."
@@ -142,9 +141,12 @@ def _read_secure_secret(account: str) -> str | None:
 
 
 def _store_secure_secret(account: str, secret: str) -> None:
-    keyring = _secure_keyring()
     try:
-        keyring.set_password(_KEYRING_SERVICE, account, secret)
+        secure_credentials.store_secret(
+            account, secret, store_path=_secret_store_path()
+        )
+    except secure_credentials.SecureStoreError:
+        raise
     except Exception as exc:
         raise RuntimeError(
             f"Secure credential storage failed ({type(exc).__name__})."
@@ -152,9 +154,12 @@ def _store_secure_secret(account: str, secret: str) -> None:
 
 
 def _remove_secure_secret(account: str) -> None:
-    keyring = _secure_keyring()
     try:
-        keyring.delete_password(_KEYRING_SERVICE, account)
+        secure_credentials.delete_secret(
+            account, store_path=_secret_store_path()
+        )
+    except secure_credentials.SecureStoreError:
+        raise
     except Exception as exc:
         raise RuntimeError(
             f"Secure credential removal failed ({type(exc).__name__})."

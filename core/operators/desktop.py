@@ -46,6 +46,11 @@ class DesktopOperator(Operator):
         # of question — "what is this machine doing right now" — asked of the
         # part of the machine that answers.
         "assistant_state",
+        # The tone and the face of the assistant. It changes the colour of
+        # the interface and the way the next answer sounds, and nothing
+        # else: it is the same kind of thing as `assistant_state` — the
+        # machine answering a question about the assistant itself.
+        "emotional_spectrum",
         "shutdown_teemo",
         "undo",
     )

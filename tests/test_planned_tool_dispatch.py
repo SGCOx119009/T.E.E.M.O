@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import main
-from core import action_policy, confirm, task_plan, tool_audit
+from core import action_policy, confirm, policy, task_plan, tool_audit
 
 
 _PLUGIN_NAME = "planned_plugin_dispatch_test"
@@ -62,13 +62,17 @@ class PlannedToolDispatchTests(unittest.TestCase):
 
     def test_plugin_step_without_plan_approval_requires_hud_confirmation(self) -> None:
         arguments = {"action": "search", "query": "Steam"}
-        result = main._execute_planned_tool(
-            _PLUGIN_NAME,
-            arguments,
-            _EmptyActionRegistry(),
-            self.plugins,
-            self.context,
-        )
+        # Read-only OFF: this test is about the CONFIRMATION gate. The
+        # permission gate of the FASE 9 is in front of it, and it has its own
+        # test (tests/test_policy_risk.py).
+        with patch.object(policy, "read_only_enabled", return_value=False):
+            result = main._execute_planned_tool(
+                _PLUGIN_NAME,
+                arguments,
+                _EmptyActionRegistry(),
+                self.plugins,
+                self.context,
+            )
 
         self.assertIn("[CONFIRMATION_PENDING]", result)
         self.assertEqual(self.plugins.calls, [])

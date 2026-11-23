@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from actions import reminder
-from core import action_policy, confirm, tool_audit
+from core import action_policy, confirm, policy, tool_audit
 
 
 class ReminderConfirmationTests(unittest.TestCase):
@@ -34,13 +34,14 @@ class ReminderConfirmationTests(unittest.TestCase):
             "message": message,
         }
 
-    def test_schedule_waits_for_approval_and_cancel_does_not_create_job(self) -> None:
-        """The reminder is a high-impact action, so it asks first.
+    def test_schedule_is_blocked_by_read_only_until_the_user_allows_it(self) -> None:
+        """A reminder is a LOCAL write: silent, but not free.
 
         THE GATE IS IN THE POLICY LAYER, NOT IN THE ACTION.
             `core/action_policy.py` decides what has to be approved and the
-            action does what it is told. This test proves the two together:
-            the prompt appears, and a refusal leaves no task behind.
+            action does what it is told. A local write does not ask, but
+            the read-only mode refuses it until the user allows the tool,
+            and the refusal says what to do about it.
         """
         scheduled = threading.Event()
         args = self.future_args()
@@ -52,54 +53,40 @@ class ReminderConfirmationTests(unittest.TestCase):
                 side_effect=lambda *_args: scheduled.set() or "task-id",
             ) as schedule,
         ):
-            result = action_policy.request_confirmation(
-                "reminder",
-                "schedule",
-                "Set a reminder?",
-                f"Date: {args['date']}  Time: {args['time']}",
-                lambda: reminder.reminder(args),
-                arguments=args,
-            )
+            with patch.object(policy, "read_only_enabled", return_value=True):
+                result = action_policy.dispatch(
+                    "reminder",
+                    dict(args),
+                    lambda: reminder.reminder(args),
+                )
 
-            self.assertIn("[CONFIRMATION_PENDING]", result)
-            self.assertTrue(self.prompts, "nobody was asked")
-            write_script.assert_not_called()
-            schedule.assert_not_called()
+        self.assertIn("status=failed", result)
+        self.assertIn("read-only", result)
+        self.assertIn("Permissions", result)
+        write_script.assert_not_called()
+        schedule.assert_not_called()
 
-            confirm.resolve(False)
-
-            self.assertFalse(scheduled.wait(0.1))
-            write_script.assert_not_called()
-            schedule.assert_not_called()
-
-    def test_approval_schedules_once(self) -> None:
+    def test_approved_schedule_creates_the_job(self) -> None:
         scheduled = threading.Event()
-        script = object()
         args = self.future_args()
-
         with (
-            patch.object(reminder, "_write_notify_script", return_value=script) as write_script,
+            patch.object(reminder, "_write_notify_script", return_value=object()) as write_script,
             patch.object(
                 reminder,
                 "_schedule_windows",
                 side_effect=lambda *_args: scheduled.set() or "task-id",
             ) as schedule,
         ):
-            result = action_policy.request_confirmation(
-                "reminder",
-                "schedule",
-                "Set a reminder?",
-                f"Date: {args['date']}  Time: {args['time']}",
-                lambda: reminder.reminder(args),
-                arguments=args,
-            )
-            self.assertIn("[CONFIRMATION_PENDING]", result)
+            with patch.object(policy, "read_only_enabled", return_value=False):
+                result = action_policy.dispatch(
+                    "reminder",
+                    dict(args),
+                    lambda: reminder.reminder(args),
+                )
 
-            confirm.resolve(True)
-
-            self.assertTrue(scheduled.wait(2))
-            write_script.assert_called_once()
-            schedule.assert_called_once()
+        self.assertNotIn("status=failed", result)
+        write_script.assert_called_once()
+        schedule.assert_called_once()
 
     def test_invalid_or_overlong_reminder_is_rejected(self) -> None:
         result = reminder.reminder(self.future_args("x" * 201))

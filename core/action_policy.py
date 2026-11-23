@@ -16,35 +16,21 @@ _CONFIRMED_TOOL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _AUTHORIZED_PLAN: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
     "authorized_task_plan", default=None
 )
-_PRECISE_HANDLER_GATES = {
-    "computer_control": {
-        "close_app", "focus_control", "activate_window", "write_control",
-        "invoke_control",
-        "screen_click"
-    },
-    "computer_settings": {
-        "restart", "shutdown", "toggle_wifi", "close_window",
-        "close_tab", "close_app", "save",
-    },
-    "desktop_control": {"wallpaper", "wallpaper_url", "organize", "clean"},
-    "file_controller": {
-        "delete", "create_file", "create_folder", "move", "copy", "rename",
-        "write", "organize_desktop",
-    },
-    "file_processor": {
-        "resize", "convert", "compress", "extract_text", "to_word", "filter",
-        "sort", "format", "to_csv", "to_excel", "to_json", "fix", "optimize",
-        "document", "transcribe", "trim", "extract_audio", "extract_frame",
-        "describe", "ocr", "analyze", "summarize", "translate_hint", "reformat",
-        "to_bullet", "custom",
-    },
-    "game_updater": {"install", "update", "schedule", "cancel_schedule"},
+_HANDLER_OWN_GATE: dict[str, set[str]] = {
+    # These handlers ask in their own words, with a better preview than the
+    # generic one, so the executor lets them do it.
+    #
+    # The list is SHORT on purpose, and every entry in it is checked by
+    # `tests/test_policy_coverage.py`: a delegation to a handler that does
+    # NOT ask is a hole in the gate, and a hole is how "delete the file"
+    # ended up running with nobody seeing it. Only two handlers in this
+    # product have a gate of their own:
+    #   * `computer_settings` — for the three it cannot take back (restart,
+    #     shutdown, toggle_wifi), with a warning that says why;
+    #   * `meet_control` — because the preview of a call is the recipient
+    #     and the message, and only the handler knows them.
+    "computer_settings": {"restart", "shutdown", "toggle_wifi"},
     "meet_control": {"create", "new"},
-    "manage_monitor": {"add", "remove"},
-    "send_message": {"send"},
-    "reminder": {"schedule"},
-    "code_helper": {"write", "edit", "optimize", "screen_debug"},
-    "dev_agent": {"build_project"},
 }
 _SENSITIVE_NAME_RE = re.compile(
     r"(?:password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key|otp)",
@@ -159,13 +145,33 @@ def validate_arguments(arguments: object) -> str | None:
 
 def requires_confirmation(tool: str, action: str,
                          arguments: dict | None = None) -> bool:
-    """Whether the central risk policy requires explicit HUD approval."""
+    """Whether the central risk policy requires explicit HUD approval.
+
+    The answer comes from the FINE class of the action — the one declared
+    per action in `core/policy.py` — and not from the coarse vocabulary of
+    the audit, which is too blunt: it calls "write a file" and "delete a
+    file" the same thing, because it only knows four words.
+
+    The four classes that ask are EXTERNAL, IRREVERSIBLE, CREDENTIAL and
+    PRIVACY. READ does not ask (it changes nothing), and neither do
+    WRITE_LOCAL and REVERSIBLE_SYS, which are silent, recorded and
+    reversible: the permission for them comes from the read-only mode and
+    from the concessions, not from a banner on every keystroke.
+    """
+    from core import policy as _policy
+
+    if not _policy.class_is_known(tool, action):
+        # Nothing is known about this action: it is not that it is
+        # harmless, it is that nobody has looked at it. The gate fails
+        # closed rather than waving it through.
+        return False
+    klass = _policy.risk_class_of(tool, action, arguments)
+    entry = _policy.RISK_CATALOG.get(klass)
+    if entry is not None:
+        return entry.needs_confirmation
     params = dict(arguments) if isinstance(arguments, dict) else {}
     params["action"] = action
-    return (
-        tool_audit.classify_risk(tool, params)
-        in _CONFIRMATION_RISKS
-    )
+    return tool_audit.classify_risk(tool, params) in _CONFIRMATION_RISKS
 
 
 def request_confirmation(
@@ -277,6 +283,11 @@ def dispatch(
     high-impact handlers and discovered plugins are gated here with the full
     serialized arguments; a handler-level gate under this authorization runs
     only after the dispatcher confirmation has already been accepted.
+
+    THIS IS THE SINGLE POINT OF APPLICATION. The policy of the FASE 9 is
+    consulted here and nowhere else: not in the prompt, not in the planner,
+    not in the description of the tool. A tool that describes itself as
+    harmless is harmless; a tool that is resolved here is what it is.
     """
     if not isinstance(arguments, dict):
         return outcome.failed(
@@ -309,7 +320,10 @@ def dispatch(
     )
     action = action_value.strip().lower() if isinstance(action_value, str) else "execute"
     risk = tool_audit.classify_risk(tool, arguments)
-    if risk == "unclassified":
+
+    from core import policy as _policy
+
+    if risk == "unclassified" and not _policy.is_reviewed(tool):
         return outcome.failed(
             "action_policy",
             "the tool action has no reviewed risk classification; nothing was executed",
@@ -323,15 +337,36 @@ def dispatch(
         except (TypeError, ValueError):
             exact = ""
         if exact in authorized_plan:
+            # A plan the user APPROVED is an approval, not a request: it is
+            # the user's own decision about these exact calls, and it is not
+            # withdrawn by the read-only mode.
             return run()
-    if risk not in _CONFIRMATION_RISKS:
+
+    # THE POLICY, CONSULTED AT THE ONE POINT EVERY RESOLVED ACTION PASSES.
+    #
+    # The verdict says two things: may this happen, and does the user have to
+    # see it first. A refusal is never silent and never generic — it says
+    # which tool was stopped and what to allow, because "permission denied"
+    # is a message that leaves the user with nothing to do.
+    verdict = _policy.evaluate(tool, action, arguments)
+    if not verdict.allowed:
+        return outcome.failed(
+            "action_policy",
+            verdict.reason,
+            tool=tool,
+            action=action,
+            risk_class=verdict.risk_class,
+        )
+    if not verdict.needs_confirmation:
         return run()
-    if action in _PRECISE_HANDLER_GATES.get(tool, set()):
+    if action in _HANDLER_OWN_GATE.get(tool, set()):
+        # The handler asks in its own words, with a better preview. The class
+        # of the action has already been checked above.
         return run()
 
     try:
         serialized = json.dumps(
-            _confirmation_value(arguments),
+            _policy.mask_arguments(arguments),
             ensure_ascii=False,
             sort_keys=True,
         )
