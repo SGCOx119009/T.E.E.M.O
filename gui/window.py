@@ -139,7 +139,7 @@ class MainWindow(QMainWindow):
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
-    _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
+    _cam_frame_sig  = pyqtSignal(object)      # live camera frame → HUD area (QImage)
     _video_open_sig  = pyqtSignal(str, str, bool, str)  # video, title, muted, audio
     _image_open_sig  = pyqtSignal(str, str)   # still picture on the HUD: path, title
     _wake_btns_sig   = pyqtSignal()          # wake state resolved off-thread
@@ -657,9 +657,13 @@ class MainWindow(QMainWindow):
             self._hud_cam_stack.setCurrentIndex(0)
             self._cam_live_lbl.clear()
 
-    def _on_cam_frame(self, data: bytes) -> None:
-        px = QPixmap()
-        px.loadFromData(data)
+    def _on_cam_frame(self, data) -> None:
+        """The picture for the head, drawn on the thread that owns the screen."""
+        if isinstance(data, (bytes, bytearray)):
+            px = QPixmap()
+            px.loadFromData(bytes(data))
+        else:
+            px = QPixmap.fromImage(data)
         if not px.isNull():
             w, h = self._cam_live_lbl.width(), self._cam_live_lbl.height()
             if w > 1 and h > 1:
@@ -742,11 +746,23 @@ class MainWindow(QMainWindow):
         the interface knows how to draw one. Encoding it a second time
         here, in the thread that was reading the camera, was work that
         nobody had asked for.
+
+        BUT IT IS DECODED HERE, AND NOT ON THE SCREEN. Unpacking a JPEG
+        is a piece of work of its own, and doing it on the thread that
+        draws the interface meant that the interface stopped drawing
+        while the picture was being unpacked — fifteen times a second.
+        A QImage can be unpacked on any thread; only the painting of it
+        has to happen on the one that owns the screen.
         """
         if not ok or not jpeg:
             return
         try:
-            self._cam_frame_sig.emit(jpeg)
+            from PyQt6.QtGui import QImage
+
+            image = QImage()
+            if not image.loadFromData(jpeg):
+                return
+            self._cam_frame_sig.emit(image)
         except Exception:
             pass
 

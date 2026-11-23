@@ -143,7 +143,7 @@ def io_bytes(image) -> bytes:
 class CameraWatcher(QObject):
     """Reads the camera, off the Qt thread."""
 
-    frame_sig = pyqtSignal(bytes)
+    frame_sig = pyqtSignal(object)
     state_sig = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -207,10 +207,26 @@ class CameraWatcher(QObject):
             # product whose language is Spanish. The sentence now comes
             # from the catalog, in the language of the user.
             self.state_sig.emit("viewer.camera_open")
+            slow = False
             while not self._stop.is_set():
                 time.sleep(0.05)
                 if hub.error:
                     self.state_sig.emit(hub.error)
+                    continue
+                # THE CAMERA IS BUSY, AND THE PROGRAM SAYS SO.
+                #
+                # When another application keeps the device, the driver
+                # hands out one picture a second instead of fifteen, and
+                # the hand on the screen trails behind by a whole second
+                # with nobody explaining why. Measured: 15 fps with the
+                # device free, 1 fps with it held.
+                busy = hub.busy
+                if busy and not slow:
+                    slow = True
+                    self.state_sig.emit("viewer.camera_busy")
+                elif not busy and slow:
+                    slow = False
+                    self.state_sig.emit("viewer.camera_open")
         except Exception as exc:                           # noqa: BLE001
             self.state_sig.emit(f"viewer.camera_stopped:{type(exc).__name__}")
         finally:
@@ -228,11 +244,23 @@ class CameraWatcher(QObject):
         interface knows how to draw a JPEG. Encoding it again here, in
         the thread that was reading, was work that nobody had asked
         for.
+
+        BUT IT IS UNPACKED HERE, AND NOT ON THE SCREEN. Unpacking a JPEG
+        is a piece of work of its own, and doing it on the thread that
+        draws the interface meant that the interface stopped drawing
+        while the picture was being unpacked. A QImage can be unpacked
+        on any thread; only the painting of it has to happen on the one
+        that owns the screen.
         """
         if not ok or not jpeg:
             return
         try:
-            self.frame_sig.emit(jpeg)
+            from PyQt6.QtGui import QImage
+
+            image = QImage()
+            if not image.loadFromData(jpeg):
+                return
+            self.frame_sig.emit(image)
         except Exception:
             pass
 
@@ -300,6 +328,9 @@ class ViewerPanel(QWidget):
         self._camera.set_mirrored(True)
         self._camera.set_placeholder(_t("viewer.camera_wait"))
         self._camera.set_badge(_t("viewer.camera"), live=False)
+        # Whether another program is keeping the device. The badge of the
+        # tile says so while the pictures keep arriving.
+        self._camera_busy = False
         grid.addWidget(self._camera, 0, 0)
 
         self._screen = ObservationCanvas()
@@ -402,7 +433,12 @@ class ViewerPanel(QWidget):
 
     def _on_camera_frame(self, data: bytes) -> None:
         if self._camera.set_frame(data):
-            self._camera.set_badge(_t("viewer.camera_live"), live=True)
+            if getattr(self, "_camera_busy", False):
+                # The badge keeps saying what is wrong, instead of being
+                # painted over by the next picture that arrives.
+                self._camera.set_badge(_t("viewer.camera_busy"), live=True)
+            else:
+                self._camera.set_badge(_t("viewer.camera_live"), live=True)
 
     def _on_state(self, text: str) -> None:
         self._screen.set_caption(text)
@@ -422,6 +458,15 @@ class ViewerPanel(QWidget):
             shown = f"{shown} · {detail.strip()}"
         if not self._camera.is_live():
             self._camera.set_placeholder(shown)
+        if key == "viewer.camera_busy":
+            # THE BADGE OF THE TILE, because the camera IS live and the
+            # picture is there — what is wrong is how slowly it comes.
+            # A warning that only appears when nothing works is a
+            # warning nobody ever reads.
+            self._camera_busy = True
+            self._camera.set_badge(shown, live=True)
+        else:
+            self._camera_busy = False
         self._code.setText(shown[:28])
 
     # -- the hands -----------------------------------------------------------

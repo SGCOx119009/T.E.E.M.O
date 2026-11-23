@@ -60,6 +60,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 # HOW LONG TO WAIT FOR THE PROCESS THAT HOLDS THE CAMERA.
@@ -115,6 +116,17 @@ class CameraHub:
         self._error = ""
         self._index = 0
         self._opens = 0
+        # HOW FAST THE CAMERA IS ACTUALLY TALKING.
+        #
+        # The device is not always ours. When another program — the
+        # Windows camera, a call, a recorder — keeps it, the driver
+        # hands out one picture a second instead of fifteen, and the
+        # hand on the screen trails behind by a whole second with no
+        # explanation anywhere. Counting the pictures is how the truth
+        # is told: the program can say what is happening instead of
+        # leaving the user to guess.
+        self._times: list[float] = []
+        self._fps = 0.0
 
     # ── the readers ─────────────────────────────────────────────────────────
 
@@ -187,6 +199,36 @@ class CameraHub:
     @property
     def error(self) -> str:
         return self._error
+
+    @property
+    def fps(self) -> float:
+        """How many pictures a second the camera is really giving."""
+        with self._lock:
+            return self._fps
+
+    @property
+    def busy(self) -> bool:
+        """The camera is being held by somebody else.
+
+        It was measured: with the device free the camera gives fifteen
+        pictures a second, and with another program keeping it, one.
+        Nothing in the program is slow — the device is busy, and the
+        program that knows it can say so.
+        """
+        with self._lock:
+            return len(self._times) >= 4 and self._fps < 6.0
+
+    def _note_frame(self) -> None:
+        """Write down that a picture arrived, and how fast they come."""
+        now = time.monotonic()
+        with self._lock:
+            self._times.append(now)
+            if len(self._times) > 12:
+                del self._times[:-12]
+            if len(self._times) >= 2:
+                span = self._times[-1] - self._times[0]
+                if span > 0.05:
+                    self._fps = (len(self._times) - 1) / span
 
     @property
     def index(self) -> int:
@@ -332,6 +374,7 @@ class CameraHub:
                     data += piece
                 if len(data) < length:
                     break
+                self._note_frame()
                 with self._lock:
                     readers = list(self._subscribers)
                 for reader in readers:

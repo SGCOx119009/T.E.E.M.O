@@ -170,6 +170,40 @@ def _usable(cap) -> bool:
     return False
 
 
+# THE SIZE OF THE PICTURE, AND THE DEPTH OF THE BUFFER.
+#
+# A hand is read at arm's length: 640x480 gives the tracker more than it
+# needs, and the buffer of ONE picture is what keeps the picture on
+# screen from being a few frames behind the hand. The driver is asked
+# politely — a camera that refuses the request is still a camera.
+_FRAME_W = 640
+_FRAME_H = 480
+_FRAME_FPS = 30
+_BUFFER_FRAMES = 1
+
+
+def _tune_camera(cap) -> None:
+    """Ask the camera for a small picture and for no buffer."""
+    try:
+        import cv2
+    except Exception:                                  # noqa: BLE001
+        return
+    settings = (
+        ("CAP_PROP_FRAME_WIDTH", _FRAME_W),
+        ("CAP_PROP_FRAME_HEIGHT", _FRAME_H),
+        ("CAP_PROP_FPS", _FRAME_FPS),
+        ("CAP_PROP_BUFFERSIZE", _BUFFER_FRAMES),
+    )
+    for name, value in settings:
+        prop = getattr(cv2, name, None)
+        if prop is None:
+            continue
+        try:
+            cap.set(prop, value)
+        except Exception:
+            pass
+
+
 def _probe(count: int = _PROBE_COUNT, only: int = -1) -> int:
     """Find the camera that gives a usable frame.
 
@@ -250,6 +284,21 @@ def main() -> int:
     if not cap.isOpened():
         sys.stderr.write("[camera] the camera could not be opened\n")
         return 3
+
+    # THE CAMERA IS ASKED FOR A SMALL PICTURE, AND FOR NO BUFFER.
+    #
+    # The device came up with whatever it felt like: on many webcams that
+    # is 1920x1080 at 30 pictures a second, and every one of those
+    # pictures was encoded, moved through the pipe and decoded again by
+    # the tracker. The hand does not need that, and the lag did.
+    #
+    # 640x480 is what a hand needs and it is a quarter of the work. The
+    # buffer of one picture is the other half of the answer: with a
+    # deeper buffer the driver keeps the OLD pictures and hands them
+    # over one by one, so what is on screen is always a few frames
+    # behind the hand. One picture in the buffer means the picture that
+    # arrives is the one that was just taken.
+    _tune_camera(cap)
 
     out = sys.stdout.buffer
     # FIFTEEN PICTURES A SECOND.

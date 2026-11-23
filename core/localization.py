@@ -888,6 +888,13 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "La caméra s'est arrêtée",
         "zh": "摄像头已停止",
     },
+    "viewer.camera_busy": {
+        "en": "Another app is using the camera — it is giving one picture a second",
+        "es": "Otra aplicación está usando la cámara — da un cuadro por segundo",
+        "pt": "Outro aplicativo está usando a câmera — dá um quadro por segundo",
+        "fr": "Une autre application utilise la caméra — elle donne une image par seconde",
+        "zh": "另一个应用正在使用摄像头 —— 每秒只有一帧",
+    },
     "viewer.screen": {
         "en": "SCREEN",
         "es": "PANTALLA",

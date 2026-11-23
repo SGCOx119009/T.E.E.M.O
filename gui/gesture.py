@@ -731,6 +731,27 @@ class GestureService(QObject):
         # The tracker is used by the thread of the camera and closed by
         # the thread of the service: the two must not meet.
         self._frame_lock = threading.Lock()
+        # THE LAST PICTURE, AND NOTHING ELSE.
+        #
+        # The camera hands its frames to every reader one after the other,
+        # in the thread that reads the device. Decoding a JPEG and asking
+        # the tracker about it takes longer than the camera takes to
+        # produce the next picture, so doing it there held the other
+        # readers — the live picture of the head, the tile of the viewer —
+        # behind the tracker, and the picture on screen fell behind the
+        # hand by whole frames.
+        #
+        # So the camera thread only LEAVES the picture here, overwriting
+        # the one before it. The tracker thread takes the newest picture
+        # and ignores the ones that piled up while it was busy: a picture
+        # that is already old when it is looked at is worth nothing, and
+        # throwing it away is what makes the hand feel close to the
+        # screen instead of trailing behind it.
+        self._latest_lock = threading.Lock()
+        self._latest_jpeg: bytes | None = None
+        self._latest_seq = 0
+        self._tracked_seq = 0
+        self._track_thread: threading.Thread | None = None
         # THE WINDOW IS GOING AWAY.
         #
         # The service is a child of the window, so when the window dies the
@@ -781,24 +802,38 @@ class GestureService(QObject):
         if self._thread is not None:
             return "the camera is already being watched"
         self._stop.clear()
+        with self._latest_lock:
+            self._latest_jpeg = None
+            self._latest_seq = 0
+            self._tracked_seq = 0
+        # TWO THREADS, ON PURPOSE.
+        #
+        # One waits for the camera and leaves the pictures in the slot;
+        # the other looks for the hands in the newest of them. The tracker
+        # is created, used and closed in that second thread, which is what
+        # the native library asks for, and the camera is never held
+        # waiting for the tracker.
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="gesture")
         self._thread.start()
+        self._track_thread = threading.Thread(target=self._track_loop,
+                                               daemon=True, name="gesture-track")
+        self._track_thread.start()
         return "watching the camera for hands"
 
     def stop(self) -> str:
-        """Stop watching — and WAIT until the thread is really gone.
+        """Stop watching — and WAIT until the threads are really gone.
 
-        The thread holds a tracker, and the tracker holds native memory
-        that the tracking library frees when the Python object dies. If
-        the window goes away while the thread is still inside
-        `detect_for_video`, that free lands on memory the native code is
-        still using, and the process dies with an access violation instead
-        of a goodbye.
+        The tracker holds native memory that the tracking library frees
+        when the Python object dies. If the window goes away while the
+        thread is still inside `detect_for_video`, that free lands on
+        memory the native code is still using, and the process dies with
+        an access violation instead of a goodbye.
 
-        So the order is fixed and it is not negotiable: the thread is
-        asked to stop, the thread is WAITED for, and only then is the
-        tracker released.
+        So the order is fixed and it is not negotiable: the threads are
+        asked to stop, the threads are WAITED for, and only then is the
+        tracker released — and the tracker closes itself in the thread
+        that owns it, once that thread is really gone.
         """
         self._stop.set()
         thread = self._thread
@@ -806,12 +841,17 @@ class GestureService(QObject):
             if thread.is_alive():
                 thread.join(timeout=5.0)
             self._thread = None
+        tracker_thread = self._track_thread
+        if tracker_thread is not None:
+            if tracker_thread.is_alive():
+                tracker_thread.join(timeout=5.0)
+            self._track_thread = None
         with self._lock:
             tracker = self._tracker
             self._tracker = None
         if tracker is not None:
-            # Under the frame lock: a frame that is being tracked right now
-            # must be finished before the native memory is freed.
+            # Under the frame lock: a picture that is being tracked right
+            # now must be finished before the native memory is freed.
             with self._frame_lock:
                 tracker.close()
         # The button and the modifier are let go here as well: a stop that
@@ -831,7 +871,7 @@ class GestureService(QObject):
     # -- the loop ------------------------------------------------------------
 
     def _loop(self) -> None:
-        """Wait for the camera, and track the hands in every frame it gives.
+        """Wait for the camera, and leave every picture it gives to the tracker.
 
         THE CAMERA IS NOT OPENED HERE. It is the one of the whole process
         (core/camera.py), and this service is one of its readers. Two
@@ -839,13 +879,12 @@ class GestureService(QObject):
         camera, and the driver did not survive it: the whole program died
         with an access violation.
 
-        THE TRACKER IS NOT CREATED HERE EITHER. It is created in the
-        thread that receives the frames, which is the thread of the
-        camera: the native tracker and the frames belong to the same
-        thread, and a tracker built in one thread and used in another is
-        not a thing the native library promises anything about.
+        THE TRACKER IS NOT CREATED HERE EITHER. It lives in the thread
+        that looks for the hands (see `_track_loop`), and the native
+        tracker and the pictures belong to the same thread: a tracker
+        built in one thread and used in another is not a thing the native
+        library promises anything about.
         """
-        tracker = None
         try:
             self.state_sig.emit("the hands are being looked for")
             self._enabled = True
@@ -864,7 +903,65 @@ class GestureService(QObject):
                 _unsubscribe(self._on_frame)
             except Exception:
                 pass
-            # THE TRACKER IS ALWAYS CLOSED, AND NEVER UNDER A FRAME.
+            self._enabled = False
+
+    # -- the thread that looks for the hands ---------------------------------
+
+    def _track_loop(self) -> None:
+        """Look for the hands in the newest picture, and only in that one.
+
+        This thread owns the tracker: it creates it, it uses it, and it
+        closes it. The pictures arrive through the slot that `_on_frame`
+        fills, and a picture that is already waiting when this thread
+        comes back for it is thrown away — it is old, and an old picture
+        of a hand is a hand that has moved.
+        """
+        tracker = None
+        try:
+            while not self._stop.is_set():
+                with self._latest_lock:
+                    jpeg = self._latest_jpeg
+                    seq = self._latest_seq
+                    self._latest_jpeg = None
+                if not jpeg:
+                    time.sleep(0.004)
+                    continue
+                if tracker is None:
+                    try:
+                        tracker = HandTracker()
+                    except Exception:                   # noqa: BLE001
+                        return
+                    with self._lock:
+                        self._tracker = tracker
+                    if not tracker.available():
+                        self.state_sig.emit(f"no hand tracker: {tracker.error}")
+                        with self._lock:
+                            self._tracker = None
+                        try:
+                            tracker.close()
+                        except Exception:
+                            pass
+                        return
+                    self.state_sig.emit(
+                        f"the hands are tracked with {tracker.backend}")
+                from core.camera import decode_jpeg
+
+                frame = decode_jpeg(jpeg)
+                if frame is None:
+                    continue
+                try:
+                    hands = tracker.track(frame)
+                except Exception:
+                    continue
+                with self._lock:
+                    self._tracked_seq = seq
+                with self._lock:
+                    self._hands = hands
+                self.hands_sig.emit(hands)
+                if self._drive_pointer and hands:
+                    self._steer(hands)
+        finally:
+            # THE TRACKER IS ALWAYS CLOSED, AND NEVER UNDER A PICTURE.
             #
             # It used to be closed only at the end of a successful watch,
             # so a machine with no camera — or with no hand model, or with
@@ -873,22 +970,21 @@ class GestureService(QObject):
             # landed on memory the library was still using, and the
             # process died with an access violation instead of a goodbye.
             #
-            # AND THE CLOSE WAITS FOR THE FRAME THAT IS BEING TRACKED. The
-            # camera thread may be inside the tracker at this very moment,
-            # and a close that lands in the middle of that frees the
-            # native memory under the library's feet. The lock of the
-            # frame is the same one the camera thread takes.
+            # The close happens HERE, in the thread that owns the
+            # tracker, and never while a picture is being tracked.
+            #
             # The camera is NOT closed here: it is the one of the whole
             # process (core/camera.py), and this service is only one of
             # its readers. Closing it here would take the camera away
             # from the hands of the viewer and of the live stream.
             with self._frame_lock:
-                tracker = self._tracker
                 with self._lock:
                     self._tracker = None
                 if tracker is not None:
-                    tracker.close()
-            self._enabled = False
+                    try:
+                        tracker.close()
+                    except Exception:
+                        pass
             # A button left down is a button the user cannot get rid of:
             # if the hand disappeared while it was pinched, the button has
             # to come up here.
@@ -905,58 +1001,19 @@ class GestureService(QObject):
             self.hands_sig.emit([])
 
     def _on_frame(self, ok: bool, jpeg: bytes) -> None:
-        """One frame of the camera, and the hands in it.
+        """One picture of the camera, left for the tracker.
 
-        It runs on the thread of the camera, and the tracker is CREATED
-        here as well: the native tracker belongs to the thread that asks
-        it for frames, and the camera and the tracker are exactly the two
-        pieces that, together, could take the program down.
-
-        The tracker is behind a lock, because the thread of the service
-        closes it when the watch stops, and a close that lands while a
-        frame is being tracked frees the native memory under the
-        library's feet.
-
-        THE PICTURE IS DECODED HERE, AND ONLY HERE. What arrives is a
-        JPEG; what the tracker needs are pixels. The two that only show
-        the picture draw the JPEG as it is, and this is the one reader
-        that has to look inside it.
+        It runs on the thread of the camera, and it does ONE thing: it
+        leaves the picture in the slot. Decoding it and asking the
+        tracker about it happens in the thread of the tracker, so the
+        camera is never held waiting for the tracker, and the other
+        readers of the camera get their pictures on time.
         """
         if not ok or not jpeg:
             return
-        with self._frame_lock:
-            tracker = self._tracker
-            if tracker is None:
-                try:
-                    tracker = HandTracker()
-                except Exception:                       # noqa: BLE001
-                    return
-                with self._lock:
-                    self._tracker = tracker
-                if not tracker.available():
-                    self.state_sig.emit(f"no hand tracker: {tracker.error}")
-                    with self._lock:
-                        self._tracker = None
-                    try:
-                        tracker.close()
-                    except Exception:
-                        pass
-                    return
-                self.state_sig.emit(f"the hands are tracked with {tracker.backend}")
-            from core.camera import decode_jpeg
-
-            frame = decode_jpeg(jpeg)
-            if frame is None:
-                return
-            try:
-                hands = tracker.track(frame)
-            except Exception:
-                return
-        with self._lock:
-            self._hands = hands
-        self.hands_sig.emit(hands)
-        if self._drive_pointer and hands:
-            self._steer(hands)
+        with self._latest_lock:
+            self._latest_jpeg = jpeg
+            self._latest_seq += 1
 
     def _map_x(self, value: float) -> int:
         """Where the hand is on the X of the screen.
@@ -1281,10 +1338,18 @@ class GestureOverlay(QWidget):
         p = QPainter(self)
         if not p.isActive():
             return
+        # The painter MUST be closed even if the drawing raises: an open
+        # painter makes Qt complain "endPaint() called with active painter"
+        # on every single frame and ruins the paint pipeline.
+        try:
+            self._paint(p)
+        finally:
+            p.end()
+
+    def _paint(self, p: QPainter) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         W, H = self.width(), self.height()
         if W <= 2 or H <= 2:
-            p.end()
             return
         accent = QColor(self._accent)
         for hand in self._hands:
@@ -1355,6 +1420,12 @@ class GestureOverlay(QWidget):
                 p.setPen(QColor(accent.red(), accent.green(), accent.blue(), 180))
                 p.setFont(px_font(9, mono=True))
                 label = f"{hand.handedness.upper()} · {hand.pose.upper()}"
-                p.drawText(QPointF(px[WRIST][0], px[WRIST][1] + 22 * scale),
-                           Qt.AlignmentFlag.AlignHCenter, label)
-        p.end()
+                # PyQt6 has no drawText(QPointF, flags, text): the aligned
+                # overload wants a rectangle. Centre the label under the
+                # wrist in a box of its own.
+                w, h = 160 * scale, 14 * scale
+                x0 = px[WRIST][0] - w / 2.0
+                y0 = px[WRIST][1] + 22 * scale
+                p.drawText(QRectF(x0, y0, w, h),
+                           Qt.AlignmentFlag.AlignHCenter
+                           | Qt.AlignmentFlag.AlignTop, label)

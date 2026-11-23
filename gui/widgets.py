@@ -809,7 +809,7 @@ class ObservationCanvas(QWidget):
         self._mirrored = bool(mirrored)
         self.update()
 
-    def set_frame(self, data: bytes) -> bool:
+    def set_frame(self, data) -> bool:
         """Paint a picture. Returns True when it was read.
 
         IT RUNS ON THE MAIN THREAD, ALWAYS. A QPixmap is a thing of the
@@ -817,18 +817,30 @@ class ObservationCanvas(QWidget):
         one in a worker thread is undefined behaviour, and undefined
         behaviour in Windows is a process that dies without a word. So
         the bytes arrive by a signal and the picture is made here.
+
+        IT ALSO ARRIVES ALREADY UNPACKED. The watchers decode the JPEG
+        on their own thread, because unpacking a picture is a piece of
+        work of its own and the thread that draws the interface has
+        better things to do fifteen times a second. A QImage can be
+        unpacked anywhere; only the painting of it has to happen here.
         """
         if not data:
             return False
-        pix = QPixmap()
-        if not pix.loadFromData(data):
-            return False
-        if self._mirrored:
-            # The camera is seen the way a mirror shows it. The transform
-            # is a QTransform and not a "scale" of the enum: there is no
-            # such thing, and asking for one raised an exception in a
-            # slot — which in Qt is not a message but a `qFatal`, and a
-            # `qFatal` is the whole program dying.
+        if isinstance(data, (bytes, bytearray)):
+            pix = QPixmap()
+            if not pix.loadFromData(bytes(data)):
+                return False
+        else:
+            image = data
+            if self._mirrored:
+                # The camera is seen the way a mirror shows it. The
+                # transform is a QTransform and not a "scale" of the enum:
+                # there is no such thing, and asking for one raised an
+                # exception in a slot — which in Qt is not a message but
+                # a `qFatal`, and a `qFatal` is the whole program dying.
+                image = image.mirrored(True, False)
+            pix = QPixmap.fromImage(image)
+        if self._mirrored and isinstance(data, (bytes, bytearray)):
             pix = pix.transformed(QTransform().scale(-1, 1))
         self._pix = pix
         self.update()
