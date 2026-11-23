@@ -1262,6 +1262,40 @@ class TeemoLive:
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
         self.ui.write_log(f"SYS: Awake — {reason}.")
+        self._briefing_on_wake()
+
+    def _briefing_on_wake(self) -> None:
+        """The morning briefing, the first time the assistant wakes up.
+
+        THE BRIEFING USED TO BE A THING THAT ONLY HAPPENED IF THE PROGRAM
+        CAME UP AWAKE. With the wake word on — which is how the program
+        usually comes up — it came up asleep, the briefing was skipped
+        "because a briefing would be talking in its sleep", and the user
+        was left with a switch that was ON and a morning with no
+        greeting at all. The user asked why, and the answer was that
+        nobody had asked for the briefing to wait for the voice.
+
+        So it waits. The first time the assistant wakes up in a run, the
+        briefing is said — and it is said with the facts gathered here,
+        so it says something even when the model cannot answer.
+        """
+        if getattr(self, "_briefing_sent", False):
+            return
+        try:
+            if not get_brief_enabled():
+                return
+        except Exception:
+            return
+        loop = getattr(self, "_loop", None)
+        if loop is None or not loop.is_running():
+            return
+        self._briefing_sent = True
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._send_startup_briefing(), loop)
+            self.ui.write_log("SYS: The morning briefing is on its way.")
+        except Exception as e:
+            print(f"[T.E.E.M.O] the briefing could not be started: {e!r}")
 
     def sleep(self, reason: str = "timeout") -> None:
         if not self._awake:
@@ -2871,6 +2905,31 @@ class TeemoLive:
         news_future = (loop.run_in_executor(None, _fetch_news_sync, topic)
                        if want_news else None)
 
+        # ── THE FACTS OF THE MORNING ─────────────────────────────────────────
+        #
+        # The greeting used to be a question to the model: "greet the user
+        # warmly and mention the time". And the model could not answer it
+        # properly: it does not know the city, it cannot read the clock
+        # of the machine and it will not call the weather service in the
+        # middle of a greeting. So the facts are read HERE — the clock, the
+        # weather service, the calendar the user authorized — and the text
+        # is written HERE too, so that a morning with a spent quota still
+        # has its greeting, on the screen, in the user's language.
+        briefing: dict = {}
+        try:
+            from core import briefing as _briefing_module
+
+            briefing = await loop.run_in_executor(None, _briefing_module.build)
+        except Exception as exc:                               # noqa: BLE001
+            print(f"[Briefing] the facts could not be gathered: {exc}")
+            briefing = {}
+        briefing_text = str(briefing.get("text") or "")
+        if briefing_text:
+            try:
+                self.ui.show_content("BRIEFING", briefing_text)
+            except Exception:                               # noqa: BLE001
+                pass
+
         await asyncio.sleep(0.3)
         if not self.session:
             return
@@ -2897,9 +2956,27 @@ class TeemoLive:
                 f" Also briefly and naturally mention that {_when}: {last['summary']}"
             )
 
+        # THE FACTS GO INTO THE PROMPT, AS FACTS.
+        #
+        # The prompt used to ask the model to "mention it is 7:20" and
+        # to find the weather by itself. It cannot find the weather: it
+        # does not know the city, and it will not call a service in the
+        # middle of a greeting. So the numbers it needs are given to it,
+        # already measured, and the sentence is its to write.
+        facts_block = ""
+        if briefing:
+            try:
+                from core import briefing as _briefing_module
+
+                facts_block = _briefing_module.facts_for_prompt(briefing)
+            except Exception:                               # noqa: BLE001
+                facts_block = ""
+        facts_clause = (f" These are the facts, use them exactly as they are: "
+                        f"{facts_block}\n" if facts_block else "")
         p1 = (
             f"Greet the user warmly, mention it is {time_str}"
-            f"{', and say you are fetching the news now' if want_news else ''}.{session_clause} "
+            f"{', and say you are fetching the news now' if want_news else ''}."
+            f"{facts_clause}{session_clause} "
             f"Keep it to 2 short sentences max. Do not call any tools.{lang_clause}{name_clause}"
         )
 

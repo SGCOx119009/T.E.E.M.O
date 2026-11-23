@@ -195,7 +195,8 @@ def _forecast(latitude: float, longitude: float):
             "longitude": longitude,
             "current": ("temperature_2m,relative_humidity_2m,apparent_temperature,"
                         "weather_code,wind_speed_10m"),
-            "daily": "temperature_2m_max,temperature_2m_min",
+            "daily": ("temperature_2m_max,temperature_2m_min,weather_code,"
+                      "precipitation_probability_max"),
             "timezone": "auto",
             "forecast_days": 2,
         },
@@ -207,6 +208,70 @@ def _forecast(latitude: float, longitude: float):
     if not current:
         return None, "the weather service sent no current conditions"
     return {"current": current, "daily": daily}, None
+
+
+def _first(value, default=None):
+    """A number, whether the service sent it as a scalar or as a list."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def facts_for(city: str, lang: str = "") -> dict:
+    """The weather of a place, as facts.
+
+    THE BRIEFING NEEDS NUMBERS, NOT SENTENCES. It has to say "it is
+    14 degrees and it is cloudy" and it has to know whether to warn
+    about the rain, and neither of those is a question for a sentence
+    that was written for a chat. So this is the raw reading of the
+    service: the temperature, the condition in English, the high and
+    the low, and the chance of rain.
+
+    An empty dict when the place cannot be found or the service cannot
+    be reached. The caller decides what to do about it; this function
+    never raises.
+    """
+    lang = lang or _language()
+    city = str(city or "").strip()
+    if not city:
+        return {}
+    latitude, longitude, country, error = _geocode(city, lang)
+    if error:
+        return {}
+    data, error = _forecast(latitude, longitude)
+    if error:
+        return {}
+    current = data.get("current") or {}
+    daily = data.get("daily") or {}
+    temp = _first(current.get("temperature_2m"))
+    if temp is None:
+        return {}
+    try:
+        code = int(current.get("weather_code"))
+    except Exception:
+        code = -1
+    facts = {
+        "city": city,
+        "country": country,
+        "temperature_c": round(temp, 1),
+        "condition": _condition_en(code),
+        "high_c": _first(daily.get("temperature_2m_max")),
+        "low_c": _first(daily.get("temperature_2m_min")),
+    }
+    rain = _first(daily.get("precipitation_probability_max"))
+    if rain is not None:
+        facts["rain_probability_pct"] = round(rain)
+    try:
+        daily_code = int((daily.get("weather_code") or [code])[0])
+    except Exception:
+        daily_code = code
+    facts["today_condition"] = _condition_en(daily_code)
+    return facts
 
 
 def weather_action(parameters: dict, player=None, session_memory=None) -> str:
