@@ -201,6 +201,48 @@ def test_no_two_window_buttons_say_the_same_thing(window):
 
 # ── 2. the notification ─────────────────────────────────────────────────────
 
+def test_the_deck_does_not_cover_the_conversation(window, qt_app):
+    """THE DECK IS A COLUMN, NOT A PANEL THAT FLOATS OVER THE OTHER ONE.
+
+    It used to be a floating panel that put itself on top of the
+    right-hand column: the conversation, its rail and all, went under
+    the cards, and there was no way to get them back without closing the
+    deck. Now the deck is a column of its own, between the face and the
+    conversation, and the two never touch.
+    """
+    window._blades.clear()
+    window._push_blade("NEWS", "El tiempo en Tacna", "23:14")
+    window._push_blade("INFORME", "Tres puntos de hoy", "23:15")
+    assert window._blades.is_open(), "the deck did not open with the cards in it"
+    qt_app.processEvents()
+
+    deck = window._blades.geometry()
+    column = window._right_panel.geometry()
+    assert not deck.intersects(column), (
+        "the deck is drawn over the conversation column")
+    assert window._right_panel.isVisible(), \
+        "the conversation column is not on screen"
+    window._blades.clear()
+
+
+def test_the_room_under_the_head_keeps_its_size(window, qt_app):
+    """The room where the drawer of the controls stands is always there.
+
+    It used to appear and disappear with the notifications, so the
+    drawer had a home at the start and lost it after the first report,
+    and the face changed size every time something arrived.
+    """
+    window._show_content("NEWS — Tacna", "Three things.")
+    window._hide_content()
+    qt_app.processEvents()
+    split = window._center_split
+    sizes = split.sizes()
+    idx = split.indexOf(window._lower_stack)
+    assert idx >= 0
+    assert sizes[idx] >= 160, (
+        f"the room under the head is {sizes[idx]} pixels tall: it is a hole")
+
+
 def test_a_notification_opens_and_can_be_closed_with_the_mouse(window):
     window._show_content("NEWS — Tacna", "Three things.")
     assert window._content_panel.isVisible()

@@ -329,17 +329,27 @@ def _sweep_buttons(root, qt_app, where):
 
 
 def test_the_settings_drawer_answers_every_button(window, qt_app):
-    """The drawer behind the gear is a list of controls, and all of them.
+    """Every group of the drawer is a list of controls, and all of them.
 
     A drawer that is closed is not tested by anything: its buttons are
     invisible, so the sweep walks past them. So the drawer is opened and
     swept in its turn.
+
+    AND EVERY GROUP IS SWEPT, NOT ONLY THE ONE THAT WAS OPEN. The drawer
+    is a rail of seven groups, and only the group that is on screen has
+    visible buttons: sweeping the drawer once swept one group out of
+    seven, and the other six were never pressed by anybody.
     """
     window._toggle_drawer(True)
     _pump(qt_app, 0.3)
     assert window._quick_drawer.isVisible(), "the settings drawer did not open"
 
-    pressed = _sweep_buttons(window._quick_drawer, qt_app, "the settings drawer")
+    pressed = 0
+    for key in window._GROUPS:
+        window._select_group(key)
+        _pump(qt_app, 0.2)
+        pressed += _sweep_buttons(window._quick_drawer, qt_app,
+                                 f"the {key} group of the drawer")
     assert pressed > 0, "the settings drawer had no buttons at all"
     assert not window._quitting, "a button in the settings drawer closed the program"
 

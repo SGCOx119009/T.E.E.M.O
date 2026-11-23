@@ -133,6 +133,15 @@ class FloatingPanel(QWidget):
         p = QPainter(self)
         if not p.isActive():
             return
+        try:
+            self._paint(p)
+        finally:
+            # THE PAINTER ALWAYS ENDS. A drawing that raises leaves the
+            # painter open, and Qt complains about it once per frame:
+            # 'QBackingStore::endPaint() called with active painter'.
+            p.end()
+
+    def _paint(self, p: QPainter) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         W, H = self.width(), self.height()
         rect = QRectF(0.5, 0.5, W - 1, H - 1)
@@ -192,7 +201,6 @@ class FloatingPanel(QWidget):
         p.setPen(QPen(fx.qcol(C.TEXT_DIM, 200), 1.2))
         p.drawLine(W - 16, 10, W - 10, 16)
         p.drawLine(W - 16, 16, W - 10, 10)
-        p.end()
 
     # ── the dragging ────────────────────────────────────────────────────────
 

@@ -366,7 +366,7 @@ class Appearance:
         un-pressed, so that the two always tell the same story.
         """
         window = self._window
-        for name in ("_close_controls", "_close_setup"):
+        for name in ("_close_controls",):
             closer = getattr(window, name, None)
             if closer is None:
                 continue

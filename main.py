@@ -3097,7 +3097,14 @@ class TeemoLive:
         log = self._session_log
         if len(log) < 3:          # need at least one exchange to be worth saving
             return
-        self._session_log = []    # reset immediately so the next session starts clean
+        # THE CONVERSATION IS ONLY FORGOTTEN WHEN IT HAS BEEN SUMMARISED.
+        #
+        # The log used to be emptied before the model was asked, so a
+        # failure — and the quota of the model failing is the normal
+        # case, not the rare one — threw away the whole conversation of
+        # the session without saving anything about it. Now the log is
+        # emptied only when there is a summary to put in its place.
+        self._session_log = []
 
         memory = load_memory()
         lang_entry = memory.get("identity", {}).get("language", {})
@@ -3117,8 +3124,12 @@ class TeemoLive:
             )
             if summary:
                 save_session_summary(summary, lang)
+                return
+            # NO SUMMARY, BUT THE CONVERSATION IS STILL THE CONVERSATION.
+            self._session_log = log
         except Exception as e:
             print(f"[Memory] ⚠️ Session summary failed: {e}")
+            self._session_log = log
 
     # ── System monitor ──────────────────────────────────────────────────────────
 

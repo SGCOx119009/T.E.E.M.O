@@ -1174,6 +1174,20 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "JOURNAL",
         "zh": "日志",
     },
+    "label.active": {
+        "en": "RUNNING",
+        "es": "EN MARCHA",
+        "pt": "EM ANDAMENTO",
+        "fr": "EN COURS",
+        "zh": "进行中",
+    },
+    "label.enabled": {
+        "en": "ON",
+        "es": "ACTIVAS",
+        "pt": "LIGADAS",
+        "fr": "ACTIVÉES",
+        "zh": "已启用",
+    },
     "label.input": {
         "en": "INPUT",
         "es": "ENTRADA",

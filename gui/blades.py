@@ -84,7 +84,6 @@ class BladeStack(QWidget):
         # and the card are two different questions and now they have two
         # different answers.
         self._shown = False
-        self._top = 70
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.setMouseTracking(True)
         self.hide()
@@ -245,62 +244,39 @@ class BladeStack(QWidget):
     # ── the geometry ────────────────────────────────────────────────────────
 
     def _deck_width(self) -> int:
-        parent = self.parentWidget()
-        available = parent.width() if parent is not None else self._width
-        return max(220, min(self._width, available - 30))
+        """How wide the column of cards is.
 
-    def _content_height(self, width: int) -> float:
-        """How tall the deck has to be for the cards it holds.
-
-        Exactly as tall as the cards and not one pixel more: a deck that
-        reaches the bottom of the window covers the panel where the user
-        types, and a panel you cannot type in is a panel you cannot use
-        while the deck is open.
+        THE LAYOUT DECIDES. The deck used to be a floating panel that
+        measured itself against the window and put itself on top of the
+        right-hand column: the conversation, its rail and all, went
+        under the cards and the user could not get it back. Now the deck
+        is a column of the interface, between the face and the
+        conversation, and nobody is covered by anybody.
         """
-        total = 0.0
-        for index, blade in enumerate(self._blades):
-            if index == self._active:
-                total += STRIP_H + 2 * PAD - 4 + self._body_height(blade, index, width)
-            else:
-                total += STRIP_H
-            total += GAP
-        return total
+        return max(220, int(self.width() or self._width))
 
     def _ensure_visible(self) -> None:
-        """Put the deck where it belongs.
+        """Nothing to place: the layout owns the geometry now.
 
-        Under the header and over the footer: the deck is a column of
-        cards and not a part of the frame, so it must not sit on top of
-        the bar that has the clock and the buttons.
-
-        AND IT DOES NOT COVER THE TITLE OF THE COLUMN IT LIVES IN. It
-        used to begin at the very top of the right-hand column and hid
-        the name of that column — the user saw a row of cards and no
-        idea of what the column was called.
+        It used to be called after every card that arrived and it put
+        the deck back on top of the conversation. Now the only thing
+        left to do when the width changes is to forget the lines that
+        were wrapped for the old width.
         """
-        parent = self.parentWidget()
-        if parent is None:
-            return
-        top = self._top
-        bottom = 44
-        width = self._deck_width()
-        available = max(STRIP_H * 2, parent.height() - top - bottom)
-        height = max(STRIP_H * 2, min(self._content_height(width), available))
-        self.setGeometry(parent.width() - width - 12, top, int(width), int(height))
-
-    def set_top(self, top: int) -> None:
-        """Where the column of cards begins.
-
-        The window knows where the right-hand column starts and how tall
-        its header is; the deck is told, so it never hides the name of
-        the column it belongs to.
-        """
-        self._top = max(0, int(top))
-        self._ensure_visible()
+        self._lines_cache.clear()
+        self.update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._ensure_visible()
+        # THE LINES BELONG TO THE WIDTH THEY WERE WRAPPED FOR. The column
+        # is as wide as the layout says it is, and the layout says it is
+        # a different width when the window changes. A text wrapped for
+        # the old width is cut in the new one.
+        old = getattr(self, "_last_width", None)
+        if old is not None and old != self.width():
+            self._lines_cache.clear()
+        self._last_width = self.width()
+        self.update()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -391,31 +367,44 @@ class BladeStack(QWidget):
         p = QPainter(self)
         if not p.isActive():
             return
+        try:
+            self._paint(p)
+        finally:
+            # THE PAINTER ALWAYS ENDS. A drawing that raises leaves the
+            # painter open, and Qt complains about it once per frame:
+            # 'QBackingStore::endPaint() called with active painter'.
+            p.end()
+
+    def _paint(self, p: QPainter) -> None:
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         W, H = self.width(), self.height()
 
         if not self._blades:
-            p.end()
             return
 
         # THE BACKDROP.
         #
-        # The deck floats over the right-hand panel, and a card that lets
-        # the panel show through is two cards on top of each other: the
-        # text behind bleeds into the text in front and both become
-        # unreadable. So the column has its own darkness, with a soft
-        # edge on the left so it does not look like a box.
+        # The deck has its own darkness, with a soft edge on the left so
+        # it does not look like a box. It is drawn only as far down as
+        # the cards go: a dark column that goes all the way to the
+        # bottom of the window is a hole, and a hole is not a column of
+        # cards.
+        positions = self._positions()
+        content_h = 0.0
+        if positions:
+            _i, _t, _h = positions[-1]
+            content_h = _t + _h
+        content_h = max(0.0, min(content_h, H))
         shade = QLinearGradient(0, 0, W, 0)
         shade.setColorAt(0.0, fx.qcol(C.DEEP_TOP, 0))
         shade.setColorAt(0.12, fx.qcol(C.DEEP_TOP, 225))
         shade.setColorAt(1.0, fx.qcol(C.DEEP_TOP, 245))
-        p.fillRect(QRectF(0, 0, W, H), QBrush(shade))
+        p.fillRect(QRectF(0, 0, W, content_h), QBrush(shade))
         p.setPen(QPen(fx.qcol(self._accent, 70), 1))
-        p.drawLine(0, 0, 0, H)
+        p.drawLine(QPointF(0, 0), QPointF(0, content_h))
 
         # Where each card starts. The open one is tall; the folded ones are
         # a strip each, and they stack downwards from the top.
-        positions = self._positions()
 
         # The cards behind, so the open one draws over them.
         for index, top, height in positions:
@@ -426,8 +415,6 @@ class BladeStack(QWidget):
             if index != self._active:
                 continue
             self._draw_card(p, index, top, height)
-
-        p.end()
 
     def _body_height(self, blade: Blade, index: int, width: int | None = None) -> float:
         """How tall the body of a card would be if it were fully open.

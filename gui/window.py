@@ -247,6 +247,9 @@ class MainWindow(QMainWindow):
         body = QHBoxLayout()
         body.setContentsMargins(10, 10, 10, 10)
         body.setSpacing(10)
+        # Kept so the deck can be put back in its place between the face
+        # and the conversation when it is built.
+        self._body_layout = body
 
         self._left_panel = self._build_left_panel()
         body.addWidget(self._left_panel, stretch=0)
@@ -576,13 +579,25 @@ class MainWindow(QMainWindow):
 
         # THE DECK.
         #
-        # A column of cards on the right of the interface: everything the
-        # assistant has produced this session, one card each. It is a
-        # child of the central widget and not part of the layout, so it
-        # floats over the panels instead of pushing them around.
-        self._blades = BladeStack(self.centralWidget())
+        # THE DECK IS A COLUMN OF THE INTERFACE.
+        #
+        # It used to be a floating panel that put itself on top of the
+        # right-hand column: the conversation, its rail and all, went
+        # under the cards, and the user could not get them back without
+        # closing the deck. Two things in the same place, one of them
+        # invisible.
+        #
+        # Now it is a column between the face and the conversation. It
+        # takes its space from the middle when it opens and gives it back
+        # when it closes, and it covers nothing at all.
+        self._blades = BladeStack()
+        self._blades.setFixedWidth(self._DECK_W)
         self._blades.hide()
-        self._blades.raise_()
+        try:
+            _at = body.indexOf(self._right_panel)
+            body.insertWidget(_at if _at >= 0 else body.count(), self._blades)
+        except Exception:
+            pass
         self._deck_seen = False        # has the deck ever been opened by itself?
 
         # THE IGNITION.
@@ -1587,6 +1602,10 @@ class MainWindow(QMainWindow):
         appears.
         """
         super().showEvent(event)
+        # THE ROOM UNDER THE HEAD KEEPS ITS SIZE. It is the place where the
+        # drawer of the controls stands and where a report lands, so it is
+        # always there; the face takes the rest of the middle.
+        self._apply_room(self._ROOM_H)
         overlay = getattr(self, "_overlay", None)
         if overlay is not None and overlay.isVisible():
             # The form was placed when the central panel still had the size it
@@ -1649,40 +1668,15 @@ class MainWindow(QMainWindow):
         boot = getattr(self, "_boot", None)
         if boot is not None and boot.isVisible():
             boot.setGeometry(cw.rect())
-        # The deck sits under the header and over the footer.
+        # The deck sits in the layout; there is nothing to place by hand.
         deck = getattr(self, "_blades", None)
-        if deck is not None:
-            self._place_deck_top()
-            if deck.isVisible():
-                deck._ensure_visible()
-        # Quick drawer — reposition if open
-        if hasattr(self, '_quick_drawer') and self._quick_drawer.isVisible():
-            self._position_quick_drawer()
+        if deck is not None and deck.isVisible():
+            deck._ensure_visible()
+        # The drawer — reposition if open. There is only one, and the quick
+        # drawer and the controls drawer are the same widget.
         if hasattr(self, '_ctrl_drawer') and self._ctrl_drawer.isVisible():
             self._position_ctrl_drawer()
         self._fit_video()
-
-    def _place_deck_top(self) -> None:
-        """Where the column of cards begins: under the title of the column.
-
-        THE DECK USED TO BEGIN AT THE VERY TOP of the right-hand column
-        and hid its name. The user saw a row of cards and no idea of
-        what the column was called; the deck is in that column, so it
-        starts under the title of it.
-        """
-        deck = getattr(self, "_blades", None)
-        panel = getattr(self, "_right_panel", None)
-        if deck is None or panel is None:
-            return
-        try:
-            from PyQt6.QtCore import QPoint
-
-            top_left = panel.mapTo(self.centralWidget(), QPoint(0, 0))
-            rail = getattr(self, "_right_rail", None)
-            rail_h = rail.sizeHint().height() if rail is not None else 0
-            deck.set_top(top_left.y() + rail_h + HoloPanel.HEADER + 10)
-        except Exception:
-            pass
 
     def _update_metrics(self):
         snap = _metrics.snapshot()
@@ -1714,7 +1708,6 @@ class MainWindow(QMainWindow):
         self._net_spark.push(net)
         rate = f"{net * 1024:.0f} KB/s" if net < 1.0 else f"{net:.1f} MB/s"
         self._net_panel.set_code(rate)
-        self._row_net.set_value(rate)
 
         try:
             elapsed = time.time() - psutil.boot_time()
@@ -1821,11 +1814,35 @@ class MainWindow(QMainWindow):
             self._left_panel.setFixedWidth(max(190, min(250, int(W * 0.19))))
         if hasattr(self, "_right_panel"):
             self._right_panel.setFixedWidth(max(290, min(400, int(W * 0.27))))
+        self._fit_deck_width()
         # The network graph is the first thing to give up its space: below this
         # height the gauges and the task list need it more, and the rate itself
         # is still in STATUS.
         if hasattr(self, "_net_panel"):
             self._net_panel.setVisible(self.height() >= 820)
+
+    def _fit_deck_width(self) -> None:
+        """How wide the deck of cards can be without pushing anything.
+
+        THE DECK IS A COLUMN AND NOT A PANEL ON TOP OF THE OTHER ONE. It
+        takes its space from the middle, and the middle has a minimum:
+        the face needs three hundred pixels to be a face, the handle of
+        the splitter ten more, and thirty of air around it. In a narrow
+        window the deck gives up the space it cannot have, so the three
+        columns never overlap and nothing is drawn outside the window.
+        """
+        deck = getattr(self, "_blades", None)
+        if deck is None:
+            return
+        try:
+            central = self.centralWidget().width()
+            left = self._left_panel.maximumWidth()
+            right = self._right_panel.maximumWidth()
+        except Exception:
+            return
+        centre_min = 340          # the face, the handle and the air
+        spare = central - left - right - 30 - 20 - centre_min
+        deck.setFixedWidth(max(200, min(self._DECK_W, spare)))
 
     def _refresh_identity_rows(self) -> None:
         """Engine and voice, read from config — on start and whenever they change."""
@@ -2057,12 +2074,16 @@ class MainWindow(QMainWindow):
         os_name = "WINDOWS"
         self._row_uptime = DataRow(_t("label.uptime"), "--:--", "GREEN")
         self._row_proc = DataRow(_t("label.processes"), "--")
-        self._row_net = DataRow(_t("panel.network"), "--")
+        # THE NETWORK IS NOT HERE. The panel of the network, right above,
+        # carries the rate in its own header and the graph under it; a
+        # second line with the same number two centimetres below it was
+        # the same thing twice, and the user read it as two different
+        # things.
         self._row_os = DataRow(_t("label.platform"), os_name)
         self._row_engine = DataRow(_t("label.engine"), "--", "PRI")
         self._row_voice = DataRow(_t("settings.voice"), "--")
-        for row in (self._row_uptime, self._row_proc, self._row_net, self._row_os,
-                    self._row_engine, self._row_voice):
+        for row in (self._row_uptime, self._row_proc,
+                    self._row_os, self._row_engine, self._row_voice):
             stp.body.addWidget(row)
         lay.addWidget(stp)
         self._status_panel = stp
@@ -2118,7 +2139,7 @@ class MainWindow(QMainWindow):
             row.setVisible(r is not None)
         self._routines_empty.setVisible(not items)
         on = sum(1 for r in items if r.get("enabled"))
-        self._tasks_panel.set_code(f"{on} ON" if items else "")
+        self._tasks_panel.set_code(f"{on} {_t('label.enabled')}" if items else "")
 
     def _toggle_routine(self, rid: str, enabled: bool) -> None:
         try:
@@ -2184,7 +2205,7 @@ class MainWindow(QMainWindow):
             row.set_task(task)
             row.setVisible(task is not None)
         self._tasks_empty.setVisible(not shown)
-        self._tasks_panel.set_code(f"{len(active)} ACTIVE" if active else "")
+        self._tasks_panel.set_code(f"{len(active)} {_t('label.active')}" if active else "")
 
     def _open_task(self, tid: str) -> None:
         try:
@@ -2316,6 +2337,21 @@ class MainWindow(QMainWindow):
     # three, so the drawer is four hundred and fifty. Wide enough for the
     # longest sentence a control has to carry, and never wider than that.
     _DRAWER_W = 450
+
+    # HOW WIDE THE DECK OF CARDS IS.
+    #
+    # It is a column of the interface now, between the face and the
+    # conversation, so it takes its width from the middle and leaves
+    # the other two columns alone. Wide enough for a sentence of news
+    # and no wider: a card that is too wide has one very short line.
+    _DECK_W = 340
+
+    # HOW TALL THE ROOM UNDER THE HEAD IS.
+    #
+    # It is where the drawer of the controls stands while it is open and
+    # where a report lands while it is being read. It is always there,
+    # so the face does not change size every time something arrives.
+    _ROOM_H = 300
 
     def _build_controls_drawer(self) -> QWidget:
         """The switches, in groups. One drawer, two doors."""
@@ -2849,45 +2885,19 @@ class MainWindow(QMainWindow):
             drawer.raise_()
 
     def _toggle_drawer(self, checked: bool):
-        """The old name of the one door: the drawer of the tools."""
-        if checked:
-            self._open_group("tools")
-        else:
-            drawer = getattr(self, "_ctrl_drawer", None)
-            if drawer is not None:
-                drawer.hide()
-            self._drawer_btn.setChecked(False)
+        """The old name of the one door: the drawer of the controls.
 
-    def _close_setup(self):
-        if hasattr(self, "_quick_drawer"):
-            self._quick_drawer.hide()
-        if hasattr(self, "_drawer_btn"):
-            self._drawer_btn.setChecked(False)
+        There is ONE door and it opens the group that was open last. This
+        name is kept because other code reached for it; it is the same
+        door, not a second one.
+        """
+        self._toggle_controls(checked)
 
     def _close_controls(self):
         if hasattr(self, "_ctrl_drawer"):
             self._ctrl_drawer.hide()
         if hasattr(self, "_drawer_btn"):
             self._drawer_btn.setChecked(False)
-
-    def _place_drawer(self, drawer, left: int):
-        # Wide enough for the column of names and for a sentence of help
-        # underneath them.
-        drawer.setFixedWidth(self._DRAWER_W)
-        drawer.adjustSize()
-        top = self._header.height() + 2 if hasattr(self, "_header") else 60
-        drawer.setGeometry(left, top, self._DRAWER_W, drawer.sizeHint().height())
-
-    def _position_quick_drawer(self):
-        # There is only ONE drawer. The two buttons of the header are two
-        # doors to it, so placing it in the old corner would move it away
-        # from under the door that was used — and it would fight with
-        # _position_ctrl_drawer over the same widget.
-        quick = getattr(self, "_quick_drawer", None)
-        ctrl = getattr(self, "_ctrl_drawer", None)
-        if quick is None or quick is ctrl:
-            return
-        self._place_drawer(quick, 12)
 
     def _drawer_zone(self):
         """The empty room under the head, when it is empty.
@@ -2966,8 +2976,39 @@ class MainWindow(QMainWindow):
         # and covered the bar with the clock — the user called it "it
         # goes all the way down", and it was true.
         room = max(220, self.height() - top - 52)
+        # AND IT NEVER COVERS THE REPORT.
+        #
+        # When the room under the head is taken, the drawer hangs from
+        # its button, the way a menu does — and it hung over the report
+        # that had arrived, so the first line of the report and its
+        # title were under the glass. The drawer stops where the report
+        # begins.
+        ceiling = self._content_top()
+        if ceiling is not None:
+            room = min(room, max(220, ceiling - top))
         drawer.setGeometry(left, top, self._DRAWER_W,
                            min(drawer.sizeHint().height(), room))
+
+    def _content_top(self) -> int | None:
+        """Where the panel under the head begins, in the coordinates of the
+        central widget — the same ones the drawer is placed in.
+
+        None when there is no panel there: the room is empty and the
+        drawer can be as tall as it wants.
+        """
+        stack = getattr(self, "_lower_stack", None)
+        blank = getattr(self, "_lower_blank", None)
+        central = self.centralWidget()
+        if stack is None or blank is None or central is None:
+            return None
+        try:
+            if stack.currentWidget() is blank:
+                return None
+            if not stack.isVisible():
+                return None
+            return int(stack.mapTo(central, QPoint(0, 0)).y())
+        except Exception:
+            return None
 
     def _build_input_row(self) -> QWidget:
         box = CommandFrame()
@@ -3150,8 +3191,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _shrink_below_hud(self) -> None:
-        """Give the room under the head back to the head."""
+    def _apply_room(self, height: int) -> None:
+        """Give the room under the head a height, and the rest to the face.
+
+        THE ROOM IS A ROOM, NOT A HOLE. It used to appear and disappear:
+        when a report was shown the room grew, and when the report went
+        away the room went with it — so the drawer of the controls had
+        a home at the start and lost it after the first notification,
+        and the face was bigger one minute and smaller the next. Now the
+        room keeps its size and only its content changes.
+        """
         split = getattr(self, "_center_split", None)
         stack = getattr(self, "_lower_stack", None)
         if split is None or stack is None:
@@ -3161,13 +3210,22 @@ class MainWindow(QMainWindow):
         if idx < 0 or idx >= len(sizes):
             return
         total = sum(sizes) or split.height()
+        if total <= 0:
+            return
+        room = max(160, min(int(height), max(160, total - 200)))
+        if abs(sizes[idx] - room) < 8:
+            return
         new = list(sizes)
-        new[idx] = 0
-        new[0] = total
+        new[idx] = room
+        new[0] = max(120, total - room)
         try:
             split.setSizes(new)
         except Exception:
             pass
+
+    def _shrink_below_hud(self) -> None:
+        """Give the room under the head back to the head."""
+        self._apply_room(self._ROOM_H)
 
     def _reveal_below_hud(self, panel: QWidget, want: int) -> None:
         """Show one panel under the HUD at a usable height.
@@ -5171,6 +5229,9 @@ class MainWindow(QMainWindow):
             self._blades.show()
             self._blades.raise_()
         self._deck_seen = True
+        # The columns share what is left, and the deck has just taken a
+        # piece of it or given it back.
+        self._fit_side_columns()
 
     def _push_blade(self, title: str, text: str, code: str = "") -> None:
         """Put a card in the deck, and open the deck the first time.
