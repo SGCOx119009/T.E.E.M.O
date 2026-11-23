@@ -1025,6 +1025,18 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
     "gesture.pose.hand": {
         "en": "HAND", "es": "MANO", "pt": "MÃO", "fr": "MAIN", "zh": "手",
     },
+    "gesture.pose.thumb_up": {
+        "en": "THUMB UP", "es": "PULGAR ARRIBA", "pt": "POLEGAR PARA CIMA",
+        "fr": "POUCE EN HAUT", "zh": "拇指向上",
+    },
+    "gesture.pose.thumb_down": {
+        "en": "THUMB DOWN", "es": "PULGAR ABAJO", "pt": "POLEGAR PARA BAIXO",
+        "fr": "POUCE VERS LE BAS", "zh": "拇指向下",
+    },
+    "gesture.pose.l": {
+        "en": "L SHAPE", "es": "MANO EN L", "pt": "MÃO EM L", "fr": "MAIN EN L",
+        "zh": "L形手势",
+    },
     "gesture.action.move": {
         "en": "move", "es": "mover", "pt": "mover", "fr": "déplacer", "zh": "移动",
     },
@@ -1070,6 +1082,65 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
     "gesture.action.rest": {
         "en": "let go", "es": "soltar todo", "pt": "largar tudo", "fr": "tout lâcher",
         "zh": "松开",
+    },
+    "gesture.action.clutch": {
+        "en": "clutch", "es": "embrague", "pt": "embrague", "fr": "embrayage",
+        "zh": "离合",
+    },
+    "gesture.action.confirm": {
+        "en": "confirm", "es": "confirmar", "pt": "confirmar", "fr": "confirmer",
+        "zh": "确认",
+    },
+    "gesture.action.approve": {
+        "en": "approve", "es": "aprobar", "pt": "aprovar", "fr": "approuver",
+        "zh": "批准",
+    },
+    "gesture.action.reject": {
+        "en": "reject", "es": "rechazar", "pt": "rejeitar", "fr": "refuser",
+        "zh": "拒绝",
+    },
+    "gesture.action.switch window": {
+        "en": "switch window", "es": "cambiar de ventana",
+        "pt": "trocar de janela", "fr": "changer de fenêtre", "zh": "切换窗口",
+    },
+    "gesture.action.maximize": {
+        "en": "maximize", "es": "maximizar", "pt": "maximizar", "fr": "agrandir",
+        "zh": "最大化",
+    },
+    "gesture.action.minimize": {
+        "en": "minimize", "es": "minimizar", "pt": "minimizar", "fr": "réduire",
+        "zh": "最小化",
+    },
+    "gesture.action.dictation": {
+        "en": "dictation", "es": "dictado", "pt": "ditado", "fr": "dictee",
+        "zh": "听写",
+    },
+    "gesture.action.screenshot": {
+        "en": "screenshot", "es": "captura", "pt": "captura", "fr": "capture",
+        "zh": "截图",
+    },
+    "gesture.action.area": {
+        "en": "select area", "es": "seleccionar área", "pt": "selecionar área",
+        "fr": "sélection de zone", "zh": "选择区域",
+    },
+    "gesture.action.sleep": {
+        "en": "sleep", "es": "dormir", "pt": "dormir", "fr": "dormir",
+        "zh": "休眠",
+    },
+
+    # -- what the hand says about what it just did -----------------------------
+    "gesture.confirmed": {
+        "en": "the hand approved it", "es": "la mano lo aprobó",
+        "pt": "a mão aprovou", "fr": "la main l'a approuvé", "zh": "手已批准",
+    },
+    "gesture.rejected": {
+        "en": "the hand rejected it", "es": "la mano lo rechazó",
+        "pt": "a mão rejeitou", "fr": "la main l'a refusé", "zh": "手已拒绝",
+    },
+    "gesture.asleep": {
+        "en": "T.E.E.M.O. went to sleep", "es": "T.E.E.M.O. se durmió",
+        "pt": "T.E.E.M.O. adormeceu", "fr": "T.E.E.M.O. s'est endormi",
+        "zh": "T.E.E.M.O. 睡着了",
     },
 
     # -- the groups of the controls drawer ------------------------------------
@@ -3293,6 +3364,44 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
               "d'une étoile parce qu'il ne devrait le prendre que pendant que "
               "l'assistant écoute — cette règle n'est pas encore écrite.",
         "zh": "手接管真实指针，捏合即点击。标星号是因为它本应只在助手聆听时接管指针——这条规则还没写。",
+    },
+    "controls.gesture_advanced": {
+        "en": "ADVANCED GESTURES", "es": "GESTOS AVANZADOS",
+        "pt": "GESTOS AVANÇADOS", "fr": "GESTES AVANCÉS", "zh": "高级手势",
+    },
+    "controls.gesture_advanced_tip": {
+        "en": "The gestures that change the desktop: switching windows, "
+              "maximising, minimising, the screenshot, the thumb that approves "
+              "and rejects, the L that wakes T.E.E.M.O. up and the clap that "
+              "puts it to sleep. Off by default.",
+        "es": "Los gestos que cambian el escritorio: cambiar de ventana, "
+              "maximizar, minimizar, la captura, el pulgar que aprueba y "
+              "rechaza, la L que despierta a T.E.E.M.O. y el choque de palmas "
+              "que lo duerme. Desactivados por defecto.",
+        "pt": "Os gestos que mudam a área de trabalho: trocar de janela, "
+              "maximizar, minimizar, a captura, o polegar que aprova e rejeita, "
+              "o L que acorda o T.E.E.M.O. e o bater de palmas que o adormece. "
+              "Desativados por omissão.",
+        "fr": "Les gestes qui changent le bureau : changer de fenêtre, "
+              "agrandir, réduire, la capture, le pouce qui approuve et refuse, "
+              "le L qui réveille T.E.E.M.O. et l'applaudissement qui l'endort. "
+              "Désactivés par défaut.",
+        "zh": "改变桌面的手势：切换窗口、最大化、最小化、截图、拇指的批准与拒绝、"
+              "唤醒 T.E.E.M.O. 的 L 手势以及让它入睡的击掌。默认关闭。",
+    },
+    "controls.gesture_advanced_on": {
+        "en": "the advanced gestures are armed",
+        "es": "los gestos avanzados están activados",
+        "pt": "os gestos avançados estão ativados",
+        "fr": "les gestes avancés sont activés",
+        "zh": "高级手势已启用",
+    },
+    "controls.gesture_advanced_off": {
+        "en": "the advanced gestures are disarmed",
+        "es": "los gestos avanzados están desactivados",
+        "pt": "os gestos avançados estão desativados",
+        "fr": "les gestes avancés sont désactivés",
+        "zh": "高级手势已禁用",
     },
     "controls.pending": {
         "en": "* = not finished yet",
