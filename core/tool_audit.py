@@ -97,6 +97,10 @@ _READ_ONLY_VERIFICATION_ACTIONS = {
         "extract_preview", "search",
     },
     "gmail_control": {"search"},
+    # THE CALENDAR IS READ ONLY, LIKE THE MAIL. Reading what is on it
+    # changes nothing, and the moment to leave for the first class of
+    # the day is a fact about the day, not an act on it.
+    "calendar_control": {"today", "days"},
 }
 _ACTION_RISK = {
     "browser_control": {

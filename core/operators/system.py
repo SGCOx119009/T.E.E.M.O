@@ -31,7 +31,7 @@ class SystemOperator(Operator):
         "The machine's settings and its effects outside it: sound, display, "
         "network, and its power and energy (the battery, the charging state "
         "and the power plan); reminders and routines; and the channels that "
-        "reach another person."
+        "reach another person, read or written — the mail and the calendar."
     )
     context = "system"
     risk_class = "high"
@@ -43,4 +43,5 @@ class SystemOperator(Operator):
         "game_updater",
         "send_message",
         "gmail_control",
+        "calendar_control",
     )

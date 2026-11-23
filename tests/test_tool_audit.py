@@ -263,8 +263,10 @@ class ToolAuditTests(unittest.TestCase):
             action_key = "mode" if tool == "web_search" else "action"
             for action in actions:
                 with self.subTest(tool=tool, action=action):
+                    # The mail and the calendar reach outside the machine:
+                    # reading them is an external act, not a local one.
                     expected_risk = (
-                        "external" if tool == "gmail_control"
+                        "external" if tool in {"gmail_control", "calendar_control"}
                         else "read_or_navigate"
                     )
                     self.assertEqual(
