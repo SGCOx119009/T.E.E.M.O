@@ -507,6 +507,9 @@ class MainWindow(QMainWindow):
         # that could be mistaken for a copy of each other.
         self._ctrl_drawer = self._build_controls_drawer()
         self._quick_drawer = self._ctrl_drawer
+        # Whether the drawer is a COLUMN of the interface (next to the face)
+        # or a panel that stands in the room under the head.
+        self._drawer_in_column = False
         # Whether the drawer is standing in the room under the head or
         # hanging from the button that opened it.
         self._ctrl_in_zone = False
@@ -575,6 +578,17 @@ class MainWindow(QMainWindow):
         # while the program was running. The user asked what that was:
         # it was the program greeting them with their own clipboard.
         self._last_clip_text = self._current_clipboard_text()
+        # THE FIRST SECONDS OF THE PROGRAM ARE NOT NEWS EITHER.
+        #
+        # Windows hands the clipboard over a moment after the program
+        # starts, not at the very moment it is asked for it: the text the
+        # user had copied BEFORE the program was opened comes back as if
+        # it were a new copy, and the panel comes up out of nowhere
+        # greeting the user with their own clipboard.
+        #
+        # So the first clipboard that arrives in the first few seconds is
+        # only remembered, never offered.
+        self._started_at = time.monotonic()
         QApplication.clipboard().dataChanged.connect(self._on_clipboard_changed)
 
         # THE DECK.
@@ -1634,6 +1648,19 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._fit_side_columns()
+        # THE DRAWER CHANGES ITS PLACE WHEN THE WINDOW DOES.
+        #
+        # A window that becomes wide enough takes the drawer as a column
+        # next to the face; a window that becomes narrow gives it back to
+        # the room under the head. The drawer is never in a place the
+        # window cannot hold.
+        drawer = getattr(self, "_ctrl_drawer", None)
+        if drawer is not None and drawer.isVisible():
+            if self._drawer_in_column and not self._drawer_fits_as_column():
+                self._set_drawer_as_column(False)
+                self._position_ctrl_drawer()
+            elif not self._drawer_in_column and self._drawer_fits_as_column():
+                self._set_drawer_as_column(True)
         cw = self.centralWidget()
         if self._overlay and self._overlay.isVisible():
             self._centre_setup_overlay()
@@ -1842,6 +1869,11 @@ class MainWindow(QMainWindow):
             return
         centre_min = 340          # the face, the handle and the air
         spare = central - left - right - 30 - 20 - centre_min
+        # THE DRAWER, WHEN IT IS A COLUMN, TAKES ITS WIDTH FROM THE SAME
+        # PLACE. The deck gives up what the drawer needs, because the
+        # drawer is the one the user opened on purpose.
+        if getattr(self, "_drawer_in_column", False):
+            spare -= self._DRAWER_W
         deck.setFixedWidth(max(200, min(self._DECK_W, spare)))
 
     def _refresh_identity_rows(self) -> None:
@@ -1973,7 +2005,7 @@ class MainWindow(QMainWindow):
         groups. They are here now, one press away, and the drawer keeps
         the rest.
 
-        THE BLOCK IS FIVE BY TWO
+        THE BLOCK IS FOUR BY TWO
         ------------------------
         It used to be two by five, and the column was not tall enough for
         it: the panel wanted two hundred and forty-one pixels and had
@@ -1981,6 +2013,17 @@ class MainWindow(QMainWindow):
         outside the panel and the two bottom ones could not be pressed.
         Five across and two down fits the column whole, and a block of
         small squares in the corner of the eye reads like a keypad.
+
+        AND THERE ARE EIGHT, NOT TEN
+        -----------------------------
+        The full screen, the maximize and the minimize were here as well,
+        and they were the same three buttons that are in the header and
+        in the VENTANA group of the drawer — where they are explained.
+        Three buttons that say the same thing in three places is one
+        button too many, and the user said there were icons too many.
+
+        The eighth one is the language, which had no way in at all
+        except through the drawer.
         """
         panel = HoloPanel(_t("panel.quick"), "")
         grid = QWidget()
@@ -1997,17 +2040,15 @@ class MainWindow(QMainWindow):
 
         _buttons = (
             ("mic", _t("window.mute_tip"), self._toggle_mute),
-            ("expand", _t("window.fullscreen_tip"), self._toggle_fullscreen),
-            ("max", _t("window.maximize"), self._maximize_window),
-            ("min", _t("window.minimize"), self._minimize_window),
             ("eye", _t("controls.hud_tip_face"), self._toggle_hud_style),
-            ("grid", _t("window.open_viewer_tip"), self._toggle_viewer),
             ("hand", _t("controls.gesture_tip"), self._toggle_gesture),
+            ("grid", _t("window.open_viewer_tip"), self._toggle_viewer),
             ("deck", _t("controls.deck_tip"), self._toggle_blades),
             ("sliders", _t("window.controls_drawer_tip"), self._open_controls),
             ("bell", _t("window.briefing_tip"), self._ask_briefing),
+            ("globe", _t("group.language"), self._open_language),
         )
-        _COLS = 5
+        _COLS = 4
         for _i, (_kind, _tip, _slot) in enumerate(_buttons):
             gl.addWidget(_icon(_kind, _tip, _slot), _i // _COLS, _i % _COLS)
         for _c in range(_COLS):
@@ -2015,6 +2056,10 @@ class MainWindow(QMainWindow):
         panel.body.addWidget(grid)
         self._quick_panel = panel
         return panel
+
+    def _open_language(self) -> None:
+        """The drawer on the language, from the quick access."""
+        self._open_group("language")
 
     def _open_controls(self) -> None:
         """The drawer of the everyday switches, from the quick access."""
@@ -2456,6 +2501,15 @@ class MainWindow(QMainWindow):
             lbl.setFont(px_font(9))
             lbl.setWordWrap(True)
             lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+            # THE TEXT OF THE CONTROLS CAN BE COPIED.
+            #
+            # The user asked to copy what the controls say and paste it to
+            # the assistant: "no deja seleccionar el texto". A label that
+            # cannot be selected is a sentence that has to be read aloud
+            # and typed by hand, and a setting that cannot be copied
+            # cannot be reported.
+            lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextBrowserInteraction)
             layout.addWidget(lbl)
             return lbl
 
@@ -2489,6 +2543,7 @@ class MainWindow(QMainWindow):
         # flicked every day, all in one place, because they are the ones
         # that are used every day.
         voice = self._group_layouts["voice"]
+        _cap(voice, _t("drawer.voice.explain"))
 
         self._wake_btn = _row(voice, QPushButton())
         self._wake_btn.clicked.connect(self._toggle_wake_word)
@@ -2576,6 +2631,7 @@ class MainWindow(QMainWindow):
         # convenience, not a cage, and somebody who lives somewhere the
         # product has never heard of still has to be able to say so.
         language = self._group_layouts["language"]
+        _cap(language, _t("drawer.language.explain"))
 
         self._language_caption = _cap(language, _t("settings.language"))
         self._language_combo = QComboBox()
@@ -2625,6 +2681,7 @@ class MainWindow(QMainWindow):
         # moment it is touched: a face that changes only on the next restart
         # is a setting the user cannot see.
         look = self._group_layouts["look"]
+        _cap(look, _t("drawer.look.explain"))
 
         self._appearance_caption = _cap(look, _t("appearance.title"))
         self._appearance_combo = _combo(look, [
@@ -2653,6 +2710,13 @@ class MainWindow(QMainWindow):
         # buttons said the same word and the user could not tell which was
         # which. Now the maximize button is the one that goes there and
         # comes back, and the word that tells it to is on it.
+        #
+        # AND THE THREE SAY WHAT THEY DO. The user asked what the difference
+        # was between them, and a button that only says "MAXIMIZAR" does not
+        # answer it: a line under them says that the maximized window keeps
+        # the taskbar, the full screen does not, and the minimized one leaves
+        # only the icon.
+        _cap(look, _t("drawer.window_shapes.explain"))
         self._maximize_btn = _row(look, QPushButton(_t("window.maximize")),
                                   self._BTN_DIM)
         self._maximize_btn.clicked.connect(self._maximize_window)
@@ -2671,6 +2735,7 @@ class MainWindow(QMainWindow):
         # the pinch is a click. ONE hand: with two, the pointer jumped
         # from one to the other.
         hand = self._group_layouts["hand"]
+        _cap(hand, _t("drawer.hand.explain"))
 
         self._gesture_btn = _row(hand, QPushButton(_t("controls.gesture")),
                                  self._BTN_DIM)
@@ -2697,12 +2762,15 @@ class MainWindow(QMainWindow):
         # somebody else's window: it follows the assistant and can be dragged
         # anywhere with the mouse or with the hand.
         session = self._group_layouts["session"]
+        _cap(session, _t("drawer.session.explain"))
+        _cap(session, _t("drawer.deck.explain"))
 
         self._deck_btn_ctrl = _row(session, QPushButton(_t("controls.deck")),
                                    self._BTN_DIM)
         self._deck_btn_ctrl.setToolTip(_t("controls.deck_tip"))
         self._deck_btn_ctrl.clicked.connect(self._toggle_blades)
 
+        _cap(session, _t("drawer.floating.explain"))
         self._floating_btn = _row(session, QPushButton(_t("controls.floating")),
                                   self._BTN_DIM)
         self._floating_btn.setToolTip(_t("controls.floating_tip"))
@@ -2747,6 +2815,7 @@ class MainWindow(QMainWindow):
         # not installed at all, which cost half a minute and opened the
         # wrong player on the way to the right one.
         system = self._group_layouts["system"]
+        _cap(system, _t("drawer.system.explain"))
 
         self._music_caption = _cap(system, _t("music.service"))
         self._music_combo = _combo(system, [
@@ -2773,16 +2842,32 @@ class MainWindow(QMainWindow):
         #
         # The things that are set once: the phone, the shortcut, the devices,
         # the memory, the plugins, the engine.
+        #
+        # EACH ONE SAYS WHAT IT IS. The group used to be nine buttons with
+        # nine names and no explanation, and the user could not tell what
+        # any of them was for — "no veo orden y diseño futurista ahí". A
+        # line under each button says what it opens, and the group says
+        # that each of them opens a window of its own, which is the thing
+        # that made them look like loose buttons.
         tools = self._group_layouts["tools"]
+        _cap(tools, _t("drawer.tools.explain"))
 
+        _cap(tools, _t("drawer.tool.remote"))
         _btn(tools, _t("controls.remote"), self._open_remote, self._BTN_PRI)
+        _cap(tools, _t("drawer.tool.shortcut"))
         _btn(tools, _t("controls.shortcut"), self._create_desktop_shortcut)
+        _cap(tools, _t("drawer.tool.autostart"))
         self._autostart_btn = _btn(tools, _t("controls.autostart_off"),
                                    self._toggle_autostart)
+        _cap(tools, _t("drawer.tool.customise"))
         _btn(tools, _t("controls.customise"), self._open_customize)
+        _cap(tools, _t("drawer.tool.audio"))
         _btn(tools, _t("controls.audio_devices"), self._open_audio_devices)
+        _cap(tools, _t("drawer.tool.memory"))
         _btn(tools, _t("controls.memory"), self._open_memory_panel)
+        _cap(tools, _t("drawer.tool.plugins"))
         _btn(tools, _t("controls.plugins"), self._open_plugin_manager)
+        _cap(tools, _t("drawer.tool.plugin_settings"))
         _btn(tools, _t("controls.plugin_settings"), self._open_plugin_settings)
         # The button is built here with the rest of the drawer; the panel behind
         # it — and the whole providers package — is imported on the click. The
@@ -2791,6 +2876,7 @@ class MainWindow(QMainWindow):
         # second thing that does that would undo the fix rather than repeat it.
         # "&&": a single & in a button label is Qt's shortcut marker, and it
         # was being drawn as an underscore — "ENGINE _PROVIDERS".
+        _cap(tools, _t("drawer.tool.providers"))
         _btn(tools, _t("controls.engine_providers"), self._open_providers)
 
         for _page in self._group_pages.values():
@@ -2801,8 +2887,87 @@ class MainWindow(QMainWindow):
         self._refresh_appearance_combo()
         self._select_group("voice")
 
+        # THE BUTTON THAT COPIES THE CONTROLS.
+        #
+        # The user wants to copy what the controls say and paste it to the
+        # assistant. The labels can be selected one by one, but a whole
+        # group is what he actually wants to report: "these are the
+        # settings I have". So the group he is looking at is written to
+        # the clipboard as text, with the name of every control and the
+        # value it has.
+        self._copy_btn = QPushButton(_t("drawer.copy"))
+        self._copy_btn.setFont(px_font(8, QFont.Weight.Bold))
+        self._copy_btn.setFixedHeight(20)
+        self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._copy_btn.setToolTip(_t("drawer.copy_tip"))
+        self._copy_btn.setStyleSheet(f"""
+            QPushButton {{
+                color: {C.TEXT_DIM}; background: transparent;
+                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 1px 6px;
+            }}
+            QPushButton:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM}; }}
+        """)
+        self._copy_btn.clicked.connect(self._copy_group_text)
+        w.add_header_widget(self._copy_btn)
+
         w.adjustSize()
         return w
+
+    # ── copying the controls ────────────────────────────────────────────────
+
+    def _group_text(self, key: str) -> str:
+        """The open group written out as text: what it is and what it holds."""
+        page = self._group_pages.get(key)
+        if page is None:
+            return ""
+        rows: list[str] = []
+        for widget in page.findChildren(QWidget):
+            try:
+                if not widget.isVisible():
+                    continue
+                if isinstance(widget, QLabel):
+                    text = widget.text().strip()
+                    if text:
+                        rows.append(text)
+                elif isinstance(widget, QPushButton):
+                    rows.append(widget.text().strip())
+                elif isinstance(widget, QComboBox):
+                    rows.append(f"{widget.currentText().strip()}")
+                elif isinstance(widget, QLineEdit):
+                    rows.append(f"{widget.text().strip()}")
+            except Exception:
+                continue
+        title = ""
+        rail = getattr(self, "_group_rail", None)
+        if rail is not None:
+            try:
+                title = rail.text_of(key)
+            except Exception:
+                title = ""
+        head = title or str(key)
+        return "\n".join([head] + [f"- {row}" for row in rows])
+
+    def _copy_group_text(self) -> None:
+        """Put the open group on the clipboard, so it can be pasted and sent."""
+        key = str(getattr(self, "_last_group", "") or "")
+        text = self._group_text(key)
+        if not text:
+            return
+        try:
+            QApplication.clipboard().setText(text)
+        except Exception:
+            return
+        try:
+            self._copy_btn.setText(_t("drawer.copied"))
+        except Exception:
+            return
+        QTimer.singleShot(1600, lambda: self._reset_copy_label())
+
+    def _reset_copy_label(self) -> None:
+        try:
+            self._copy_btn.setText(_t("drawer.copy"))
+        except Exception:
+            pass
 
     def _select_group(self, key: str) -> None:
         """Open one group of the drawer.
@@ -2861,6 +3026,19 @@ class MainWindow(QMainWindow):
         user could not tell them apart: two buttons, the same drawer. The
         drawer has a rail of seven groups inside it, so the button does
         not have to choose; it opens the group that was open last.
+
+        WHERE IT OPENS DEPENDS ON THE WINDOW. When the window is wide
+        enough the drawer is a COLUMN of the interface, right next to the
+        face of the assistant — the same thing the deck of cards is, and
+        it takes its width from the middle instead of hovering over it.
+        The face does not move, nothing is covered, and the open group is
+        seen whole from top to bottom.
+
+        It used to drop to the bottom of the middle column, under the
+        face, and the user could not tell what it belonged to: "abro
+        controles y se va para abajo". In a narrow window there is no room
+        for a third column, and the drawer goes back to standing in the
+        room under the head, the way a menu does.
         """
         drawer = getattr(self, "_ctrl_drawer", None)
         if drawer is None:
@@ -2868,11 +3046,14 @@ class MainWindow(QMainWindow):
         if checked:
             self._refresh_wake_btns()   # cheap now: the state was warmed at boot
             self._select_group(getattr(self, "_last_group", "") or "voice")
+            if self._drawer_fits_as_column():
+                self._set_drawer_as_column(True)
             self._position_ctrl_drawer()
             drawer.show()
             drawer.raise_()
         else:
             drawer.hide()
+            self._face_covered(False)
 
     def _open_group(self, key: str) -> None:
         """Open the drawer on one group in particular."""
@@ -2897,6 +3078,7 @@ class MainWindow(QMainWindow):
     def _close_controls(self):
         if hasattr(self, "_ctrl_drawer"):
             self._ctrl_drawer.hide()
+        self._face_covered(False)
         if hasattr(self, "_drawer_btn"):
             self._drawer_btn.setChecked(False)
 
@@ -2932,6 +3114,114 @@ class MainWindow(QMainWindow):
             return None
         return rect
 
+    def _face_covered(self, covered: bool) -> None:
+        """The core steps aside while the controls are in the center.
+
+        THE FACE IS NOT HIDDEN FOR GOOD. The drawer takes the middle of
+        the column because the controls belong where the core was, and
+        the core is put back the moment the drawer is closed.
+        """
+        hud = getattr(self, "_hud_cam_stack", None)
+        if hud is None:
+            return
+        covered = bool(covered)
+        try:
+            if hud.isHidden() != covered:
+                hud.setVisible(not covered)
+        except Exception:
+            pass
+
+    def _drawer_column(self):
+        """The whole column of the middle, when the room under the head is free.
+
+        THE CONTROLS TAKE THE CENTER OF THE COLUMN.
+
+        The drawer used to stand in the room under the head, and the room
+        is at the bottom of the window: the user opened the controls and
+        they went down, far from the button that opened them, and the
+        core of the assistant was left alone in the middle of the column
+        with nothing else around it.
+
+        When the room is empty there is nothing to cover, so the drawer
+        takes the column — the same place where the core was, from the
+        top of the face down to the bottom of the window. The controls
+        come to the center, and they are as tall as the space there is,
+        so the list of switches does not have to be scrolled to be read.
+        """
+        stack = getattr(self, "_lower_stack", None)
+        blank = getattr(self, "_lower_blank", None)
+        split = getattr(self, "_center_split", None)
+        central = self.centralWidget()
+        if stack is None or blank is None or split is None or central is None:
+            return None
+        try:
+            if stack.currentWidget() is not blank:
+                return None
+            if not stack.isVisible():
+                return None
+            top_left = split.mapTo(central, QPoint(0, 0))
+            rect = QRect(top_left.x(), top_left.y(), split.width(), split.height())
+        except Exception:
+            return None
+        # A column too narrow for the drawer is not a column for the drawer.
+        if rect.height() < 340 or rect.width() < self._DRAWER_W + 20:
+            return None
+        return rect
+
+    def _drawer_fits_as_column(self) -> bool:
+        """Is there room in the middle column for the drawer as a column?
+
+        THE DRAWER IS A COLUMN WHEN THE WINDOW IS WIDE ENOUGH. It needs
+        its four hundred and fifty pixels, the face needs three hundred
+        and forty (the face, the handle of the splitter and the air), and
+        the deck of cards needs two hundred more. When all three fit, the
+        drawer stands next to the face. When they do not, the drawer goes
+        back to the room under the head.
+        """
+        try:
+            central = self.centralWidget().width()
+            left = self._left_panel.maximumWidth()
+            right = self._right_panel.maximumWidth()
+        except Exception:
+            return False
+        centre_min = 340          # the face, the handle and the air
+        spare = central - left - right - 30 - 20 - centre_min
+        return spare >= self._DRAWER_W + 200
+
+    def _set_drawer_as_column(self, on: bool) -> None:
+        """The drawer is a column of the interface, or it is not.
+
+        A widget is either in the layout or it floats over it, and the
+        drawer does both depending on the window: as a column it is
+        placed by the layout (full height, nothing covered), and as a
+        panel it is placed by hand in the room under the head.
+        """
+        drawer = getattr(self, "_ctrl_drawer", None)
+        body = getattr(self, "_body_layout", None)
+        if drawer is None or body is None:
+            return
+        if on:
+            if self._drawer_in_column:
+                return
+            try:
+                at = body.indexOf(self._blades)
+                body.insertWidget(at + 1 if at >= 0 else body.count(), drawer)
+                drawer.setFixedWidth(self._DRAWER_W)
+                drawer.setMaximumHeight(16777215)
+                self._drawer_in_column = True
+            except Exception:
+                self._drawer_in_column = False
+            return
+        if not self._drawer_in_column:
+            return
+        self._drawer_in_column = False
+        try:
+            # Out of the layout and back to being a panel over the window.
+            drawer.setParent(self.centralWidget())
+            drawer.setFixedWidth(self._DRAWER_W)
+        except Exception:
+            pass
+
     def _position_ctrl_drawer(self):
         """Where the drawer hangs.
 
@@ -2950,13 +3240,50 @@ class MainWindow(QMainWindow):
         drawer = getattr(self, "_ctrl_drawer", None)
         if drawer is None:
             return
+        if self._drawer_in_column:
+            # IT IS A COLUMN: the layout places it, and there is nothing
+            # to place by hand.
+            self._ctrl_in_zone = False
+            self._face_covered(False)
+            return
+
+        # THE CENTER OF THE COLUMN FIRST.
+        #
+        # The controls come to where the core is, and the core steps
+        # aside while they are there. The room under the head is for the
+        # reports — a news item, a search result, the viewer — and when
+        # there is one, the drawer hangs from its button instead.
+        column = self._drawer_column()
+        if column is not None:
+            width = min(self._DRAWER_W, column.width())
+            x = column.x() + (column.width() - width) // 2
+            drawer.setFixedWidth(width)
+            # IT IS AS TALL AS THE GROUP IT SHOWS. A panel of glass the
+            # height of the whole column with five switches in it is a
+            # panel with nothing in it; the drawer ends where the last
+            # control ends, and it never grows taller than the column.
+            try:
+                drawer.adjustSize()
+            except Exception:
+                pass
+            height = max(200, min(column.height(), drawer.height()))
+            drawer.setGeometry(x, column.y(), width, height)
+            self._ctrl_in_zone = True
+            self._face_covered(True)
+            return
+        self._face_covered(False)
 
         zone = self._drawer_zone()
         self._ctrl_in_zone = zone is not None
         if zone is not None:
-            drawer.setFixedWidth(self._DRAWER_W)
-            x = zone.x() + (zone.width() - self._DRAWER_W) // 2
-            drawer.setGeometry(x, zone.y(), self._DRAWER_W, zone.height())
+            # IT NEVER IS WIDER THAN THE ROOM IT STANDS IN. With the deck
+            # of cards open the room is three hundred and forty pixels
+            # wide, and a drawer of four hundred and fifty spilled over
+            # the two columns next to it.
+            width = max(280, min(self._DRAWER_W, zone.width()))
+            drawer.setFixedWidth(width)
+            x = zone.x() + (zone.width() - width) // 2
+            drawer.setGeometry(x, zone.y(), width, zone.height())
             return
 
         left = 12
@@ -3525,7 +3852,15 @@ class MainWindow(QMainWindow):
         service = getattr(self, "_gesture", None)
         backend = service.backend if service is not None else "none"
         hands = service.hands_count if service is not None else 0
-        viewer.set_gesture(backend,
+        # THE NAME OF THE TRACKER IN THE LANGUAGE OF THE USER.
+        #
+        # The reader said "none" in English in a Spanish interface, which
+        # is the kind of leftover that makes a person think the product
+        # does not speak their language.
+        backend_text = _t(f"gesture.backend.{str(backend or 'none')}")
+        if backend_text.startswith("gesture.backend."):
+            backend_text = str(backend or "--")
+        viewer.set_gesture(backend_text,
                            localization.gesture_label("pose", self._last_pose),
                            localization.gesture_label("action", self._last_action),
                            [
@@ -5053,6 +5388,10 @@ class MainWindow(QMainWindow):
             return
         if text == getattr(self, "_last_clip_text", ""):
             return                      # the same thing, already offered
+        # THE CLIPBOARD THAT ARRIVES WITH THE PROGRAM IS NOT A COPY.
+        if (time.monotonic() - getattr(self, "_started_at", 0.0)) < 5.0:
+            self._last_clip_text = text
+            return                      # it is remembered, not offered
         field = getattr(self, "_input", None)
         if field is not None and field.hasFocus():
             return                      # the user is typing: leave them alone

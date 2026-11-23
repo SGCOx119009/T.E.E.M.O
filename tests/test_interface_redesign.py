@@ -356,7 +356,7 @@ def test_the_quick_access_is_in_the_left_column(window):
     from PyQt6.QtWidgets import QPushButton
 
     buttons = window._quick_panel.findChildren(QPushButton)
-    assert len(buttons) == 10, "the quick access lost a button"
+    assert len(buttons) == 8, "the quick access lost a button"
 
 
 # ── 6. the four shapes of the window ────────────────────────────────────────

@@ -315,9 +315,17 @@ class BladeStack(QWidget):
         return positions
 
     def _close_rect(self, top: float, height: float) -> QRectF:
-        """Where the cross that closes a card is."""
+        """Where the cross that closes a card is.
+
+        THE CROSS IS IN THE HEADER OF THE CARD, NOT IN THE MIDDLE OF IT.
+        It was drawn with the whole height of the card, so on an open
+        card — a card with text under the title — the cross came out in
+        the middle of the text, in the middle of the card, instead of in
+        the corner where the eye goes looking for it. The user said it
+        "se pone en el medio y no en su lugar".
+        """
         width = self._deck_width()
-        return QRectF(width - CLOSE_W, top, CLOSE_W, height)
+        return QRectF(width - CLOSE_W, top, CLOSE_W, min(height, STRIP_H))
 
     def _card_at(self, x: float, y: float) -> tuple[int, bool]:
         """Which card is under the pointer, and whether it is the cross."""

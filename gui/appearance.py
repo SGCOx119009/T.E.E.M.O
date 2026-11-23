@@ -51,13 +51,25 @@ CORE_MARGIN = 24
 # in the dashboard mode they are shown again.
 _DASHBOARD_WIDGETS = (
     "_header", "_left_panel", "_right_panel", "_content_panel",
-    "_quiz_panel", "_footer", "_cam_preview", "_clipboard_panel",
+    "_quiz_panel", "_footer",
     # The stack under the head: the notification, the viewer and the
     # questionnaire are its pages, and the stack itself is what has to go
     # in the corner mode. Hiding the pages one by one left the stack —
     # and the hole where a page used to be — sitting in the corner.
     "_lower_stack",
 )
+
+# THE PANELS THAT ONLY APPEAR WHEN THEY HAVE SOMETHING TO SAY.
+#
+# The camera preview and the clipboard panel are not furniture of the
+# dashboard: they are there when the camera has taken a picture or when
+# the user has copied something, and they are gone the rest of the time.
+#
+# They used to be in the list of the widgets that the dashboard SHOWS,
+# and so they came up out of nowhere every time the program started,
+# with nothing in them: the user asked what those two windows were.
+# Now the appearance switch only ever hides them.
+_TRANSIENT_PANELS = ("_cam_preview", "_clipboard_panel")
 
 # The floating overlays — the setup one, the remote one, the customisation
 # one. They are only HIDDEN by the core mode, never shown again: a modal
@@ -265,6 +277,7 @@ class Appearance:
         self._central_background(transparent=True)
         self._show_dashboard_widgets(False)
         self._hide_overlays()
+        self._hide_transient()
         self._hide_deck()
         self._close_drawers()
         hud = getattr(window, "hud", None)
@@ -305,6 +318,7 @@ class Appearance:
             self._previous_mode = self._mode
         self._hide_deck()
         self._close_drawers()
+        self._hide_transient()
         try:
             self._window.hide()
         except Exception:
@@ -331,6 +345,23 @@ class Appearance:
         """
         window = self._window
         for name in _OVERLAYS:
+            widget = getattr(window, name, None)
+            if widget is None:
+                continue
+            try:
+                widget.hide()
+            except Exception:
+                pass
+
+    def _hide_transient(self) -> None:
+        """The panels that only appear when they have something to say.
+
+        They are hidden in the corner and in the tray, and they are never
+        shown by the appearance switch: a panel with nothing in it is
+        worse than no panel at all.
+        """
+        window = self._window
+        for name in _TRANSIENT_PANELS:
             widget = getattr(window, name, None)
             if widget is None:
                 continue

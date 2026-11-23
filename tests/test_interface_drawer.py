@@ -136,7 +136,13 @@ def test_the_drawer_scrolls_instead_of_clipping(window):
 # ── 2. where the drawer stands ─────────────────────────────────────────────
 
 def test_the_drawer_stays_out_of_the_face(window, qt_app):
-    """The drawer does not land on the assistant."""
+    """The face is either there or it is not: never half covered.
+
+    The drawer used to land in the middle of the face of the assistant,
+    with the face peeking out around it. Now it takes the place of the
+    face — the same slot of the middle column — and the face is put
+    back when the drawer is closed.
+    """
     window._ctrl_btn.setChecked(True)
     window._toggle_controls(True)
     qt_app.processEvents()
@@ -144,29 +150,42 @@ def test_the_drawer_stays_out_of_the_face(window, qt_app):
     assert drawer.isVisible()
 
     head = window._hud_cam_stack
-    d = drawer.geometry()
-    h = head.geometry()
-    overlaps = not (d.right() <= h.left() or d.left() >= h.right()
-                    or d.bottom() <= h.top() or d.top() >= h.bottom())
-    assert not overlaps, (
-        f"the drawer is drawn on the face of the assistant: "
-        f"drawer={d} head={h}")
+    assert not head.isVisible(), (
+        "the face of the assistant is still under the drawer: it has to "
+        "step aside while the controls are in the center")
+    window._toggle_controls(False)
+    qt_app.processEvents()
+    assert head.isVisible(), "the face of the assistant did not come back"
 
 
-def test_the_drawer_stands_in_the_empty_room_under_the_head(window, qt_app):
-    """While the room under the head is empty, the drawer stands in it."""
+def test_the_drawer_takes_the_center_of_the_column(window, qt_app):
+    """THE CONTROLS COME TO WHERE THE CORE WAS.
+
+    The drawer used to stand in the room under the head, and the room is
+    at the bottom of the window: the user opened the controls and they
+    went down, far from the button that opened them, and the core was
+    left alone in the middle of the column. Now the drawer takes the
+    middle of the column, which is where the core was.
+    """
     window._ctrl_btn.setChecked(True)
     window._toggle_controls(True)
     qt_app.processEvents()
-    assert window._ctrl_in_zone, "the drawer did not go to the empty room"
-    zone = window._drawer_zone()
-    assert zone is not None
+    column = window._drawer_column()
+    assert column is not None, "the column of the middle is not free"
     d = window._ctrl_drawer.geometry()
-    assert zone.top() <= d.top() <= zone.bottom()
+    assert column.top() <= d.top() <= column.bottom(), (
+        f"the drawer is not in the column of the middle: {d} and {column}")
+    assert window._ctrl_in_zone, "the drawer did not take the place of the core"
 
 
 def test_the_drawer_gets_out_of_the_way_when_the_room_is_taken(window, qt_app):
-    """When something else moves into that room, the drawer gets out."""
+    """When something else moves into that room, the drawer gets out.
+
+    The room under the head is for the reports. When one arrives there,
+    the drawer cannot take the column any more, so it hangs from the
+    button that opened it, the way a menu does, and it does not stand on
+    top of the report.
+    """
     window._ctrl_btn.setChecked(True)
     window._toggle_controls(True)
     qt_app.processEvents()
@@ -181,12 +200,18 @@ def test_the_drawer_gets_out_of_the_way_when_the_room_is_taken(window, qt_app):
 # ── 3. the quick access ────────────────────────────────────────────────────
 
 def test_the_quick_access_is_not_cut(window):
-    """Ten switches, and all ten inside the panel."""
+    """Eight switches, and all eight inside the panel.
+
+    They used to be ten: the full screen, the maximize and the minimize
+    were there as well, and they were the same three buttons that are in
+    the header and in the VENTANA group of the drawer. The user said
+    there were icons too many, and there were.
+    """
     from PyQt6.QtWidgets import QPushButton
 
     panel = window._quick_panel
     buttons = panel.findChildren(QPushButton)
-    assert len(buttons) == 10, "the quick access lost a button"
+    assert len(buttons) == 8, "the quick access lost a button"
     assert panel.height() >= panel.sizeHint().height(), (
         f"the quick access is cut: it has {panel.height()} pixels and it "
         f"needs {panel.sizeHint().height()}")

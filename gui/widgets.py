@@ -542,6 +542,17 @@ class _CameraPreview(QWidget):
         self._img_lbl.setStyleSheet("background: transparent;")
         lay.addWidget(self._img_lbl)
 
+        # WHAT THIS WINDOW IS.
+        #
+        # The user asked what this window was for: it was a frame with a
+        # title and a picture in it, and no word about what the picture
+        # was. Now it says what it is, in the language of the interface.
+        self._hint = QLabel(_t("hud.visual_input_hint"))
+        self._hint.setFont(hud_font(7))
+        self._hint.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        self._hint.setWordWrap(True)
+        lay.addWidget(self._hint)
+
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.hide)
@@ -790,6 +801,17 @@ class GroupRail(QWidget):
         """Every name in the column, in order."""
         return list(self._labels)
 
+    def text_of(self, key: str) -> str:
+        """The name of one group, as it is written on the rail.
+
+        It is how the drawer knows what to call the group it is copying:
+        the name on the rail is the name the user sees.
+        """
+        key = str(key)
+        if key not in self._keys:
+            return ""
+        return self._labels[self._keys.index(key)]
+
 
 class ObservationCanvas(QWidget):
     """What the assistant is looking at, drawn.
@@ -1017,7 +1039,19 @@ class HoloPanel(QWidget):
         self.update()
 
     def add_header_widget(self, w: QWidget) -> None:
+        """Put a small thing at the right of the header.
+
+        THE WIDGET KEEPS ITS OWN SIZE. A widget that is put in the header
+        without being given one is not in any layout, so it keeps the
+        default size of a widget that nobody has laid out — six hundred
+        and forty by four hundred and eighty — and it lies over the whole
+        panel under it, swallowing every click.
+        """
         w.setParent(self)
+        try:
+            w.adjustSize()
+        except Exception:
+            pass
         self._header_widgets.append(w)
         w.show()
         self._place_header()
@@ -1379,6 +1413,11 @@ def paint_icon(p: QPainter, kind: str, r: QRectF, col: QColor) -> None:
                   200 * 16, 340 * 16)
         p.drawLine(QLineF(cx - s * 0.75, cy + s * 0.45, cx + s * 0.75, cy + s * 0.45))
         p.drawEllipse(QPointF(cx, cy + s * 0.68), s * 0.14, s * 0.14)
+    elif kind == "globe":
+        # The language: a sphere with the lines of the meridians on it.
+        p.drawEllipse(QPointF(cx, cy), s * 0.80, s * 0.80)
+        p.drawEllipse(QRectF(cx - s * 0.34, cy - s * 0.80, s * 0.68, s * 1.60))
+        p.drawLine(QLineF(cx - s * 0.80, cy, cx + s * 0.80, cy))
 
 
 class IconButton(QPushButton):
