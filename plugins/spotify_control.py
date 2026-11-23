@@ -43,7 +43,10 @@ PLUGIN = {
         "user says only 'play music', ask what track or artist they want. "
         "'search' returns candidate tracks; 'play_pause', 'next', and "
         "'previous' use the active Spotify session. Never claim success "
-        "unless the requested song is confirmed as currently playing."
+        "unless the requested song is confirmed as currently playing. "
+        "When the user asks for a NAMED song, use 'play': 'play_pause' only "
+        "toggles whatever happens to be playing already, so it starts no "
+        "song at all."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -281,10 +284,29 @@ def _api_request(
     *,
     params: dict | None = None,
     body: dict | None = None,
+    timeout: tuple[float, float] | None = None,
+    deadline: float | None = None,
 ) -> tuple[int, dict | None, str | None]:
+    """One call to the Spotify Web API.
+
+    THE DEADLINE IS THE POINT OF THE LAST TWO ARGUMENTS.
+
+    A request with the default timeout can take thirteen seconds, and a
+    tool that makes several of them in a row holds the conversation for
+    minutes: the live session gives a working tool 120 seconds before it
+    rebuilds itself, and the music tool was eating all of it and then
+    some. A call that knows how much time is left is cut short to fit.
+    """
     token, error = _authorized_token()
     if error:
         return 0, None, error
+    if timeout is None:
+        timeout = (3, 10)
+    if deadline is not None:
+        left = deadline - time.monotonic()
+        if left <= 0.5:
+            return 0, None, "the request ran out of time"
+        timeout = (min(timeout[0], left), min(timeout[1], left))
     try:
         response = requests.request(
             method,
@@ -292,7 +314,7 @@ def _api_request(
             headers={"Authorization": f"Bearer {token['access_token']}"},
             params=params,
             json=body,
-            timeout=(3, 10),
+            timeout=timeout,
         )
     except requests.RequestException as exc:
         return 0, None, f"Spotify request failed ({type(exc).__name__})."
@@ -329,7 +351,9 @@ def _fold(value: str) -> str:
     )
 
 
-def _search_tracks(query: str, artist: str = "") -> tuple[list[dict], str | None]:
+def _search_tracks(
+    query: str, artist: str = "", deadline: float | None = None
+) -> tuple[list[dict], str | None]:
     if not isinstance(query, str) or not query.strip() or len(query) > _MAX_QUERY_LENGTH:
         return [], "Track query must contain 1-200 characters."
     if not isinstance(artist, str) or len(artist) > _MAX_QUERY_LENGTH:
@@ -341,6 +365,7 @@ def _search_tracks(query: str, artist: str = "") -> tuple[list[dict], str | None
         "GET",
         "/search",
         params={"q": search_query, "type": "track", "limit": 10},
+        deadline=deadline,
     )
     if error:
         return [], error
@@ -482,9 +507,14 @@ def _candidates_in_grids(
 
 
 def _desktop_candidates(
-    query: str, artist: str
+    query: str, artist: str, deadline: float | None = None
 ) -> tuple[Any | None, list[tuple[Any, dict]], str | None]:
-    """Search Spotify Desktop and read exact song rows through Windows UIA."""
+    """Search Spotify Desktop and read exact song rows through Windows UIA.
+
+    THE DEADLINE IS THE CEILING OF THE WAIT. Without one this loop reads
+    the client's tree for twelve seconds; with one it stops when the
+    caller has no time left, so a caller that wants to try again can.
+    """
     if (
         not isinstance(query, str) or not query.strip()
         or len(query) > _MAX_QUERY_LENGTH
@@ -506,7 +536,8 @@ def _desktop_candidates(
 
     from _ctypes import COMError
 
-    deadline = time.monotonic() + _DESKTOP_SEARCH_TIMEOUT
+    if deadline is None:
+        deadline = time.monotonic() + _DESKTOP_SEARCH_TIMEOUT
     last_error = "Spotify search results are not available through UI Automation."
     while time.monotonic() < deadline:
         try:
@@ -650,8 +681,26 @@ def _desktop_is_playing(
     )
 
 
-def _desktop_play(query: str, artist: str) -> str:
-    window, candidates, error = _desktop_candidates(query, artist)
+def _desktop_play(
+    query: str, artist: str, deadline: float | None = None
+) -> str:
+    """Press the play control of the EXACT song in the desktop client.
+
+    The deadline is the ceiling of the whole attempt: the search and the
+    verification after it share it, so a caller that wants a second try
+    can have one without the two together eating the conversation.
+
+    THE SEARCH STILL HAS ITS OWN LIMIT. The deadline is the ceiling of
+    the whole attempt, not a licence for the first part of it to take
+    everything: the search is cut at its own timeout, so a caller that
+    wants to try again still has time to try again.
+    """
+    search_deadline = time.monotonic() + _DESKTOP_SEARCH_TIMEOUT
+    verify_deadline = time.monotonic() + _VERIFY_TIMEOUT
+    if deadline is not None:
+        search_deadline = min(search_deadline, deadline)
+        verify_deadline = min(verify_deadline, deadline)
+    window, candidates, error = _desktop_candidates(query, artist, search_deadline)
     if error:
         return outcome.failed("spotify_control", error, action="play")
     if not candidates:
@@ -710,8 +759,7 @@ def _desktop_play(query: str, artist: str) -> str:
             artist=summary["artist"],
         )
 
-    deadline = time.monotonic() + _VERIFY_TIMEOUT
-    while time.monotonic() < deadline:
+    while time.monotonic() < verify_deadline:
         try:
             # THE TITLE OF THE SONG, NOT THE WORDS OF THE REQUEST.
             # The user says "Skillet Monster"; the song is called
@@ -896,8 +944,10 @@ def _desktop_control(action: str) -> str:
     )
 
 
-def _active_computer_device() -> tuple[str | None, str | None]:
-    _, payload, error = _api_request("GET", "/me/player")
+def _active_computer_device(
+    deadline: float | None = None,
+) -> tuple[str | None, str | None]:
+    _, payload, error = _api_request("GET", "/me/player", deadline=deadline)
     if error:
         return None, error
     device = (payload or {}).get("device") or {}
@@ -911,10 +961,16 @@ def _active_computer_device() -> tuple[str | None, str | None]:
     return str(device["id"]), None
 
 
-def _wait_for_track(uri: str) -> tuple[bool, str | None]:
-    deadline = time.monotonic() + _VERIFY_TIMEOUT
+def _wait_for_track(
+    uri: str, deadline: float | None = None
+) -> tuple[bool, str | None]:
+    if deadline is None:
+        deadline = time.monotonic() + _VERIFY_TIMEOUT
     while time.monotonic() < deadline:
-        _, payload, error = _api_request("GET", "/me/player/currently-playing")
+        _, payload, error = _api_request(
+            "GET", "/me/player/currently-playing", timeout=(2, 4),
+            deadline=deadline,
+        )
         if error:
             return False, error
         item = (payload or {}).get("item") or {}
@@ -922,6 +978,44 @@ def _wait_for_track(uri: str) -> tuple[bool, str | None]:
             return True, None
         time.sleep(0.5)
     return False, None
+
+
+def _play_uri(
+    uri: str,
+    title: str = "",
+    artist: str = "",
+    deadline: float | None = None,
+) -> tuple[bool, str]:
+    """ORDER the playback of a track that has already been chosen.
+
+    FINDING A SONG IS NOT PLAYING IT.
+
+    The account can name the track in a second, and the client can still
+    be sitting there silent: what makes the music sound is THIS call -
+    PUT /me/player/play - and nothing else. A tool that finds the song
+    and then only opens it leaves the user waiting for a song that never
+    starts, which is exactly what happened: the track was found, the
+    client was opened, and the music never came out.
+
+    Returns (ordered, reason). An empty reason means the account
+    accepted the order; the caller still has to CHECK that the song is
+    playing before it says so.
+    """
+    if not uri.startswith("spotify:track:"):
+        return False, "that track cannot be played"
+    device_id, error = _active_computer_device(deadline)
+    if error:
+        return False, str(error)
+    _status, _payload, error = _api_request(
+        "PUT",
+        "/me/player/play",
+        params={"device_id": device_id},
+        body={"uris": [uri]},
+        deadline=deadline,
+    )
+    if error:
+        return False, str(error)
+    return True, ""
 
 
 def _play(query: str, artist: str) -> str:

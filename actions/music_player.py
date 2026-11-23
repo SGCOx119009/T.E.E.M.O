@@ -16,8 +16,22 @@ TWO ROUTES, AND THE MUSIC ACTUALLY STARTS ON BOTH
     Spotify: the song is found in Spotify and opened by its own URI, so the
     Spotify client starts playing that exact track. When the Spotify account
     is connected, the track is chosen from the official search API and the
-    playback is confirmed through it; without a connection the desktop
+    PLAYBACK IS ORDERED through it - PUT /me/player/play - and the result is
+    confirmed through the same API; without a connection the desktop
     client is driven through the Windows accessibility tree instead.
+
+    FINDING A SONG IS NOT PLAYING IT
+        The route used to open the track and stop there. The client came
+        up, the song was never started, and the tool answered "unverified"
+        while the user waited for music that never came out. The order -
+        the call that makes the music sound - is part of finding it now.
+
+    THE ROUTE HAS A CEILING
+        The live session gives a working tool 120 seconds before it
+        rebuilds itself, and this tool was taking longer than that: the
+        desktop search was tried twelve times, and each try could take
+        twelve seconds on its own. The two budgets below are the whole
+        Spotify route, and every wait inside it respects them.
 
     YouTube: the first result for the request is resolved and opened in the
     DEFAULT browser with autoplay, and the player is inspected afterwards.
@@ -40,6 +54,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 import unicodedata
 import webbrowser
@@ -51,8 +66,19 @@ _MAX_QUERY = 200
 _YT_WATCH = "https://www.youtube.com/watch?v={video_id}&autoplay=1"
 _YT_SEARCH = "https://www.youtube.com/results?search_query={query}"
 _SPOTIFY_SEARCH = "spotify:search:{query}"
-_VERIFY_TIMEOUT = 9.0
+_VERIFY_TIMEOUT = 8.0
 _OPEN_TIMEOUT = 6.0
+
+# THE CEILING OF THE SPOTIFY ROUTE, IN TWO PIECES.
+#
+# The account gets fifteen seconds (search, the order, and the answer),
+# and the desktop client gets thirty (one try, the wait for a client
+# that was closed, and one more try). The whole route is therefore
+# under a minute, where before it could run for five.
+_API_ROUTE_BUDGET = 15.0
+_DESKTOP_ROUTE_BUDGET = 30.0
+# How long a client that was just opened is given to show its window.
+_CLIENT_WAIT = 8.0
 
 # Words that lead a request and mean nothing to a search engine. Only verbs
 # and articles: a noun like "song" is part of a title often enough
@@ -211,15 +237,27 @@ def _pick_spotify_track(tracks: list[dict], query: str, artist: str) -> dict | N
 
 
 def _spotify_api_play(query: str, artist: str) -> tuple[str, str]:
-    """(result, reason). Empty result means the API could not do it."""
+    """(uri, reason) for the Spotify account.
+
+    THE URI IS NOT "THE TRACK WAS FOUND". It is the track whose
+    PLAYBACK WAS ORDERED, and that is the whole difference between a
+    song that sounds and a song that is merely known. The route used to
+    open the track and stop there: the client came up, the song never
+    started, and the tool answered "unverified" while the user waited
+    for music that never came out.
+
+    An empty uri means the account could not do it at all, and the
+    desktop client has to take the request over.
+    """
     module = _spotify_module()
     if module is None:
         return "", "the Spotify connection is not available"
+    deadline = time.monotonic() + _API_ROUTE_BUDGET
     try:
         token, error = module._authorized_token()
         if error:
             return "", str(error)
-        tracks, search_error = module._search_tracks(query, artist)
+        tracks, search_error = module._search_tracks(query, artist, deadline)
         if search_error:
             return "", str(search_error)
         if not tracks:
@@ -230,31 +268,108 @@ def _spotify_api_play(query: str, artist: str) -> tuple[str, str]:
         uri = _spotify_track_uri(track)
         if not uri:
             return "", "Spotify did not return a playable track"
-        try:
-            os.startfile(uri)                      # noqa: S606 — no shell involved
-        except OSError as exc:
-            return "", f"Spotify could not be opened ({type(exc).__name__})"
+        summary = _track_summary(module, track)
+        title = summary.get("title") or query
+        who = summary.get("artist") or artist
+        # THE ORDER. This is the call that makes the music sound.
+        ordered, order_reason = module._play_uri(uri, title, who, deadline)
+        if not ordered and _client_would_help(order_reason):
+            # THE CLIENT WAS NOT PLAYING ANYTHING. It is opened, and the
+            # order is made ONCE more with the client on screen.
+            if _spotify_launch():
+                _wait_for_spotify_client(deadline)
+                ordered, order_reason = module._play_uri(uri, title, who, deadline)
+        if not ordered:
+            # The account would not play it. The track is opened in the
+            # client anyway - it is the last thing that can be done from
+            # here - and the desktop route gets its turn.
+            _spotify_open_uri(uri)
+            return "", order_reason
+        _remember_track(title, who, uri)
         return uri, ""
     except Exception as exc:                       # noqa: BLE001
         return "", f"the Spotify connection failed ({type(exc).__name__})"
 
 
+def _client_would_help(reason: str) -> bool:
+    """Would opening the client change the answer?
+
+    Only one of the account's refusals is about the client being shut:
+    "no active playback device". A Premium account that is playing on
+    the phone is a different problem, and opening the laptop does not
+    fix it.
+    """
+    return "no active spotify playback device" in str(reason or "").casefold()
+
+
+def _track_summary(module, track: dict) -> dict:
+    """The title and the artist of a track, as Spotify names them."""
+    summarize = getattr(module, "_track_summary", None)
+    summary: dict = {}
+    if summarize is not None:
+        try:
+            summary = summarize(track) or {}
+        except Exception:
+            summary = {}
+    return {
+        "title": str(summary.get("title") or track.get("name") or ""),
+        "artist": str(summary.get("artist") or ""),
+    }
+
+
+# THE TRACK THAT WAS ACTUALLY FOUND, kept where the report can reach
+# it. The account answers with a title and an artist of its own
+# ("COQUETA", "Fuerza Regida, Grupo Frontera") and the report has to
+# carry those, not the words of the request.
+_RESOLVED = threading.local()
+
+
+def _remember_track(title: str, artist: str, uri: str = "") -> None:
+    _RESOLVED.track = {"title": title, "artist": artist, "uri": uri}
+
+
+def _remember_fields(fields: dict) -> None:
+    if fields.get("track"):
+        _remember_track(str(fields.get("track") or ""),
+                        str(fields.get("artist") or ""))
+
+
+def _resolved_track() -> dict:
+    return getattr(_RESOLVED, "track", None) or {}
+
+
 def _spotify_playing(uri: str) -> bool:
-    """Is the track we asked for the one playing right now?"""
+    """Is the track we asked for the one playing right now?
+
+    THE ACCOUNT HAS TO SAY THAT IT IS PLAYING. A track that is loaded
+    and paused is not a song that sounds, and it used to be reported as
+    one: the old check only compared the URI, so a paused Coqueta was
+    answered with "status=done" and the user heard nothing.
+    """
     module = _spotify_module()
     if module is None:
         return False
+    deadline = time.monotonic() + _VERIFY_TIMEOUT
     try:
-        status, payload, error = module._api_request(
-            "GET", "/me/player/currently-playing")
-        if error or status >= 400 or not isinstance(payload, dict):
-            return False
-        item = payload.get("item")
-        if not isinstance(item, dict):
-            return False
-        return _spotify_track_uri(item) == uri
-    except Exception:
+        while time.monotonic() < deadline:
+            status, payload, error = module._api_request(
+                "GET", "/me/player/currently-playing", timeout=(2, 4),
+                deadline=deadline)
+            if error or status >= 400:
+                return False
+            if isinstance(payload, dict):
+                item = payload.get("item")
+                if isinstance(item, dict):
+                    if (_spotify_track_uri(item) == uri
+                            and payload.get("is_playing") is True):
+                        return True
+            # The account has nothing to say yet - no content, or a track
+            # that is loaded and paused. That is not a failure: it is the
+            # account that has not caught up with the order.
+            time.sleep(0.7)
+    except Exception:                              # noqa: BLE001
         return False
+    return False
 
 
 def _spotify_launch() -> bool:
@@ -273,36 +388,91 @@ def _spotify_launch() -> bool:
         return False
 
 
+def _spotify_open_uri(uri: str) -> bool:
+    """Open one track in the Spotify client by its own URI."""
+    try:
+        os.startfile(uri)                          # noqa: S606 — no shell involved
+        return True
+    except OSError as exc:
+        print(f"[music] Spotify could not open the track ({type(exc).__name__})")
+        return False
+
+
+def _spotify_client_running() -> bool:
+    """Is the Spotify client itself running on this machine?"""
+    try:
+        from core import appidentity
+        for process in appidentity.running("Spotify"):
+            if str(getattr(process, "name", "")).casefold() == "spotify.exe":
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _wait_for_spotify_client(deadline: float) -> bool:
+    """How long a client that was just opened is given to show itself."""
+    limit = min(deadline, time.monotonic() + _CLIENT_WAIT)
+    while time.monotonic() < limit:
+        if _spotify_client_running():
+            return True
+        time.sleep(0.5)
+    return _spotify_client_running()
+
+
+def _sleep_bounded(seconds: float, deadline: float) -> None:
+    """A wait that never goes past the deadline of the route."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return
+    time.sleep(min(seconds, left))
+
+
+def _desktop_attempt(module, query: str, artist: str, deadline: float) -> str:
+    """One go at the desktop client's own play control."""
+    try:
+        return str(module._desktop_play(query, artist, deadline) or "")
+    except Exception as exc:                       # noqa: BLE001
+        print(f"[music] Spotify desktop control failed: {type(exc).__name__}")
+        return ""
+
+
 def _spotify_desktop_play(query: str, artist: str) -> str:
     """Drive the Spotify desktop client through the accessibility tree.
 
-    Returns the plugin's own result string; it knows how to press the play
-    control of an exact match and how to confirm it in the now-playing bar.
+    AT MOST TWO ATTEMPTS, AND A CEILING ON THE WHOLE THING.
+
+    The client was tried twelve times, one second apart, and each of
+    those tries could take twelve seconds on its own: a request that
+    could not be played held the conversation for five minutes, the live
+    session was rebuilt underneath it, and the user was left with a song
+    that had never started.
+
+    The client is still opened when it was closed - that is the one
+    thing that makes the request possible at all - but it is opened
+    ONCE, and the attempt is made again ONCE with its window there.
     """
     module = _spotify_module()
     if module is None:
         return ""
-    try:
-        result = str(module._desktop_play(query, artist) or "")
-    except Exception as exc:                       # noqa: BLE001
-        print(f"[music] Spotify desktop control failed: {type(exc).__name__}")
-        result = ""
+    deadline = time.monotonic() + _DESKTOP_ROUTE_BUDGET
+    result = _desktop_attempt(module, query, artist, deadline)
     if result and "status=failed" not in result:
+        _remember_fields(_spotify_result_fields(result))
         return result
-    # THE CLIENT WAS NOT ON SCREEN. It is opened, and the attempt is made
-    # again with its window there.
-    if not _spotify_launch():
+    # THE CLIENT WAS NOT ON SCREEN.
+    if _spotify_client_running():
+        # The client is up: the search was simply still loading.
+        _sleep_bounded(2.5, deadline)
+    elif _spotify_launch():
+        _wait_for_spotify_client(deadline)
+    else:
         return result
-    for _ in range(12):
-        time.sleep(1.0)
-        try:
-            again = str(module._desktop_play(query, artist) or "")
-        except Exception:
-            continue
-        if again and "status=failed" not in again:
-            return again
-        result = again or result
-    return result
+    again = _desktop_attempt(module, query, artist, deadline)
+    if again and "status=failed" not in again:
+        _remember_fields(_spotify_result_fields(again))
+        return again
+    return again or result
 
 
 def _spotify_result_fields(result: str) -> dict:
@@ -596,44 +766,36 @@ def _play_spotify(query: str, artist: str) -> tuple[str, bool]:
     The second value is False when Spotify has already been asked to play
     something - opening a track that is on its way is not something to undo
     by opening another player on top of it.
+
+    DONE MEANS IT SOUNDS. The account has to report the track as playing,
+    or the client's own now-playing bar has to show it; nothing else is
+    a song that is playing.
     """
     started = time.monotonic()
     uri, reason = _spotify_api_play(query, artist)
     if uri:
-        deadline = time.monotonic() + _VERIFY_TIMEOUT
-        while time.monotonic() < deadline:
-            if _spotify_playing(uri):
-                return outcome.done(
-                    "music_player", service="spotify", track=query,
-                    artist=artist or None, verified=True), False
-            time.sleep(0.7)
+        fields = _resolved_track()
+        title = fields.get("title") or query
+        who = fields.get("artist") or artist
+        if _spotify_playing(uri):
+            return outcome.done(
+                "music_player", service="spotify", track=title,
+                artist=who or None, verified=True), False
         return outcome.unverified(
             "music_player",
             "Spotify was asked to play the track but the account did not "
-            "report it as playing yet",
-            service="spotify", track=query, artist=artist or None), False
+            "report it as playing",
+            service="spotify", track=title, artist=who or None), False
 
-    desktop = ""
-    # PATIENCE, ONCE.
-    #
-    # The first search after Spotify wakes up is slower than the next ones:
-    # the results list appears late, and the client gave up before it did.
-    # A second attempt, a couple of seconds later, is the difference between
-    # "Spotify could not find it" and "Spotify was still loading".
-    for attempt in range(2):
-        desktop = _spotify_desktop_play(query, artist)
-        if desktop and "status=failed" not in desktop:
-            break
-        if attempt == 0:
-            time.sleep(2.5)
+    desktop = _spotify_desktop_play(query, artist)
     if desktop:
+        fields = _spotify_result_fields(desktop)
+        title = fields.get("track") or query
+        who = fields.get("artist") or artist
         if "status=done" in desktop:
-            fields = _spotify_result_fields(desktop)
             return outcome.done(
-                "music_player", service="spotify",
-                track=fields.get("track") or query,
-                artist=fields.get("artist") or (artist or None),
-                verified=True), False
+                "music_player", service="spotify", track=title,
+                artist=who or None, verified=True), False
         if "status=ask" in desktop:
             return outcome.ask(
                 "music_player",
@@ -645,7 +807,7 @@ def _play_spotify(query: str, artist: str) -> tuple[str, bool]:
                 "music_player",
                 "Spotify was opened and asked to play the track, but the "
                 "client did not confirm it",
-                service="spotify", track=query, artist=artist or None), False
+                service="spotify", track=title, artist=who or None), False
         # status=failed: Spotify could not do it at all, so another player
         # may still be able to.
         return outcome.failed(
@@ -821,6 +983,10 @@ TOOL = {
         "'action' is 'play' (the default), 'pause' or 'stop'. "
         "When the user names no song at all, ask them which one instead of "
         "guessing - do not call this tool with 'music' as the query. "
+        "This tool starts the music BY ITSELF: never call spotify_control "
+        "afterwards to press play, and never call it instead of this tool - "
+        "spotify_control's play_pause only toggles whatever is already "
+        "playing and starts no song. "
         "If it answers 'status=done', say in one short sentence that the "
         "music is playing. If it answers 'status=unverified', say plainly "
         "that it was asked for but could not be confirmed."

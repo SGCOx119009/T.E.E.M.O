@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import types
 import unittest
 import urllib.request
@@ -631,6 +632,135 @@ class SpotifyControlTests(unittest.TestCase):
             spotify_control._pkce_challenge(flow["verifier"]),
         )
         self.assertEqual(parameters["code_challenge_method"], ["S256"])
+
+    def test_play_uri_orders_the_track_through_the_web_api(self) -> None:
+        """FINDING A SONG IS NOT PLAYING IT.
+
+        This is the call that makes the music sound: PUT /me/player/play
+        with the track that was found. A tool that only searched for the
+        song left the client silent.
+        """
+        with (
+            patch.object(spotify_control, "_active_computer_device",
+                         return_value=("device-1", None)),
+            patch.object(spotify_control, "_api_request",
+                         return_value=(202, None, None)) as api_request,
+        ):
+            ordered, reason = spotify_control._play_uri(
+                "spotify:track:one", "Blue", "Artist One"
+            )
+
+        self.assertTrue(ordered)
+        self.assertEqual(reason, "")
+        self.assertEqual(api_request.call_args.args[:2],
+                         ("PUT", "/me/player/play"))
+        self.assertEqual(api_request.call_args.kwargs["body"],
+                         {"uris": ["spotify:track:one"]})
+        self.assertEqual(api_request.call_args.kwargs["params"],
+                         {"device_id": "device-1"})
+
+    def test_play_uri_does_not_play_without_a_device(self) -> None:
+        with (
+            patch.object(spotify_control, "_active_computer_device",
+                         return_value=(None, "No active Spotify playback "
+                                          "device. Open Spotify on this "
+                                          "laptop.")),
+            patch.object(spotify_control, "_api_request") as api_request,
+        ):
+            ordered, reason = spotify_control._play_uri("spotify:track:one")
+
+        self.assertFalse(ordered)
+        self.assertIn("No active Spotify playback device", reason)
+        api_request.assert_not_called()
+
+    def test_a_request_with_no_time_left_is_not_made(self) -> None:
+        """A call that knows it has no time left does not hang on the
+        network: the route has a ceiling and the request respects it."""
+        with (
+            patch.object(spotify_control, "_authorized_token",
+                         return_value=({"access_token": "token"}, None)),
+            patch.object(spotify_control.requests, "request") as request,
+        ):
+            status, payload, error = spotify_control._api_request(
+                "GET", "/me/player", deadline=time.monotonic() - 1
+            )
+
+        self.assertEqual(status, 0)
+        self.assertIsNone(payload)
+        self.assertIn("ran out of time", error)
+        request.assert_not_called()
+
+    def test_the_desktop_search_gives_up_when_the_deadline_is_gone(self) -> None:
+        with patch.object(spotify_control.os, "startfile"):
+            window, candidates, error = spotify_control._desktop_candidates(
+                "Coqueta", "Grupo Frontera", deadline=time.monotonic() - 1
+            )
+
+        self.assertIsNone(window)
+        self.assertEqual(candidates, [])
+        self.assertTrue(error)
+
+    def test_the_desktop_play_shares_its_deadline_with_the_search(self) -> None:
+        button = types.SimpleNamespace(
+            is_visible=lambda: True,
+            is_enabled=lambda: True,
+            invoke=Mock(),
+        )
+        window = types.SimpleNamespace(
+            set_focus=Mock(),
+            element_info=types.SimpleNamespace(
+                element=types.SimpleNamespace(CurrentHasKeyboardFocus=True)
+            ),
+        )
+        summary = {"title": "One More Time", "artist": "Daft Punk"}
+        deadline = time.monotonic() + 5
+        with (
+            patch.object(
+                spotify_control,
+                "_desktop_candidates",
+                return_value=(window, [(button, summary)], None),
+            ) as candidates,
+            patch.object(spotify_control, "_desktop_is_playing",
+                         return_value=True),
+        ):
+            result = spotify_control._desktop_play(
+                "One More Time", "Daft Punk", deadline=deadline
+            )
+
+        self.assertIn("status=done", result)
+        self.assertEqual(candidates.call_args.args[2], deadline)
+
+    def test_the_search_keeps_its_own_limit_inside_the_deadline(self) -> None:
+        """A caller that offers a minute does not get a minute of search.
+
+        The search has its own limit, so the caller still has time for
+        the second attempt it was promised.
+        """
+        with patch.object(
+            spotify_control, "_desktop_candidates",
+            return_value=(None, [], "Spotify is not on screen"),
+        ) as candidates:
+            spotify_control._desktop_play(
+                "Coqueta", "Grupo Frontera", deadline=time.monotonic() + 60
+            )
+
+        given = candidates.call_args.args[2]
+        self.assertLessEqual(
+            given,
+            time.monotonic() + spotify_control._DESKTOP_SEARCH_TIMEOUT + 1,
+        )
+
+    def test_the_search_never_outlives_the_deadline_it_is_given(self) -> None:
+        with patch.object(
+            spotify_control, "_desktop_candidates",
+            return_value=(None, [], "Spotify is not on screen"),
+        ) as candidates:
+            spotify_control._desktop_play(
+                "Coqueta", "Grupo Frontera", deadline=time.monotonic() + 2
+            )
+
+        given = candidates.call_args.args[2]
+        self.assertLessEqual(given, time.monotonic() + 2)
 
     def test_plugin_exposes_connection_settings(self) -> None:
         self.assertEqual(spotify_control.PLUGIN["name"], "spotify_control")
