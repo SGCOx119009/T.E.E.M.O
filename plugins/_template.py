@@ -24,6 +24,8 @@ ONE RULE IF YOUR PLUGIN NEEDS TO ASK A MODEL SOMETHING
     unwell, which is the exact fault the ladder was built to end.
 """
 
+from core import outcome
+
 PLUGIN = {
     "name": "my_plugin",                     # snake_case, unique, ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$
     "description": (
@@ -53,7 +55,17 @@ def run(parameters: dict, player=None, session_memory=None) -> str:
     """
     example_arg = parameters.get("example_arg", "")
     try:
-        result_text = f"Did the thing with {example_arg}."
+        # THE ONE THING TO COPY FROM THIS TEMPLATE: say what you know, not
+        # what you wish. A plugin that has not done anything yet says
+        # `unverified`, never "did the thing" — the model repeats that
+        # sentence to the user, and a tool that claims a success it did not
+        # have is worse than a tool that admits it is still working.
+        result_text = outcome.unverified(
+            "my_plugin",
+            "this plugin does not do anything yet: copy the template and "
+            "replace this line with the work it really did",
+            example_arg=example_arg,
+        )
     except Exception as e:
         return f"Sir, my_plugin failed: {e}"
     if player:
