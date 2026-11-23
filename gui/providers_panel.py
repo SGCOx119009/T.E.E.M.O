@@ -59,6 +59,29 @@ _INSTALLED = "\x00installed"
 _PIP_FAILED = "\x00pip-failed"
 
 
+def _envolver(texto: str, ancho: int = 62) -> str:
+    """A sentence broken into lines of a given width.
+
+    A QPushButton does not wrap its text, so a long sentence goes out of
+    the button and half of what the button says is not there. This breaks
+    it by hand, at the spaces, without cutting a word in half.
+    """
+    palabras = str(texto or "").split()
+    if not palabras:
+        return ""
+    lineas: list[str] = []
+    actual = ""
+    for palabra in palabras:
+        if actual and len(actual) + 1 + len(palabra) > ancho:
+            lineas.append(actual)
+            actual = palabra
+        else:
+            actual = f"{actual} {palabra}" if actual else palabra
+    if actual:
+        lineas.append(actual)
+    return "\n".join(lineas)
+
+
 def _call_probe(probe, progress=None, cancelled=None) -> tuple[bool, str]:
     """Ask a provider whether it is usable, whichever probe it offers.
 
@@ -328,7 +351,12 @@ class ProvidersOverlay(_HudOverlay):
         b.setCheckable(True)
         b.setMinimumHeight(84)
         b.setCursor(Qt.CursorShape.PointingHandCursor)
-        b.setText(f"{title}\n\n{body}")
+        # THE TEXT OF A CARD IS CUT IN HALF WITHOUT THIS.
+        #
+        # A QPushButton does not wrap its text: the sentence of the card
+        # was one long line and it went out of the card, and half of what
+        # the card says was not there. The line is broken by hand now.
+        b.setText(f"{title}\n\n" + _envolver(body, 62))
         b.setFont(hud_font(7))
         b.clicked.connect(lambda _=0, v=value: self._set_mode(v))
         b.setProperty("modeValue", value)
