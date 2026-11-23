@@ -935,7 +935,6 @@ class GestureService(QObject):
         self._last_click_end = 0.0
         # THE MODIFIER KEYS THAT ARE HELD DOWN RIGHT NOW.
         self._held_keys: set[int] = set()
-        self._shift_down = False
         self._scroll_anchor = None
         self._swipe_anchor = None
         self._zoom_anchor = None
@@ -1444,7 +1443,6 @@ class GestureService(QObject):
         for vk in list(keys - self._held_keys):
             self._driver.key(vk, True)
         self._held_keys = keys
-        self._shift_down = PointerDriver._VK_SHIFT in keys
 
     def _begin_press(self, hand: Hand, x: int, y: int, now: float) -> None:
         """The button goes down."""
