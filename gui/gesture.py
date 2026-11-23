@@ -116,7 +116,7 @@ import threading
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
@@ -162,7 +162,21 @@ _MODEL = Path(__file__).resolve().parent.parent / "models" / "hand_landmarker.ta
 # button down.
 PINCH_ON = 0.78
 PINCH_OFF = 0.52
-PINCH_REACH = 0.85
+# HOW FAR THE INDEX IS FROM THE KNUCKLE OF THE MIDDLE FINGER, IN SPANS OF
+# THE HAND, FOR THE PINCH TO BE A PINCH.
+#
+# THESE NUMBERS COME FROM THE CANONICAL HAND OF MEDIAPIPE, NOT FROM A
+# GUESS. In the canonical hand (the one the model was trained on):
+#
+#     open hand    the index tip is 0.89 spans from the middle knuckle
+#     pinch        the index tip comes down to the thumb: 0.55
+#     fist         the index folds onto the palm: 0.26
+#
+# The threshold used to be 0.85, which is the open hand and NOT the pinch:
+# a real pinch was below the line, so a pinch was read as a fist and the
+# user saw "LEFT FIST" on the glass while he was pinching. The line is
+# now between the pinch and the fist, with room on both sides.
+PINCH_REACH = 0.40
 
 
 class Hand:
@@ -371,7 +385,17 @@ def _shared_landmarker(model_path: Path):
             # * ONE HAND IS ENOUGH TO BE A WHOLE MOUSE. The fingers that
             #   are not making the pinch are the ones that hold the
             #   modifier keys, exactly as on a real mouse.
-            num_hands=1,
+            #
+            # TWO HANDS ARE READ AGAIN, AND THE POINTER DOES NOT JUMP.
+            #
+            # The two hands were dropped because the pointer followed
+            # "the first one the tracker reported", and that is not
+            # always the same hand: the pointer teleported across the
+            # screen. The pointer now keeps ONE hand — the nearest one to
+            # where it already is — and the other hand is still read:
+            # two hands pinching and moving apart is the zoom, which is
+            # the gesture that two hands are good for.
+            num_hands=2,
             min_hand_detection_confidence=0.5,
             min_tracking_confidence=0.5,
         )
@@ -450,7 +474,7 @@ class HandTracker:
             import mediapipe as mp
             self._legacy = mp.solutions.hands.Hands(
                 static_image_mode=False,
-                max_num_hands=1,
+                max_num_hands=2,
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
             )
@@ -663,6 +687,27 @@ class PointerDriver:
         except Exception:
             return False
 
+    def cursor_pos(self) -> tuple[int, int] | None:
+        """Where the real pointer is right now, or None when it cannot be read.
+
+        It is how the hand knows that the mouse of the user has moved:
+        the pointer that the hand writes and the pointer that the mouse
+        writes are the same cursor, and the one that is in the wrong
+        place is the one that somebody else moved.
+        """
+        if self._user32 is None:
+            return None
+        try:
+            class _POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+            point = _POINT()
+            if not self._user32.GetCursorPos(ctypes.byref(point)):
+                return None
+            return int(point.x), int(point.y)
+        except Exception:
+            return None
+
     def click(self) -> bool:
         if self._user32 is None:
             return False
@@ -874,7 +919,17 @@ class GestureService(QObject):
     # not to be one by accident.
     _LONG_PRESS = 0.75
     _STILL_PX = 14
-    _SCROLL_PX = 18
+    # HOW MANY PIXELS OF TRAVEL ARE ONE NOTCH OF THE WHEEL.
+    #
+    # It was eighteen, which is one notch every eighteen pixels of hand:
+    # a hand that moved two centimetres turned the wheel fifteen notches
+    # in a single picture, and the page flew away. The user said the
+    # scroll was "muy fuerte" and that there was no stable control over
+    # it. A notch is a hundred and twenty pixels in Windows, and here a
+    # notch is ninety: the wheel turns when the hand says so, and not
+    # before. The leftovers are kept, so a slow hand turns the wheel
+    # smoothly instead of in jumps.
+    _SCROLL_PX = 90
     _SWIPE_SECONDS = 0.45
     _SWIPE_PX = 220
     # HOW MUCH OF THE PICTURE IS LEFT UNUSED AT THE EDGES.
@@ -953,6 +1008,36 @@ class GestureService(QObject):
         self._smoother = PointerSmoother()
         self._pointer_at = (0, 0)
         self._last_steer = 0.0
+        # THE POINT THE HAND IS AIMING AT.
+        #
+        # The pointer is not written here: it is walked to this point by
+        # the servo, sixty times a second, so that a hand that is read
+        # fifteen times a second still moves the cursor smoothly.
+        self._target: tuple[int, int] | None = None
+        self._servo_last = 0.0
+        # UNTIL WHEN THE HAND LEAVES THE MOUSE ALONE.
+        #
+        # The hand and the mouse are the same cursor. When the user
+        # moves the mouse, the hand lets go for a few seconds: without
+        # that, the two fought over the cursor and the screenshots of
+        # Windows could not be taken, because the selection kept running
+        # away from the mouse.
+        self._mouse_until = 0.0
+        # WHERE THE MOUSE REALLY WAS WHEN THE HAND LET GO OF IT, so that
+        # the hand takes the cursor over from there and not from where it
+        # left it.
+        self._mouse_at: tuple[int, int] | None = None
+        # THE LEFTOVERS OF THE WHEEL, so that a slow hand turns it
+        # smoothly instead of in jumps.
+        self._scroll_acc = 0.0
+        self._scroll_side_acc = 0.0
+        # THE DISTANCE BETWEEN TWO HANDS THAT ARE PINCHING: the zoom.
+        self._zoom_pair_anchor = None
+        # THE SERVO. It belongs to the thread of the interface, because a
+        # timer of Qt has to live there.
+        self._servo = QTimer(self)
+        self._servo.setInterval(16)
+        self._servo.timeout.connect(self._servo_step)
         # The tracker is used by the thread of the camera and closed by
         # the thread of the service: the two must not meet.
         self._frame_lock = threading.Lock()
@@ -1021,6 +1106,11 @@ class GestureService(QObject):
         typing is a worse experience than no gesture control at all.
         """
         self._drive_pointer = bool(on)
+        if self._drive_pointer:
+            self._servo.start()
+        else:
+            self._servo.stop()
+            self._target = None
 
     def start(self) -> str:
         """Start watching. Returns a sentence saying what happened."""
@@ -1044,6 +1134,9 @@ class GestureService(QObject):
         self._track_thread = threading.Thread(target=self._track_loop,
                                                daemon=True, name="gesture-track")
         self._track_thread.start()
+        # THE SERVO RUNS ONLY WHILE THE HAND IS DRIVING THE POINTER.
+        if self._drive_pointer:
+            self._servo.start()
         return "watching the camera for hands"
 
     def stop(self) -> str:
@@ -1088,6 +1181,8 @@ class GestureService(QObject):
             self._driver.release()
         self._set_modifiers(set())
         self._pinch_latched = False
+        self._servo.stop()
+        self._target = None
         return "the camera is no longer being watched"
 
     def toggle(self) -> str:
@@ -1314,10 +1409,29 @@ class GestureService(QObject):
             self._rest()
             return
 
-        # ONE HAND. The one that is there.
-        hand = hands[0]
-        pose = str(getattr(hand, "pose", "") or "")
         now = time.time()
+
+        # ── WHICH HAND THE POINTER FOLLOWS ────────────────────────────────
+        #
+        # TWO HANDS ARE READ, AND THE POINTER KEEPS ONE OF THEM.
+        #
+        # With two hands the pointer followed "the first one the tracker
+        # reported", and the tracker does not always report the same one
+        # first: the pointer teleported from one side of the screen to
+        # the other, and no filter can repair a jump that is in the
+        # target. Now the pointer stays with the hand it was already
+        # following — the nearest one — and it only changes hands when
+        # the user pinches with the other one, which is a deliberate
+        # thing to do.
+        pinched = [h for h in hands if bool(getattr(h, "pinched", False))]
+        if len(pinched) == 1:
+            hand = pinched[0]
+        else:
+            hand = self._nearest_hand(hands)
+        if hand is None:
+            self._rest()
+            return
+        pose = str(getattr(hand, "pose", "") or "")
 
         # ── THE POINTER ────────────────────────────────────────────────────
         raw_x = self._map_x(getattr(hand, "aim_x", hand.x))
@@ -1335,14 +1449,22 @@ class GestureService(QObject):
         # the taskbar of another thing, so the edges are the edges.
         x = max(0, min(self._screen_w, int(round(fx))))
         y = max(0, min(self._screen_h, int(round(fy))))
-        # AND IT IS NOT MOVED WHEN IT DID NOT MOVE.
+        # THE AIMED POINT IS THE TARGET. The pointer itself is walked to
+        # it sixty times a second by the servo, so the movement is
+        # continuous even though the hand is read fifteen times a second.
+        self._target = (x, y)
+
+        # ── TWO HANDS PINCHING: THE ZOOM ─────────────────────────────────
         #
-        # A pointer that is written to the screen sixty times a second
-        # with the same number in it is not steadier than one that is
-        # written once: it is just the same number said again.
-        if (x, y) != self._pointer_at:
-            self._pointer_at = (x, y)
-            self._driver.move(x, y)
+        # Two hands that pinch together and move apart are the zoom, and
+        # they are NOT a click: a zoom is a gesture of two hands, and a
+        # click that happens at the same time is a click in the wrong
+        # place. The pointer stays where it is.
+        if len(pinched) >= 2:
+            self._release_pointer()
+            self._set_modifiers(set())
+            self._zoom_pair(pinched[:2])
+            return
 
         # ── THE PINCH, LATCHED ─────────────────────────────────────────────
         closeness = float(getattr(hand, "closeness", 0.0) or 0.0)
@@ -1401,6 +1523,157 @@ class GestureService(QObject):
         # ONE FINGER ONLY: MOVE, AND NOTHING ELSE.
         self._set_gesture(pose or "point", "move")
 
+    # ── the pointer that is walked, not jumped ──────────────────────────────
+
+    def _nearest_hand(self, hands: list[Hand]) -> Hand | None:
+        """The hand the pointer keeps following.
+
+        IT IS THE NEAREST ONE TO WHERE THE POINTER ALREADY IS. The
+        tracker does not always report the hands in the same order, and
+        the pointer that follows "the first one" is the pointer that
+        jumps. The hand that is closest to where the pointer already is
+        is the hand that was already the pointer, and the pointer stays
+        with it until the user says otherwise with a pinch.
+
+        AND IT IS COMPARED WITH THE POINT THE HAND WAS AIMING AT, not
+        with the place the pointer has arrived at: the pointer walks
+        towards the hand, so it is always a little behind it, and asking
+        "which hand is the pointer nearest to" would ask about the
+        pointer instead of about the hand.
+        """
+        if not hands:
+            return None
+        if len(hands) == 1:
+            return hands[0]
+        if self._last_steer == 0.0:
+            # THE FIRST HAND THAT APPEARS IS THE ONE THE POINTER FOLLOWS.
+            #
+            # There is no pointer to be near yet, so the pointer would
+            # choose the hand that is closest to the corner of the screen
+            # — and that is the hand that happens to be reported first.
+            return hands[0]
+        last = self._target
+        if last is None:
+            last = self._pointer_at
+        best = None
+        best_distance = None
+        for hand in hands:
+            try:
+                x = self._map_x(getattr(hand, "aim_x", hand.x))
+                y = self._map_y(getattr(hand, "aim_y", hand.y))
+            except Exception:
+                continue
+            if last is None:
+                distance = 0.0
+            else:
+                distance = math.hypot(x - last[0], y - last[1])
+            if best_distance is None or distance < best_distance:
+                best, best_distance = hand, distance
+        return best
+
+    def _servo_step(self) -> None:
+        """Walk the pointer one step towards the aimed point.
+
+        THE POINTER IS NOT A STEP FUNCTION. The camera gives fifteen
+        pictures a second, and a pointer that is written fifteen times a
+        second is seen fifteen times a second: it hops, and the hand
+        feels like it is dragging something sticky. This runs sixty
+        times a second and walks the pointer towards the place the hand
+        is aiming at, so the movement is continuous even though the hand
+        is read slowly.
+
+        AND THE MOUSE ALWAYS WINS. If the real cursor is not where the
+        hand put it, the user moved it — and the hand lets go for a few
+        seconds. Without this the two fought over the same cursor: the
+        screenshots of Windows could not be taken, because the selection
+        kept running away from the mouse.
+        """
+        target = self._target
+        if target is None:
+            return
+        now = time.monotonic()
+        # THE MOUSE OF THE USER, IF HE MOVED IT.
+        if self._mouse_until > now:
+            return
+        real = self._driver.cursor_pos()
+        if real is not None and self._pointer_at is not None:
+            if math.hypot(real[0] - self._pointer_at[0],
+                          real[1] - self._pointer_at[1]) > 3.0:
+                # Somebody else moved the cursor. The hand lets go.
+                self._mouse_until = now + 4.0
+                self._mouse_at = real
+                self._pointer_at = None
+                return
+        current = self._pointer_at
+        if current is None:
+            # THE HAND TAKES OVER WHERE THE MOUSE IS, NOT WHERE IT LEFT IT.
+            #
+            # When the user moved the mouse, the hand let go and the
+            # pointer was left where the mouse was. When the hand takes
+            # over again it walks from there, so the cursor does not jump
+            # across the screen in the middle of a click.
+            current = self._mouse_at
+            if current is None:
+                self._pointer_at = target
+                self._driver.move(target[0], target[1])
+                return
+            self._pointer_at = current
+        if current == target:
+            return
+        # THE STEP IS PROPORTIONAL TO THE TIME, so the speed of the
+        # pointer does not depend on how often the timer happened to fire.
+        dt = 0.016
+        if self._servo_last:
+            dt = max(0.005, min(0.1, now - self._servo_last))
+        self._servo_last = now
+        alpha = 1.0 - math.exp(-dt / 0.030)
+        nx = int(round(current[0] + (target[0] - current[0]) * alpha))
+        ny = int(round(current[1] + (target[1] - current[1]) * alpha))
+        if (nx, ny) == current:
+            return
+        self._pointer_at = (nx, ny)
+        self._driver.move(nx, ny)
+
+    def _snap_pointer(self) -> None:
+        """Put the pointer exactly where the hand is aiming, right now.
+
+        The servo walks the pointer towards the aimed point, and a click
+        has to land on the aimed point and not on the place the pointer
+        was passing through.
+        """
+        target = self._target
+        if target is None:
+            return
+        if self._pointer_at != target:
+            self._pointer_at = target
+            self._driver.move(target[0], target[1])
+
+    def _zoom_pair(self, hands: list[Hand]) -> None:
+        """Two hands pinching: the zoom, by how far apart they are."""
+        if len(hands) < 2:
+            return
+        try:
+            a = hands[0].points[THUMB_TIP]
+            b = hands[1].points[THUMB_TIP]
+        except Exception:
+            return
+        distance = math.hypot((a[0] - b[0]) * self._screen_w,
+                              (a[1] - b[1]) * self._screen_h)
+        now = time.time()
+        if self._zoom_pair_anchor is None:
+            self._zoom_pair_anchor = (distance, now)
+            self._set_gesture("two", "zoom")
+            return
+        last_distance, t0 = self._zoom_pair_anchor
+        if now - t0 < 0.08:
+            return
+        self._zoom_pair_anchor = (distance, now)
+        delta = distance - last_distance
+        if abs(delta) < 8:
+            return
+        self._driver.zoom(1 if delta > 0 else -1)
+        self._set_gesture("two", "zoom in" if delta > 0 else "zoom out")
+
     # ── the press ───────────────────────────────────────────────────────────
 
     def _modifiers_of(self, hand: Hand) -> set[int]:
@@ -1446,6 +1719,12 @@ class GestureService(QObject):
 
     def _begin_press(self, hand: Hand, x: int, y: int, now: float) -> None:
         """The button goes down."""
+        # THE CLICK LANDS WHERE THE HAND IS AIMING.
+        #
+        # The servo walks the pointer towards the aimed point, and the
+        # click has to fall on the aimed point and not on the place the
+        # pointer was passing through.
+        self._snap_pointer()
         # THE MIDDLE BUTTON IS A BUTTON OF ITS OWN.
         if self._is_middle_click(hand):
             self._set_modifiers(set())
@@ -1499,6 +1778,8 @@ class GestureService(QObject):
         if not self._pointer_down:
             self._set_modifiers(set())
             return
+        # THE CLICK LANDS WHERE THE HAND WAS AIMING.
+        self._snap_pointer()
         moved = self._press_moved
         was_right = self._press_is_right
         self._pointer_down = False
@@ -1563,6 +1844,9 @@ class GestureService(QObject):
         self._scroll_anchor = None
         self._swipe_anchor = None
         self._zoom_anchor = None
+        self._zoom_pair_anchor = None
+        self._scroll_acc = 0.0
+        self._scroll_side_acc = 0.0
         self._pinch_latched = False
         self._smoother.reset()
 
@@ -1591,9 +1875,17 @@ class GestureService(QObject):
         dy = (mid_y - ay) * self._screen_h
         if abs(dy) >= abs(dx):
             # The fingers up push the page up, the way a touchpad does.
-            self._driver.scroll(int(-dy / self._SCROLL_PX))
+            self._scroll_acc += -dy / self._SCROLL_PX
+            notches = int(self._scroll_acc)
+            if notches:
+                self._scroll_acc -= notches
+                self._driver.scroll(notches)
         else:
-            self._driver.scroll_sideways(int(dx / self._SCROLL_PX))
+            self._scroll_side_acc += dx / self._SCROLL_PX
+            notches = int(self._scroll_side_acc)
+            if notches:
+                self._scroll_side_acc -= notches
+                self._driver.scroll_sideways(notches)
 
     def _swipe(self, hand: Hand, now: float) -> None:
         """An open palm swept sideways: back and forward."""
@@ -1684,6 +1976,26 @@ class GestureOverlay(QWidget):
         self._accent = colour
         self.update()
 
+    @staticmethod
+    def _hand_label(hand) -> str:
+        """What the hand is, in the language of the interface.
+
+        IT SAID "LEFT FIST" IN ENGLISH while the user was pinching: the
+        hand had been read as a fist — the threshold of the pinch was the
+        one of an open hand — and the label was in English on top of it.
+        Now it says "IZQUIERDA · PELLIZCO", in the language of the
+        interface, and the pose it names is the one the machine read.
+        """
+        from core.localization import gesture_label, t as _t
+
+        side = str(getattr(hand, "handedness", "") or "").strip().lower()
+        side_text = {
+            "left": _t("hand.left"),
+            "right": _t("hand.right"),
+        }.get(side, side.upper())
+        pose = gesture_label("pose", str(getattr(hand, "pose", "") or ""))
+        return f"{side_text} · {str(pose).upper()}"
+
     def paintEvent(self, _):
         p = QPainter(self)
         if not p.isActive():
@@ -1769,7 +2081,7 @@ class GestureOverlay(QWidget):
             if hand.handedness:
                 p.setPen(QColor(accent.red(), accent.green(), accent.blue(), 180))
                 p.setFont(px_font(9, mono=True))
-                label = f"{hand.handedness.upper()} · {hand.pose.upper()}"
+                label = self._hand_label(hand)
                 # PyQt6 has no drawText(QPointF, flags, text): the aligned
                 # overload wants a rectangle. Centre the label under the
                 # wrist in a box of its own.
