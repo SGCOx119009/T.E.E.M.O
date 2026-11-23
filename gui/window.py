@@ -2667,8 +2667,9 @@ class MainWindow(QMainWindow):
         # ── MANO ─────────────────────────────────────────────────────────────
         #
         # The cursor you steer with: the camera watches, the skeleton of
-        # each hand is drawn on the glass, the fingertip is the cursor and
-        # the pinch is a click.
+        # the hand is drawn on the glass, the fingertip is the cursor and
+        # the pinch is a click. ONE hand: with two, the pointer jumped
+        # from one to the other.
         hand = self._group_layouts["hand"]
 
         self._gesture_btn = _row(hand, QPushButton(_t("controls.gesture")),
@@ -3507,14 +3508,27 @@ class MainWindow(QMainWindow):
         This is the whole point of the strip under the two pictures: a
         gesture that cannot be checked is a guess, and the user is the only
         one who can say whether the guess was right.
+
+        IN THE LANGUAGE OF THE INTERFACE
+        --------------------------------
+        The tracker names the poses in English — "pinch", "double click" —
+        because those are the words its own vocabulary uses. The catalogue
+        has every one of them in the five languages, so the reader says
+        "clic derecho" to a person who reads Spanish. A word the catalogue
+        does not know is shown as the tracker said it, never as a blank.
         """
+        self._last_pose = str(pose or "")
+        self._last_action = str(action or "")
         viewer = getattr(self, "_viewer", None)
         if viewer is None:
             return
         service = getattr(self, "_gesture", None)
         backend = service.backend if service is not None else "none"
         hands = service.hands_count if service is not None else 0
-        viewer.set_gesture(backend, pose, action, [
+        viewer.set_gesture(backend,
+                           localization.gesture_label("pose", self._last_pose),
+                           localization.gesture_label("action", self._last_action),
+                           [
             (_t("viewer.hands_count"), str(hands), "TEXT"),
         ])
 
@@ -4399,6 +4413,19 @@ class MainWindow(QMainWindow):
             note = getattr(self, "_selector_note", None)
             if note is not None:
                 note.setText(_t("selector.explain"))
+        except Exception:
+            pass
+        # THE READER OF THE HANDS IS DRAWN, NOT A LABEL.
+        #
+        # The text replacement above walks the widgets that hold a word; the
+        # strip with the pose and the action is painted on a canvas, so it
+        # does not follow. It is repainted here with the last thing the
+        # tracker read, in the new language.
+        try:
+            pose = str(getattr(self, "_last_pose", "") or "")
+            action = str(getattr(self, "_last_action", "") or "")
+            if pose or action:
+                self._on_gesture(pose, action)
         except Exception:
             pass
 

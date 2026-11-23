@@ -317,3 +317,33 @@ def test_the_prompt_lines_name_the_language_and_the_region(isolated_config):
     language_line = localization.language_prompt_line()
     assert "Español" in language_line
     assert "Tacna, Peru" in language_line
+
+
+# ── Lo que dicen las manos ─────────────────────────────────────────────────
+#
+# El rastreador nombra las posturas en ingles ("pinch", "double click"),
+# porque esas son las palabras de su propio vocabulario. El catalogo las
+# tiene todas en los cinco idiomas, para que el lector de gestos hable el
+# idioma de la interfaz.
+
+def test_the_pose_and_the_action_are_said_in_the_language(isolated_config):
+    localization.set_language("es")
+    assert localization.gesture_label("pose", "pinch") == "PELLIZCO"
+    assert localization.gesture_label("action", "double click") == "doble clic"
+    assert localization.gesture_label("action", "right click") == "clic derecho"
+
+
+def test_every_language_says_the_gestures_in_its_own_way(isolated_config):
+    for code in ("en", "es", "pt", "fr", "zh"):
+        pose = localization.gesture_label("pose", "pinch", code)
+        action = localization.gesture_label("action", "click", code)
+        assert pose and action
+        assert pose != "pinch" or code == "en"
+        assert action != "click" or code == "en"
+
+
+def test_a_gesture_the_catalogue_does_not_know_is_shown_as_it_came():
+    assert localization.gesture_label("pose", "unbalanced pirouette") == \
+        "unbalanced pirouette"
+    assert localization.gesture_label("action", "") == ""
+

@@ -966,23 +966,110 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "zh": "问答",
     },
     "gesture.legend": {
-        "en": "PINCH click · PINCH held right click · PINCH+move drag · "
-              "TWO FINGERS scroll · TWO HANDS zoom · FIST group · "
-              "OPEN PALM swipe · POINT move",
-        "es": "PELLIZCO clic · PELLIZCO mantido clic derecho · "
-              "PELLIZCO+arrastre arrastrar · DOS DEDOS rueda · "
-              "DOS MANOS zoom · PUÑO grupo · PALMA ABIERTA deslizar · "
-              "DEDO mover",
-        "pt": "BELISCA clique · BELISCA mantido clique direito · "
-              "BELISCA+arrastar arrastar · DOIS DEDOS rolagem · "
-              "DUAS MÃOS zoom · PUNHO grupo · PALMA ABERTA deslizar · "
-              "DEDO mover",
-        "fr": "PINCE clic · PINCE tenu clic droit · PINCE+glisser "
-              "glisser · DEUX DOIGTS molette · DEUX MAINS zoom · "
-              "POING group · PAUME OUVERTE balayer · DOIGT déplacer",
-        "zh": "捏合 点击 · 长捏合 右键 · 捏合加移动 拖动 · "
-              "两指 滚轮 · 双手 缩放 · 握拳 多选 · "
-              "张开手掌 滑动 · 单指 移动",
+        "en": "PINCH click · PINCH twice double click · PINCH held right click · "
+              "PINCH+move drag · PINCH+middle shift · PINCH+ring ctrl · "
+              "PINCH+pinky alt · PINCH+three fingers middle click · "
+              "TWO FINGERS scroll · THREE FINGERS zoom · "
+              "OPEN PALM swipe · FIST let go · FINGER move",
+        "es": "PELLIZCO clic · PELLIZCO dos veces doble clic · "
+              "PELLIZCO mantenido clic derecho · PELLIZCO+arrastre arrastrar · "
+              "PELLIZCO+medio mayús · PELLIZCO+anular control · "
+              "PELLIZCO+meñique alt · PELLIZCO+tres dedos clic central · "
+              "DOS DEDOS rueda · TRES DEDOS zoom · "
+              "PALMA ABIERTA deslizar · PUÑO soltar todo · DEDO mover",
+        "pt": "BELISCA clique · BELISCA duas vezes clique duplo · "
+              "BELISCA mantido clique direito · BELISCA+arrastar arrastar · "
+              "BELISCA+médio shift · BELISCA+anelar ctrl · "
+              "BELISCA+mindinho alt · BELISCA+três dedos clique do meio · "
+              "DOIS DEDOS rolagem · TRÊS DEDOS zoom · "
+              "PALMA ABERTA deslizar · PUNHO largar tudo · DEDO mover",
+        "fr": "PINCE clic · PINCE deux fois double clic · PINCE tenu clic droit · "
+              "PINCE+glisser glisser · PINCE+majeur shift · PINCE+annulaire ctrl · "
+              "PINCE+auriculaire alt · PINCE+trois doigts clic du milieu · "
+              "DEUX DOIGTS molette · TROIS DOIGTS zoom · "
+              "PAUME OUVERTE balayer · POING tout lâcher · DOIGT déplacer",
+        "zh": "捏合 点击 · 捏合两次 双击 · 长捏合 右键 · "
+              "捏合加移动 拖动 · 捏合加中指 Shift · 捏合加无名指 Ctrl · "
+              "捏合加小指 Alt · 捏合加三指 中键 · "
+              "两指 滚轮 · 三指 缩放 · "
+              "张开手掌 滑动 · 握拳 松开 · 单指 移动",
+    },
+    # ── what the hands are saying, in the user's language ────────────────────
+    #
+    # The strip under the pictures says what the tracker read and what it
+    # means. It used to say it in English whatever the language of the
+    # interface, which is exactly the kind of thing that makes a person
+    # think the machine does not understand them.
+    "gesture.pose.pinch": {
+        "en": "PINCH", "es": "PELLIZCO", "pt": "BELISCA", "fr": "PINCE",
+        "zh": "捏合",
+    },
+    "gesture.pose.point": {
+        "en": "FINGER", "es": "DEDO", "pt": "DEDO", "fr": "DOIGT", "zh": "单指",
+    },
+    "gesture.pose.two": {
+        "en": "TWO FINGERS", "es": "DOS DEDOS", "pt": "DOIS DEDOS",
+        "fr": "DEUX DOIGTS", "zh": "两指",
+    },
+    "gesture.pose.three": {
+        "en": "THREE FINGERS", "es": "TRES DEDOS", "pt": "TRÊS DEDOS",
+        "fr": "TROIS DOIGTS", "zh": "三指",
+    },
+    "gesture.pose.open": {
+        "en": "OPEN PALM", "es": "PALMA ABIERTA", "pt": "PALMA ABERTA",
+        "fr": "PAUME OUVERTE", "zh": "张开手掌",
+    },
+    "gesture.pose.fist": {
+        "en": "FIST", "es": "PUÑO", "pt": "PUNHO", "fr": "POING", "zh": "握拳",
+    },
+    "gesture.pose.hand": {
+        "en": "HAND", "es": "MANO", "pt": "MÃO", "fr": "MAIN", "zh": "手",
+    },
+    "gesture.action.move": {
+        "en": "move", "es": "mover", "pt": "mover", "fr": "déplacer", "zh": "移动",
+    },
+    "gesture.action.click": {
+        "en": "click", "es": "clic", "pt": "clique", "fr": "clic", "zh": "点击",
+    },
+    "gesture.action.double click": {
+        "en": "double click", "es": "doble clic", "pt": "clique duplo",
+        "fr": "double clic", "zh": "双击",
+    },
+    "gesture.action.right click": {
+        "en": "right click", "es": "clic derecho", "pt": "clique direito",
+        "fr": "clic droit", "zh": "右键",
+    },
+    "gesture.action.middle click": {
+        "en": "middle click", "es": "clic central", "pt": "clique do meio",
+        "fr": "clic du milieu", "zh": "中键",
+    },
+    "gesture.action.drag": {
+        "en": "drag", "es": "arrastrar", "pt": "arrastar", "fr": "glisser", "zh": "拖动",
+    },
+    "gesture.action.press": {
+        "en": "press", "es": "presionar", "pt": "premir", "fr": "appuyer", "zh": "按下",
+    },
+    "gesture.action.scroll": {
+        "en": "scroll", "es": "rueda", "pt": "rolagem", "fr": "molette", "zh": "滚轮",
+    },
+    "gesture.action.zoom": {
+        "en": "zoom", "es": "ampliación", "pt": "ampliação",
+        "fr": "agrandissement", "zh": "缩放",
+    },
+    "gesture.action.zoom in": {
+        "en": "zoom in", "es": "acercar", "pt": "aproximar", "fr": "agrandir",
+        "zh": "放大",
+    },
+    "gesture.action.zoom out": {
+        "en": "zoom out", "es": "alejar", "pt": "afastar", "fr": "rétrécir",
+        "zh": "缩小",
+    },
+    "gesture.action.swipe": {
+        "en": "swipe", "es": "deslizar", "pt": "deslizar", "fr": "balayer", "zh": "滑动",
+    },
+    "gesture.action.rest": {
+        "en": "let go", "es": "soltar todo", "pt": "largar tudo", "fr": "tout lâcher",
+        "zh": "松开",
     },
 
     # -- the groups of the controls drawer ------------------------------------
@@ -3091,6 +3178,31 @@ def translate(text: str, lang: str | None = None) -> str:
     else:
         code = _normalize_lang(lang) or DEFAULT_LANGUAGE
     return entry.get(code) or entry.get(DEFAULT_LANGUAGE) or raw
+
+
+def gesture_label(kind: str, raw: str, lang: str | None = None) -> str:
+    """What the hand is doing, said in the language of the interface.
+
+    The tracker speaks in small English words — "pinch", "double click",
+    "right click" — because those are the names of the poses it can read.
+    The catalogue has a key for each of them in the five languages, so the
+    strip under the pictures says "clic derecho" and not "right click".
+
+    A word the catalogue does not know comes back as it came: a missing
+    translation shows up as the English word, never as an empty label.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    prefix = "gesture.pose." if str(kind) == "pose" else "gesture.action."
+    entry = CATALOG.get(f"{prefix}{text.lower()}")
+    if not entry:
+        return text
+    if lang is None:
+        code = get_language()
+    else:
+        code = _normalize_lang(lang) or DEFAULT_LANGUAGE
+    return entry.get(code) or entry.get(DEFAULT_LANGUAGE) or text
 
 
 def catalog_keys() -> list[str]:
