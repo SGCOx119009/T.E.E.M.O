@@ -970,29 +970,58 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
               "PINCH+move drag · PINCH+middle shift · PINCH+ring ctrl · "
               "PINCH+pinky alt · PINCH+three fingers middle click · "
               "TWO FINGERS scroll · THREE FINGERS zoom · "
-              "OPEN PALM swipe · FIST let go · FINGER move",
+              "OPEN PALM swipe · FIST let go · FINGER move · "
+              "OPEN PALM held clutch · FIST held confirm · THUMB UP approve · "
+              "THUMB DOWN reject · L SHAPE wake up · "
+              "THREE FINGERS sideways switch window · OPEN PALM up maximise · "
+              "OPEN PALM down minimise · TWO L's screenshot · "
+              "TWO PINCHES one still select area · TWO PINCHES apart zoom · "
+              "PALMS TOGETHER sleep",
         "es": "PELLIZCO clic · PELLIZCO dos veces doble clic · "
               "PELLIZCO mantenido clic derecho · PELLIZCO+arrastre arrastrar · "
               "PELLIZCO+medio mayús · PELLIZCO+anular control · "
               "PELLIZCO+meñique alt · PELLIZCO+tres dedos clic central · "
               "DOS DEDOS rueda · TRES DEDOS zoom · "
-              "PALMA ABIERTA deslizar · PUÑO soltar todo · DEDO mover",
+              "PALMA ABIERTA deslizar · PUÑO soltar todo · DEDO mover · "
+              "PALMA ABIERTA quieta embrague · PUÑO quieto confirmar · "
+              "PULGAR ARRIBA aprobar · PULGAR ABAJO rechazar · MANO EN L despertar · "
+              "TRES DEDOS de lado cambiar de ventana · "
+              "PALMA arriba maximizar · PALMA abajo minimizar · "
+              "DOS L's captura · DOS PELLIZCOS uno quieto seleccionar área · "
+              "DOS PELLIZCOS separados zoom · PALMAS JUNTAS dormir",
         "pt": "BELISCA clique · BELISCA duas vezes clique duplo · "
               "BELISCA mantido clique direito · BELISCA+arrastar arrastar · "
               "BELISCA+médio shift · BELISCA+anelar ctrl · "
               "BELISCA+mindinho alt · BELISCA+três dedos clique do meio · "
               "DOIS DEDOS rolagem · TRÊS DEDOS zoom · "
-              "PALMA ABERTA deslizar · PUNHO largar tudo · DEDO mover",
+              "PALMA ABERTA deslizar · PUNHO largar tudo · DEDO mover · "
+              "PALMA ABERTA quieta embrague · PUNHO quieto confirmar · "
+              "POLEGAR PARA CIMA aprovar · POLEGAR PARA BAIXO rejeitar · "
+              "MÃO EM L acordar · TRÊS DEDOS de lado trocar de janela · "
+              "PALMA para cima maximizar · PALMA para baixo minimizar · "
+              "DOIS L's captura · DOIS BELISCAS um quieto selecionar área · "
+              "DOIS BELISCAS separados zoom · PALMAS JUNTAS dormir",
         "fr": "PINCE clic · PINCE deux fois double clic · PINCE tenu clic droit · "
               "PINCE+glisser glisser · PINCE+majeur shift · PINCE+annulaire ctrl · "
               "PINCE+auriculaire alt · PINCE+trois doigts clic du milieu · "
               "DEUX DOIGTS molette · TROIS DOIGTS zoom · "
-              "PAUME OUVERTE balayer · POING tout lâcher · DOIGT déplacer",
+              "PAUME OUVERTE balayer · POING tout lâcher · DOIGT déplacer · "
+              "PAUME OUVERTE immobile embrayage · POING immobile confirmer · "
+              "POUCE EN HAUT approuver · POUCE VERS LE BAS refuser · "
+              "MAIN EN L réveiller · TROIS DOIGTS sur le côté changer de fenêtre · "
+              "PAUME vers le haut agrandir · PAUME vers le bas réduire · "
+              "DEUX L capture · DEUX PINCES un immobile sélection de zone · "
+              "DEUX PINCES écartés zoom · PAUMES ENSEMBLE dormir",
         "zh": "捏合 点击 · 捏合两次 双击 · 长捏合 右键 · "
               "捏合加移动 拖动 · 捏合加中指 Shift · 捏合加无名指 Ctrl · "
               "捏合加小指 Alt · 捏合加三指 中键 · "
               "两指 滚轮 · 三指 缩放 · "
-              "张开手掌 滑动 · 握拳 松开 · 单指 移动",
+              "张开手掌 滑动 · 握拳 松开 · 单指 移动 · "
+              "张开手掌不动 离合 · 握拳不动 确认 · "
+              "拇指向上 批准 · 拇指向下 拒绝 · L形手势 唤醒 · "
+              "三指横移 切换窗口 · 手掌上推 最大化 · 手掌下推 最小化 · "
+              "双手L形 截图 · 双手捏合一个不动 选择区域 · 双手捏合分开 缩放 · "
+              "双掌合拢 休眠",
     },
     # ── what the hands are saying, in the user's language ────────────────────
     #
