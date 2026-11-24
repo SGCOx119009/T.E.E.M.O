@@ -3089,8 +3089,6 @@ class MainWindow(QMainWindow):
         try:
             if panel.isVisible():
                 panel.refresh()
-            else:
-                self._events_dirty = True
         except Exception:
             pass
 
@@ -3118,7 +3116,6 @@ class MainWindow(QMainWindow):
                 panel = getattr(self, "_event_panel", None)
                 if panel is not None:
                     panel.refresh()
-                    self._events_dirty = False
             except Exception:
                 pass
         rail = getattr(self, "_group_rail", None)
