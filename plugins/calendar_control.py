@@ -29,8 +29,10 @@ from memory import config_manager
 PLUGIN = {
     "name": "calendar_control",
     "description": (
-        "Read the connected Google Calendar. Use for 'what do I have today', "
+        "Read the connected Google Calendar — EVERY calendar the account can "
+        "read, not only the primary one. Use for 'what do I have today', "
         "'what is my agenda', 'when do I have to leave to arrive on time'. "
+        "Each event comes with the calendar it belongs to. "
         "This integration never creates, moves or deletes an event. "
         "Configure a Google OAuth Desktop client in plugin settings and "
         "authorize it with the read-only button before asking."
@@ -207,12 +209,22 @@ def _build_calendar_service(credentials):
 
 
 def _local_tz_name() -> str:
+    """The IANA name of the local timezone, or "" when we cannot name it.
+
+    Google wants an IANA name ("America/Lima"). `str()` of a fixed offset is
+    not one ("UTC-05:00"), and sending a name the API does not know makes it
+    fall back to UTC — which is how every event ended up five hours out. So
+    this returns a name only when there really is one.
+    """
     try:
         from core.cloud import user_tz
 
-        return str(user_tz())
+        name = str(user_tz())
+        if "/" in name and " " not in name:
+            return name
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def _event_time(raw: Any) -> datetime | None:
@@ -234,22 +246,78 @@ def _event_time(raw: Any) -> datetime | None:
     return None
 
 
-def _events_for(service, start: datetime, end: datetime) -> list[dict]:
-    response = (
-        service.events()
-        .list(
-            calendarId="primary",
-            timeMin=start.isoformat(),
-            timeMax=end.isoformat(),
-            maxResults=_MAX_EVENTS,
-            singleEvents=True,
-            orderBy="startTime",
-            timeZone=_local_tz_name() or None,
-        )
-        .execute()
-    )
-    items = response.get("items") or []
-    return [item for item in items if isinstance(item, dict)]
+def _readable_calendars(service) -> list[tuple[str, str, bool]]:
+    """Every calendar this token can read: (id, name, is_the_primary_one).
+
+    "primary" is a shorthand for the calendar the user writes in, so it comes
+    first — but it is NOT the only one that matters.
+    """
+    out: list[tuple[str, str, bool]] = []
+    try:
+        page = service.calendarList().list(maxResults=250).execute()
+    except Exception:
+        return [("primary", "primary", True)]
+    for item in (page.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        cid = str(item.get("id") or "").strip()
+        if not cid:
+            continue
+        name = str(item.get("summaryOverride") or item.get("summary") or cid).strip()
+        out.append((cid, name, bool(item.get("primary"))))
+    if not out:
+        return [("primary", "primary", True)]
+    out.sort(key=lambda triple: 0 if triple[2] else 1)
+    return out
+
+
+def _sort_key(item: dict) -> tuple[bool, str]:
+    stamp = _event_time(item.get("start"))
+    return (stamp is None, stamp.isoformat() if stamp else "")
+
+
+def _events_for(service, start: datetime, end: datetime) -> tuple[list[dict], list[str]]:
+    """Every event in the window, from EVERY calendar the token can read.
+
+    WHY EVERY CALENDAR AND NOT ONLY "primary"
+        The user has six calendars, and the appointments live in the ones that
+        are not the primary. Reading only "primary" answered "no events" on a
+        window that held ten appointments: the tool was right about the
+        calendar it looked at, and wrong about the day.
+
+    It returns the events (each one tagged with the calendar it came from) and
+    the list of calendars that could not be read, so the answer can say so
+    instead of pretending it looked everywhere.
+    """
+    found: list[dict] = []
+    unreadable: list[str] = []
+    calendars = _readable_calendars(service)
+    for cid, name, _is_primary in calendars:
+        try:
+            response = (
+                service.events()
+                .list(
+                    calendarId=cid,
+                    timeMin=start.isoformat(),
+                    timeMax=end.isoformat(),
+                    maxResults=_MAX_EVENTS,
+                    singleEvents=True,
+                    orderBy="startTime",
+                    timeZone=_local_tz_name() or None,
+                )
+                .execute()
+            )
+        except Exception:
+            unreadable.append(name)
+            continue
+        for item in (response.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            tagged = dict(item)
+            tagged["_calendar"] = name
+            found.append(tagged)
+    found.sort(key=_sort_key)
+    return found[:_MAX_EVENTS], unreadable, len(calendars)
 
 
 def _describe(item: dict, travel: int) -> dict | None:
@@ -262,12 +330,78 @@ def _describe(item: dict, travel: int) -> dict | None:
     leave_by = start - timedelta(minutes=travel) if travel else None
     return {
         "summary": summary[:160],
+        "calendar": str(item.get("_calendar") or "")[:80],
         "start": start.isoformat(),
         "end": end.isoformat() if end else "",
         "location": place[:160],
         "all_day": not isinstance((item.get("start") or {}).get("dateTime"), str),
         "leave_by": leave_by.isoformat() if leave_by else "",
         "minutes_of_travel": travel,
+    }
+
+
+def read_events(days: int = 1) -> dict:
+    """Everything the calendar knows about the next `days` days.
+
+    One door for everybody who needs the agenda: the tool itself, the morning
+    briefing, and whatever asks later. It returns a DICT and never raises, so
+    a calendar that is not connected is an empty agenda and not a crash.
+
+    Why a dict and not the tool's text answer: the briefing used to read the
+    tool's answer as if it were JSON, and it never was — so the morning
+    briefing said "your agenda is clear" every single morning, appointments
+    or not. Two readers of the same calendar have to read the same thing.
+    """
+    empty = {
+        "events": [],
+        "now": "",
+        "days": 0,
+        "travel_minutes": 0,
+        "calendars_read": 0,
+        "calendars_with_events": 0,
+        "unreadable_calendars": [],
+        "error": "",
+    }
+    try:
+        span = int(days)
+    except (TypeError, ValueError):
+        span = 1
+    span = max(1, min(span, _MAX_DAYS))
+
+    credentials, error = _load_authorized_credentials()
+    if error:
+        return {**empty, "days": span, "error": error}
+
+    now = datetime.now().astimezone()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=span)
+    travel = _travel_minutes()
+    try:
+        service = _build_calendar_service(credentials)
+        raw, unreadable, calendars_read = _events_for(service, start, end)
+    except Exception as exc:
+        return {
+            **empty,
+            "days": span,
+            "now": now.isoformat(),
+            "travel_minutes": travel,
+            "error": f"The calendar could not be read ({type(exc).__name__}).",
+        }
+
+    events = []
+    for item in raw:
+        described = _describe(item, travel)
+        if described is not None:
+            events.append(described)
+    return {
+        "events": events,
+        "now": now.isoformat(),
+        "days": span,
+        "travel_minutes": travel,
+        "calendars_read": calendars_read,
+        "calendars_with_events": len({item.get("_calendar") for item in raw}),
+        "unreadable_calendars": unreadable,
+        "error": "",
     }
 
 
@@ -288,36 +422,25 @@ def _today_events(parameters: dict) -> str:
             action=action,
         )
 
-    credentials, error = _load_authorized_credentials()
-    if error:
-        return outcome.failed("calendar_control", error, action=action)
-
-    now = datetime.now().astimezone()
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + timedelta(days=span)
-    travel = _travel_minutes()
-    try:
-        service = _build_calendar_service(credentials)
-        raw = _events_for(service, start, end)
-    except Exception as exc:
+    read = read_events(span)
+    if read.get("error"):
         return outcome.failed(
             "calendar_control",
-            f"The calendar could not be read ({type(exc).__name__}).",
+            read["error"],
             action=action,
         )
 
-    events = []
-    for item in raw:
-        described = _describe(item, travel)
-        if described is not None:
-            events.append(described)
+    events = read["events"]
     return outcome.done(
         "calendar_control",
         action=action,
-        days=span,
-        now=now.isoformat(),
+        days=read["days"],
+        now=read["now"],
         count=len(events),
-        travel_minutes=travel,
+        travel_minutes=read["travel_minutes"],
+        calendars_read=read["calendars_read"],
+        calendars_with_events=read["calendars_with_events"],
+        unreadable_calendars=", ".join(read["unreadable_calendars"]) or "none",
         events=(
             outcome.untrusted(
                 "calendar",

@@ -254,28 +254,27 @@ def _weather(city: str, lang: str) -> dict:
 
 
 def _agenda(today: datetime, lang: str) -> list[dict]:
-    """What the user has today, from the calendar they authorized."""
+    """What the user has today, from the calendar they authorized.
+
+    It reads the calendar through the plugin's own door (`read_events`), which
+    returns a dict. It used to read the plugin's TEXT answer as if it were
+    JSON — and it never was — so the briefing said "your agenda is clear"
+    every morning, with or without appointments.
+    """
     try:
         from plugins import calendar_control
     except Exception:
         return []
     try:
-        raw = calendar_control.run({"action": "today"})
+        read = calendar_control.read_events(1)
     except Exception:
         return []
-    try:
-        payload = json.loads(str(raw))
-    except Exception:
+    if not isinstance(read, dict):
         return []
-    events = payload.get("events")
+    events = read.get("events")
     if not isinstance(events, list):
         return []
-    out = []
-    for item in events:
-        if not isinstance(item, dict):
-            continue
-        out.append(item)
-    return out
+    return [item for item in events if isinstance(item, dict)]
 
 
 def _agenda_text(events: list[dict], lang: str) -> str:
