@@ -4204,6 +4204,108 @@ _GUI_CATALOG: dict[str, dict[str, str]] = {
         "fr": "Une heure",
         "zh": "一小时",
     },
+    # -- el Event Stream (FASE 12) -------------------------------------------
+    "group.events": {
+        "en": "EVENTS",
+        "es": "EVENTOS",
+        "pt": "EVENTOS",
+        "fr": "ÉVÉNEMENTS",
+        "zh": "事件",
+    },
+    "drawer.events.explain": {
+        "en": "What the assistant did, step by step, and how long each step "
+              "took. The arguments of a step are shown with the secrets "
+              "masked. Nothing here leaves this computer.",
+        "es": "Lo que hizo el asistente, paso a paso, y cuánto tardó cada "
+              "paso. Los argumentos de un paso se ven con los secretos "
+              "enmascarados. Nada de esto sale de este ordenador.",
+        "pt": "O que o assistente fez, passo a passo, e quanto tempo cada "
+              "passo demorou. Os argumentos de um passo aparecem com os "
+              "segredos mascarados. Nada disso sai deste computador.",
+        "fr": "Ce que l'assistant a fait, étape par étape, et combien de "
+              "temps chaque étape a pris. Les arguments d'une étape sont "
+              "montrés avec les secrets masqués. Rien de tout cela ne "
+              "quitte cet ordinateur.",
+        "zh": "助手一步一步做了什么，每一步用了多久。每一步的参数都经过"
+              "脱敏显示。这里的任何内容都不会离开这台电脑。",
+    },
+    "events.filter.errors": {
+        "en": "only errors",
+        "es": "solo errores",
+        "pt": "só erros",
+        "fr": "erreurs seulement",
+        "zh": "仅错误",
+    },
+    "events.filter.turn": {
+        "en": "this turn",
+        "es": "este turno",
+        "pt": "este turno",
+        "fr": "ce tour",
+        "zh": "本轮",
+    },
+    "events.col.step": {
+        "en": "STEP",
+        "es": "PASO",
+        "pt": "PASSO",
+        "fr": "ÉTAPE",
+        "zh": "步骤",
+    },
+    "events.col.operator": {
+        "en": "TOOL",
+        "es": "HERRAMIENTA",
+        "pt": "FERRAMENTA",
+        "fr": "OUTIL",
+        "zh": "工具",
+    },
+    "events.col.action": {
+        "en": "ACTION",
+        "es": "ACCIÓN",
+        "pt": "AÇÃO",
+        "fr": "OPÉRATION",
+        "zh": "动作",
+    },
+    "events.col.duration": {
+        "en": "TIME",
+        "es": "TIEMPO",
+        "pt": "TEMPO",
+        "fr": "TEMPS",
+        "zh": "耗时",
+    },
+    "events.col.status": {
+        "en": "STATE",
+        "es": "ESTADO",
+        "pt": "ESTADO",
+        "fr": "ÉTAT",
+        "zh": "状态",
+    },
+    "events.state.ok": {
+        "en": "done",
+        "es": "hecho",
+        "pt": "feito",
+        "fr": "fait",
+        "zh": "完成",
+    },
+    "events.state.bad": {
+        "en": "failed",
+        "es": "falló",
+        "pt": "falhou",
+        "fr": "échec",
+        "zh": "失败",
+    },
+    "events.empty": {
+        "en": "Nothing has run yet.",
+        "es": "Todavía no ha pasado nada.",
+        "pt": "Ainda não aconteceu nada.",
+        "fr": "Rien ne s'est encore produit.",
+        "zh": "还没有任何动作。",
+    },
+    "events.all": {
+        "en": "all",
+        "es": "todas",
+        "pt": "todas",
+        "fr": "toutes",
+        "zh": "全部",
+    },
 }
 
 CATALOG.update(_GUI_CATALOG)

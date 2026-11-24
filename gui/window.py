@@ -108,6 +108,10 @@ from gui.viewer import (
     ViewerPanel,
 )
 
+from gui.event_panel import (
+    EventStreamPanel,
+)
+
 from PyQt6.QtWidgets import QGridLayout
 
 from gui.style import DISPLAY_CSS, MONO_CSS, btn_css, hud_font, px_font, scroll_css
@@ -160,6 +164,11 @@ class MainWindow(QMainWindow):
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
     _review_sig     = pyqtSignal(str, str, object, object)  # document review payload
+    # THE EVENT STREAM (FASE 12): a step happened in the bus and the
+    # table has to hear about it. The bus is written from the thread of
+    # the tool, so it travels by signal like everything else that
+    # crosses the thread.
+    _events_sig      = pyqtSignal()
     # The user asked to leave. Whoever owns the event loop stops it.
     quit_requested  = pyqtSignal()
 
@@ -579,6 +588,7 @@ class MainWindow(QMainWindow):
         self._quiz_sig.connect(self._show_quiz)
         self._quiz_hide_sig.connect(self._hide_quiz)
         self._review_sig.connect(self._show_review)
+        self._events_sig.connect(self._refresh_event_stream)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -1513,6 +1523,13 @@ class MainWindow(QMainWindow):
                 self._tray.hide()
             except Exception:
                 pass
+        # The bus of the Event Stream is released before anything else: a
+        # watcher that points at a window that is going away is a crash
+        # waiting for the next tool call.
+        try:
+            self._release_event_stream()
+        except Exception:
+            pass
         # The panel that floats over somebody else's window is a window of
         # its own, and it has to go with the rest.
         self._destroy_floating()
@@ -1522,6 +1539,24 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.quit_requested.emit()
+        except Exception:
+            pass
+
+    def _release_event_stream(self) -> None:
+        """Let the bus go when the program leaves.
+
+        The bus lives in the memory of the process and dies with it, but a
+        window that is being destroyed must not stay in its list of
+        watchers: a watcher that points at an object that no longer exists
+        is a crash waiting for the next step."""
+        watcher = getattr(self, "_event_watcher", None)
+        if watcher is None:
+            return
+        self._event_watcher = None
+        try:
+            from core import eventstream
+
+            eventstream.unsubscribe(watcher)
         except Exception:
             pass
 
@@ -1802,7 +1837,7 @@ class MainWindow(QMainWindow):
         #
         # Now there is one. It opens the drawer on the group that was
         # open last, which is the one the user is most likely to want,
-        # and the rail inside the drawer carries the seven groups.
+        # and the rail inside the drawer carries the eight groups.
         self._drawer_btn = IconButton("gear", 32)
         self._drawer_btn.setCheckable(True)
         self._drawer_btn.setToolTip(_t("window.controls_drawer_tip"))
@@ -2379,20 +2414,21 @@ class MainWindow(QMainWindow):
 
     # ── the controls drawer ──────────────────────────────────────────────────
     #
-    # ONE DRAWER, SEVEN GROUPS.
+    # ONE DRAWER, EIGHT GROUPS.
     #
     # It used to be two drawers with two long lists in them, and the user
     # was right twice over: the button was duplicated, and what was inside
     # was a list of forty things with nothing to say which of them went
     # together.
     #
-    # Now there is ONE drawer, a rail of seven groups at the top of it and
+    # Now there is ONE drawer, a rail of eight groups at the top of it and
     # a stack of pages underneath. The rail is the index; the page is the
     # list. The two header buttons are two doors to the same drawer — the
     # sliders open the everyday switches, the gear opens the tools — so
     # there is nothing on screen that could be mistaken for a second copy.
 
-    _GROUPS = ("voice", "language", "look", "hand", "session", "system", "tools")
+    _GROUPS = ("voice", "language", "look", "hand", "session", "system",
+              "tools", "events")
 
     # HOW WIDE THE DRAWER IS.
     #
@@ -2429,7 +2465,7 @@ class MainWindow(QMainWindow):
 
         # THE RAIL, STANDING UP.
         #
-        # It used to lie down: seven names in a row, and seven names do not
+        # It used to lie down: eight names in a row, and eight names do not
         # fit in three hundred pixels. Every one of them came out cut in
         # half — "IDIOMA" read as "I]OM", "HERRAMIENTAS" as "4MIE" — so the
         # index of the drawer was unreadable. A column has the height it
@@ -2442,6 +2478,7 @@ class MainWindow(QMainWindow):
             ("session", _t("group.session")),
             ("system", _t("group.system")),
             ("tools", _t("group.tools")),
+            ("events", _t("group.events")),
         ])
         self._group_rail.changed.connect(self._select_group)
 
@@ -2911,6 +2948,32 @@ class MainWindow(QMainWindow):
         _cap(tools, _t("drawer.tool.providers"))
         _btn(tools, _t("controls.engine_providers"), self._open_providers)
 
+        # ── EVENTOS ────────────────────────────────────────────────────────
+        #
+        # The FASE 12: what the assistant did, step by step, and how long
+        # each step took. The table is fed by the bus of
+        # `core/eventstream.py`, which already masks the secrets — what is
+        # shown here is exactly what the bus holds.
+        events_layout = self._group_layouts["events"]
+        _cap(events_layout, _t("drawer.events.explain"))
+        self._event_panel = EventStreamPanel(parent=self)
+        events_layout.addWidget(self._event_panel, stretch=1)
+        # THE BUS IS WATCHED FROM HERE.
+        #
+        # The callback runs on the thread that wrote the event, so it does
+        # the least possible work: it says "something happened" and lets the
+        # signal do the travelling. A table that repaints itself from the
+        # thread of a tool would be a table that repaints itself in the
+        # middle of somebody else's work.
+        self._event_watcher = None
+        try:
+            from core import eventstream
+
+            self._event_watcher = self._on_event
+            eventstream.subscribe(self._event_watcher)
+        except Exception:
+            self._event_watcher = None
+
         for _page in self._group_pages.values():
             _page.layout().addStretch()
 
@@ -3001,6 +3064,36 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    # ── the Event Stream (FASE 12) ──────────────────────────────────────────
+
+    def _on_event(self, event) -> None:
+        """A step happened in the bus. Say so, and nothing else.
+
+        It is called from the thread that wrote the event — the thread of
+        the tool — so it does not touch a widget: it emits a signal, and
+        the signal arrives in the thread of the interface."""
+        try:
+            self._events_sig.emit()
+        except Exception:
+            pass
+
+    def _refresh_event_stream(self) -> None:
+        """Redraw the table of steps, if anybody is looking at it.
+
+        When nobody is looking, the redraw is left for later: the group is
+        opened and the table is filled then, with everything that happened
+        meanwhile."""
+        panel = getattr(self, "_event_panel", None)
+        if panel is None:
+            return
+        try:
+            if panel.isVisible():
+                panel.refresh()
+            else:
+                self._events_dirty = True
+        except Exception:
+            pass
+
     def _select_group(self, key: str) -> None:
         """Open one group of the drawer.
 
@@ -3018,6 +3111,16 @@ class MainWindow(QMainWindow):
         # the user was using last.
         self._last_group = key
         self._group_stack.setCurrentWidget(page)
+        # THE EVENT STREAM FILLS ITSELF WHEN IT IS OPENED, because while
+        # it was closed the steps kept coming in and nobody was looking.
+        if key == "events":
+            try:
+                panel = getattr(self, "_event_panel", None)
+                if panel is not None:
+                    panel.refresh()
+                    self._events_dirty = False
+            except Exception:
+                pass
         rail = getattr(self, "_group_rail", None)
         if rail is not None:
             rail.set_current(key)
@@ -3053,10 +3156,10 @@ class MainWindow(QMainWindow):
     def _toggle_controls(self, checked: bool):
         """The gear: the drawer of the controls.
 
-        ONE DOOR FOR SEVEN GROUPS. It used to be two doors — the gear
+        ONE DOOR FOR EIGHT GROUPS. It used to be two doors — the gear
         for the tools and the sliders for the everyday switches — and the
         user could not tell them apart: two buttons, the same drawer. The
-        drawer has a rail of seven groups inside it, so the button does
+        drawer has a rail of eight groups inside it, so the button does
         not have to choose; it opens the group that was open last.
 
         WHERE IT OPENS DEPENDS ON THE WINDOW. When the window is wide
@@ -3331,7 +3434,7 @@ class MainWindow(QMainWindow):
         # IT NEVER GOES PAST THE FOOTER.
         #
         # The drawer is as tall as the group it shows, and the group
-        # with the four modes of the window is the tallest of the seven.
+        # with the four modes of the window is the tallest of the eight.
         # Without a ceiling the drawer reached the bottom of the window
         # and covered the bar with the clock — the user called it "it
         # goes all the way down", and it was true.

@@ -3739,6 +3739,18 @@ class TeemoLive:
                         # different door — so this is the one place where the
                         # turn boundary is real.
                         self._tool_rounds = 0
+                        # AND THE EVENT STREAM GETS ITS TURN NUMBER.
+                        #
+                        # The bus of the FASE 12 filters by turn, and the
+                        # turn is this: a new instruction from the user.
+                        # Without this number every step of the session
+                        # would be in the same pile, and "what just
+                        # happened" would be a list of five hundred.
+                        try:
+                            from core import eventstream
+                            eventstream.begin_turn()
+                        except Exception:
+                            pass
                         return result
 
                     session.send_client_content = _send_and_arm

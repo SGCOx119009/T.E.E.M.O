@@ -702,10 +702,10 @@ class GroupRail(QWidget):
 
     WHY IT STANDS UP
     -----------------
-    The rail used to lie down: seven names in a row across three hundred
-    pixels. Seven names need about five hundred and forty, so Qt — which
-    would rather clip than overflow — gave each one thirty-six pixels and
-    every name came out cut in half: "IDIOMA" was read as "I]OM",
+    The rail used to lie down: eight names in a row across three hundred
+    pixels. Eight names need about six hundred, so Qt — which would
+    rather clip than overflow — gave each one thirty-six pixels and every
+    name came out cut in half: "IDIOMA" was read as "I]OM",
     "HERRAMIENTAS" as "4MIE". The index was there, and it was unreadable.
 
     A column can be as tall as it needs to be. Every name is written whole,

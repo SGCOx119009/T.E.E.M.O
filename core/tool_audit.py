@@ -657,7 +657,20 @@ def register_tool_risk(tool: str, risk: str) -> None:
 
 def record(tool: str, result: object, duration_ms: float,
            arguments: dict | None = None) -> ToolEvent:
-    """Record metadata only; never retain the supplied arguments or result."""
+    """Record metadata only; never retain the supplied arguments or result.
+
+    AND IT LEAVES A STEP IN THE EVENT STREAM.
+
+    The audit is the one place where a tool call is measured, so it is
+    the one place where the Event Stream of the FASE 12 can be written
+    from: a second measurement would be a second number, and two
+    numbers for the same thing is how a diagnostic starts lying.
+
+    What the bus keeps is NOT what the audit keeps: the audit holds no
+    arguments and no result, and the bus holds the arguments **masked**
+    (the rule of the FASE 9) and never the result. A tool result can be
+    a message to somebody, and a message to somebody does not belong in
+    a diagnostic."""
     name = tool[:64] if isinstance(tool, str) and tool else "unknown"
     try:
         duration = max(0, min(int(duration_ms), 86_400_000))
@@ -675,7 +688,32 @@ def record(tool: str, result: object, duration_ms: float,
     )
     with _lock:
         _events.append(event)
+    _publish(event, arguments, result)
     return event
+
+
+def _publish(event: ToolEvent, arguments: dict | None,
+             result: object) -> None:
+    """Leave the step in the Event Stream, with the secrets masked.
+
+    It must never break the tool call it is describing: a diagnostic that
+    takes the work down with it is not a diagnostic."""
+    try:
+        from core import eventstream
+
+        ok = event.status in ("done", "started", "ask", "unverified")
+        size = len(result) if isinstance(result, str) else 0
+        eventstream.emit(
+            operator=event.tool,
+            action=event.action,
+            args_resolved=arguments or {},
+            ok=ok,
+            duration_ms=event.duration_ms,
+            bytes=size,
+            error="" if ok else event.status,
+        )
+    except Exception:                                   # noqa: BLE001
+        pass
 
 
 def recent(limit: int = 20) -> list[ToolEvent]:

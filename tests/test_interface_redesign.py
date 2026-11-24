@@ -131,10 +131,17 @@ def test_there_is_one_drawer_and_not_two(window):
         "there are two drawers again, and they look like a copy of each other"
 
 
-def test_the_drawer_has_seven_groups(window):
+def test_the_drawer_has_eight_groups(window):
+    """EIGHT, and the eighth is the Event Stream.
+
+    The drawer had seven groups and the test said seven, because seven was
+    the truth. The FASE 12 added one more — the Event Stream, the table
+    that says what the assistant did and how long each step took — and the
+    truth is now eight. The test is changed to say what the product is,
+    not what it was."""
     groups = list(window._GROUPS)
     assert groups == ["voice", "language", "look", "hand", "session",
-                      "system", "tools"]
+                      "system", "tools", "events"]
     assert window._group_stack.count() == len(groups)
 
 
