@@ -42,6 +42,7 @@ THE ARGUMENTS ARE NAMED
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -300,6 +301,27 @@ def main() -> int:
     # arrives is the one that was just taken.
     _tune_camera(cap)
 
+    # THE HANDS ARE LOOKED FOR HERE, IN THIS PROCESS.
+    #
+    # This is the last native thing that used to be in the process that
+    # draws the interface: the tracker opens a graph with threads of its
+    # own, and it sat right next to the Qt event loop and the repaints.
+    # The program died with «Windows fatal exception: access violation» —
+    # in a repaint, in a thread of COM, wherever that memory was touched
+    # next — and the camera, which had already been moved to a process of
+    # its own, was not enough to stop it.
+    #
+    # So the tracker came here, to the process that already holds the
+    # device: one process, one native graph, one place where the two can
+    # be taken down together and in order.
+    #
+    # What travels to the interface is NOT a hand and NOT a picture of a
+    # hand: it is NUMBERS. The interface measures nothing and owns no
+    # native object, so there is nothing left there that a free could
+    # land on.
+    tracker = None
+    tracker_tried = False
+
     out = sys.stdout.buffer
     # FIFTEEN PICTURES A SECOND.
     #
@@ -320,13 +342,43 @@ def main() -> int:
             if not ok or frame is None:
                 time.sleep(0.05)
                 continue
+            # THE HANDS OF THIS PICTURE, MEASURED HERE.
+            hands_json = b'{"backend": "none", "hands": []}'
+            if not tracker_tried:
+                tracker_tried = True
+                try:
+                    from core.hand_tracker import HandTracker
+                    tracker = HandTracker()
+                except Exception as exc:                # noqa: BLE001
+                    sys.stderr.write(
+                        f"[camera] no hand tracker: {type(exc).__name__}\n")
+                    tracker = None
+            if tracker is not None:
+                try:
+                    from core.hand_spec import hands_to_payload
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    hands = tracker.track(rgb)
+                    hands_json = json.dumps(
+                        {"backend": tracker.backend,
+                         "hands": hands_to_payload(hands)},
+                        separators=(",", ":")).encode("utf-8")
+                except Exception:                       # noqa: BLE001
+                    # A picture that cannot be measured is a picture with
+                    # no hands in it, not a camera that died.
+                    hands_json = b'{"backend": "none", "hands": []}'
+
             good, buf = cv2.imencode(".jpg", frame,
                                      [cv2.IMWRITE_JPEG_QUALITY, 85])
             if not good:
                 continue
             data = buf.tobytes()
-            out.write(len(data).to_bytes(4, "little"))
+            # TWO MESSAGES FOR EVERY PICTURE: the picture itself, and the
+            # hands that were found in it. The type comes first, so the
+            # reader knows what it is reading.
+            out.write(b"\x01" + len(data).to_bytes(4, "little"))
             out.write(data)
+            out.write(b"\x02" + len(hands_json).to_bytes(4, "little"))
+            out.write(hands_json)
             out.flush()
     except (BrokenPipeError, KeyboardInterrupt):
         return 0

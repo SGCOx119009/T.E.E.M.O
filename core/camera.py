@@ -110,6 +110,14 @@ class CameraHub:
     def __init__(self):
         self._lock = threading.RLock()
         self._subscribers: list = []
+        # THE READERS OF THE HANDS.
+        #
+        # They are a separate list because they want something different:
+        # the pictures are the picture, and the hands are the NUMBERS of a
+        # hand measured in the other process. Nobody that wants a picture
+        # is interested in a hand, and nobody that wants a hand has to
+        # decode a picture to get it.
+        self._hands_subscribers: list = []
         self._proc: subprocess.Popen | None = None
         self._reader: threading.Thread | None = None
         self._stop = threading.Event()
@@ -128,6 +136,29 @@ class CameraHub:
         self._times: list[float] = []
         self._fps = 0.0
 
+    def _deliver_hands(self, data: bytes) -> None:
+        """The hands the worker measured, to whoever asked for them.
+
+        The data is plain JSON: the tracker is in the other process and
+        what it found travels as numbers. A reader that fails must not
+        take the camera down for the others, exactly as with the frames.
+        """
+        try:
+            import json
+
+            payload = json.loads(data.decode("utf-8"))
+        except Exception:                               # noqa: BLE001
+            return
+        if not isinstance(payload, dict):
+            return
+        with self._lock:
+            readers = list(self._hands_subscribers)
+        for reader in readers:
+            try:
+                reader(payload)
+            except Exception:
+                pass
+
     # ── the readers ─────────────────────────────────────────────────────────
 
     def subscribe(self, callback) -> None:
@@ -136,6 +167,23 @@ class CameraHub:
             if callback not in self._subscribers:
                 self._subscribers.append(callback)
         self._ensure_running()
+
+    def subscribe_hands(self, callback) -> None:
+        """Start receiving the hands. The callback gets the payload.
+
+        The payload is the plain data of the hand: the tracker lives in
+        the process that holds the camera, and what crosses the line
+        between the processes is a number, never an object."""
+        with self._lock:
+            if callback not in self._hands_subscribers:
+                self._hands_subscribers.append(callback)
+        self._ensure_running()
+
+    def unsubscribe_hands(self, callback) -> None:
+        """Stop receiving the hands."""
+        with self._lock:
+            if callback in self._hands_subscribers:
+                self._hands_subscribers.remove(callback)
 
     def unsubscribe(self, callback) -> None:
         """Stop receiving frames.
@@ -157,6 +205,7 @@ class CameraHub:
         """
         with self._lock:
             self._subscribers = []
+            self._hands_subscribers = []
 
     def stop_all(self) -> None:
         """Close the camera, whatever is still asking for frames.
@@ -176,6 +225,7 @@ class CameraHub:
         """
         with self._lock:
             self._subscribers = []
+            self._hands_subscribers = []
             self._stop.set()
             proc = self._proc
             self._proc = None
@@ -193,8 +243,14 @@ class CameraHub:
 
     @property
     def readers(self) -> int:
+        """How many readers the camera has, of either kind.
+
+        The hands are readers of the camera too: the process that holds
+        the device is opened for them exactly as it is opened for the
+        pictures, and a camera that is running for nobody is a camera
+        that is left claimed."""
         with self._lock:
-            return len(self._subscribers)
+            return len(self._subscribers) + len(self._hands_subscribers)
 
     @property
     def error(self) -> str:
@@ -360,6 +416,9 @@ class CameraHub:
         stream = proc.stdout
         try:
             while not self._stop.is_set():
+                kind = stream.read(1)
+                if not kind or len(kind) < 1:
+                    break
                 header = stream.read(4)
                 if not header or len(header) < 4:
                     break
@@ -374,16 +433,19 @@ class CameraHub:
                     data += piece
                 if len(data) < length:
                     break
-                self._note_frame()
-                with self._lock:
-                    readers = list(self._subscribers)
-                for reader in readers:
-                    try:
-                        reader(True, data)
-                    except Exception:
-                        # A reader that fails must not take the camera
-                        # down for the others.
-                        pass
+                if kind == b"\x01":
+                    self._note_frame()
+                    with self._lock:
+                        readers = list(self._subscribers)
+                    for reader in readers:
+                        try:
+                            reader(True, data)
+                        except Exception:
+                            # A reader that fails must not take the camera
+                            # down for the others.
+                            pass
+                elif kind == b"\x02":
+                    self._deliver_hands(data)
         except Exception as exc:                       # noqa: BLE001
             self._error = f"the camera stopped: {type(exc).__name__}"
         finally:
@@ -413,6 +475,16 @@ def subscribe(callback) -> None:
 
 def unsubscribe(callback) -> None:
     _HUB.unsubscribe(callback)
+
+
+def subscribe_hands(callback) -> None:
+    """Start receiving the hands of the camera."""
+    _HUB.subscribe_hands(callback)
+
+
+def unsubscribe_hands(callback) -> None:
+    """Stop receiving the hands of the camera."""
+    _HUB.unsubscribe_hands(callback)
 
 
 def release_readers() -> None:

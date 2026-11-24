@@ -26,6 +26,14 @@ THE THREE BACKENDS, IN ORDER
        Much worse — two fingers at a time and no depth — but it works with
        nothing installed at all.
 
+    NONE OF THEM IS HERE. The tracker lives in `core/hand_tracker.py` and
+    it runs in the process that holds the camera, because MediaPipe is a
+    native graph with threads of its own and it was the last one sitting
+    next to the repaints of this window. What arrives here are NUMBERS —
+    the points of a hand and what was measured from them — and the
+    geometry that turns those numbers into a pose is in
+    `core/hand_spec.py`, which is arithmetic and nothing else.
+
 THE CURSOR ACTUALLY MOVES
     The aimed point is moved onto the real pointer with the Windows API and
     the pinch sends a real left click. It is the same thing the keyboard
@@ -108,533 +116,31 @@ WHAT IS NOT DONE — THE THINGS MARKED WITH A STAR
 """
 from __future__ import annotations
 
-import atexit
 import ctypes
 import math
-import os
 import threading
 import time
-from pathlib import Path
 
 from PyQt6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
 from core.gesture_spec import GestureSpec
+from core.hand_spec import (BONES, INDEX_TIP, MIDDLE_MCP, PINCH_OFF, PINCH_ON,
+                            PINCH_REACH, TIPS, THUMB_TIP, WRIST, Hand,
+                            hands_from_payload)
 from gui import fx
 from gui.style import px_font
 from gui.theme import C
 
-# The 21 landmarks and the bones between them. This is MediaPipe's topology,
-# and it is the same list the reference HUD in the AGENTES folder draws.
-WRIST = 0
-THUMB_TIP = 4
-INDEX_TIP = 8
-MIDDLE_MCP = 9
-TIPS = (4, 8, 12, 16, 20)
-BONES = (
-    (0, 1), (1, 2), (2, 3), (3, 4),
-    (0, 5), (5, 6), (6, 7), (7, 8),
-    (5, 9), (9, 10), (10, 11), (11, 12),
-    (9, 13), (13, 14), (14, 15), (15, 16),
-    (13, 17), (17, 18), (18, 19), (19, 20),
-    (0, 17),
-)
-
-_MODEL = Path(__file__).resolve().parent.parent / "models" / "hand_landmarker.task"
-
-# ── the pinch, in numbers ────────────────────────────────────────────────────
+# THE GEOMETRY OF THE HAND IS NOT HERE.
 #
-# ONE LINE, THREE NAMES, AND THE REASON IS THE SAME IN ALL THREE.
-#
-# The pinch is the button of the mouse, and a button that flickers is a
-# button that clicks by itself. The fingers close and open around a
-# line, and a single line makes the button go down and come up and go
-# down again, several times a second, while the user believes they are
-# holding it still.
-#
-# So there are two lines: the button goes DOWN at PINCH_ON and comes UP
-# at PINCH_OFF, and in between nothing happens at all. The third number
-# is not about the gap: it is about the index. In a PINCH the index is
-# out in front, in the air, and its tip is far from the knuckle of the
-# middle finger; in a FIST the index is folded onto the palm and its tip
-# is right next to that knuckle, and the thumb of a fist is touching the
-# index too. Without that third number a resting hand holds the mouse
-# button down.
-PINCH_ON = 0.78
-PINCH_OFF = 0.52
-# HOW FAR THE INDEX IS FROM THE KNUCKLE OF THE MIDDLE FINGER, IN SPANS OF
-# THE HAND, FOR THE PINCH TO BE A PINCH.
-#
-# THESE NUMBERS COME FROM THE CANONICAL HAND OF MEDIAPIPE, NOT FROM A
-# GUESS. In the canonical hand (the one the model was trained on):
-#
-#     open hand    the index tip is 0.89 spans from the middle knuckle
-#     pinch        the index tip comes down to the thumb: 0.55
-#     fist         the index folds onto the palm: 0.26
-#
-# The threshold used to be 0.85, which is the open hand and NOT the pinch:
-# a real pinch was below the line, so a pinch was read as a fist and the
-# user saw "LEFT FIST" on the glass while he was pinching. The line is
-# now between the pinch and the fist, with room on both sides.
-PINCH_REACH = 0.40
-
-
-class Hand:
-    """One hand, as the tracker sees it."""
-
-    __slots__ = ("points", "handedness", "pinched", "closeness", "x", "y",
-                 "span", "pose", "aim_x", "aim_y", "fingers", "index_reach")
-
-    def __init__(self, points, handedness: str = ""):
-        self.points = points            # 21 x (x, y) in normalised image space
-        self.handedness = handedness
-        self.pinched = False
-        self.closeness = 0.0
-        self.x = 0.0
-        self.y = 0.0
-        # THE POINT THE POINTER GOES TO.
-        #
-        # Not the pinch. The pinch is where the fingers meet, and the
-        # fingers MEET: closing them moves the point, so the pointer
-        # jumps at the exact moment of the click, and the click lands
-        # where the hand was instead of where it is.
-        #
-        # The knuckle of the middle finger does not move when the hand
-        # closes: that is where the pointer is aimed, and the pinch is
-        # only the button. (The idea is from the gesture project the
-        # owner downloaded: `Gesture-Recognition-main`, which aims with
-        # the same knuckle.)
-        self.aim_x = 0.0
-        self.aim_y = 0.0
-        self.span = 1.0
-        self.pose = "open"
-        # WHICH FINGERS ARE OUT, ONE BY ONE.
-        #
-        # The shape of the hand is not one word: it is five answers,
-        # and the fingers that are not making the pinch are the ones
-        # that hold the modifier keys. A pinch with the middle finger
-        # up is a click with the shift down; the same pinch with the
-        # ring finger up is a click with the control down. This is how
-        # a real mouse is held, and it is the reason one hand is enough
-        # to be a whole mouse.
-        self.fingers = {"thumb": False, "index": False, "middle": False,
-                        "ring": False, "pinky": False}
-        # HOW FAR THE INDEX IS FROM THE KNUCKLE OF THE MIDDLE FINGER, IN
-        # SPANS OF THE HAND.
-        #
-        # It is what tells a PINCH from a FIST. In a pinch the index is
-        # out in front, in the air, and its tip is far from the knuckle
-        # of the middle finger. In a fist the index is folded down onto
-        # the palm and its tip is right next to that knuckle — and the
-        # thumb of a fist is also touching the index. Without this the
-        # fist was read as a pinch, and a hand that was simply resting
-        # held the mouse button down.
-        self.index_reach = 1.0
-
-    def measure(self) -> None:
-        """Work out the span, the aimed point and how closed the pinch is.
-
-        The aimed point is NOT the raw fingertip: it is the middle of the
-        thumb and the index, because that is where a press actually lands.
-        """
-        if len(self.points) < 21:
-            return
-        wrist = self.points[WRIST]
-        middle = self.points[MIDDLE_MCP]
-        self.span = max(1e-4, math.hypot(middle[0] - wrist[0], middle[1] - wrist[1]))
-        thumb = self.points[THUMB_TIP]
-        index = self.points[INDEX_TIP]
-        gap = math.hypot(thumb[0] - index[0], thumb[1] - index[1])
-        self.closeness = max(0.0, min(1.0, 1.0 - gap / (self.span * 0.85)))
-        # THE INDEX HAS TO BE OUT FOR THE PINCH TO BE A PINCH.
-        self.index_reach = (math.hypot(index[0] - middle[0], index[1] - middle[1])
-                            / max(1e-4, self.span))
-        self.fingers["thumb"] = self._extended(2, THUMB_TIP)
-        self.fingers["index"] = self._extended(6, INDEX_TIP)
-        self.fingers["middle"] = self._extended(10, 12)
-        self.fingers["ring"] = self._extended(14, 16)
-        self.fingers["pinky"] = self._extended(18, 20)
-        self.pinched = (self.closeness > PINCH_ON
-                        and self.index_reach > PINCH_REACH)
-        self.x = (thumb[0] + index[0]) / 2.0
-        self.y = (thumb[1] + index[1]) / 2.0
-        self.aim_x = float(middle[0])
-        self.aim_y = float(middle[1])
-        self.pose = self._classify()
-
-    # ── the pose ─────────────────────────────────────────────────────────────
-    #
-    # A pose is WHICH FINGERS ARE OUT. It is not a guess about intention:
-    # it is the shape of the hand, read from the landmarks, and every
-    # action of the mouse is attached to one of these shapes. Reading the
-    # shape and reading the intention are different things, and only the
-    # first one can be done without asking the user.
-
-    def _extended(self, pip: int, tip: int) -> bool:
-        """Is the finger standing up?
-
-        The tip has to be further from the wrist than the knuckle in front
-        of it. A finger that is curled towards the palm brings its tip
-        CLOSER to the wrist than its own knuckle, so the test says which
-        way the finger is pointing without needing an angle.
-        """
-        if len(self.points) < 21:
-            return False
-        wrist = self.points[WRIST]
-        a = math.hypot(self.points[tip][0] - wrist[0],
-                       self.points[tip][1] - wrist[1])
-        b = math.hypot(self.points[pip][0] - wrist[0],
-                       self.points[pip][1] - wrist[1])
-        return a > b * 1.12
-
-    def _classify(self) -> str:
-        """The name of the shape."""
-        f = self.fingers
-        if self.span < 1e-3:
-            # A shape with no size at all is not a hand: it is the
-            # tracker's answer without any information in it. It is
-            # called a blob so that it is never mistaken for a pose.
-            return "blob"
-        if self.pinched:
-            # The pinch wins over everything: the fingers that are not
-            # making it are the modifiers, and the modifiers are said
-            # apart when the press begins, not here.
-            return "pinch"
-        index = bool(f["index"])
-        middle = bool(f["middle"])
-        ring = bool(f["ring"])
-        pinky = bool(f["pinky"])
-        out = index + middle + ring + pinky
-        if out == 0:
-            return "fist"
-        if out == 4:
-            return "open"
-        if index and middle and not ring and not pinky:
-            return "two"
-        if index and not middle and not ring and not pinky:
-            return "point"
-        if out >= 3:
-            return "three"
-        return "hand"
-
-
-# ── the tracker ────────────────────────────────────────────────────────────
-
-# THE ONE TRACKER OF THE PROCESS.
-#
-# The MediaPipe tracker is a native object with threads of its own, and it
-# sits on a shared library. Two trackers in the same process — two windows,
-# two panels, a test and the program — meant that closing one of them took
-# the library out from under the other, and the process died with an access
-# violation instead of a goodbye.
-#
-# So there is ONE tracker, opened the first time it is asked for, and it is
-# NOT closed while the program runs. The operating system reclaims it when
-# the program ends; until then it is the same object for everybody, and
-# closing a window can never pull the ground from under another one.
-#
-# It is also faster: the model is loaded once, not once per window.
-_SHARED_LOCK = threading.Lock()
-_SHARED_LANDMARKER = None
-
-# The timestamps handed to the tracker must rise, always. Two trackers — or
-# two cameras — in the same millisecond would otherwise be told that time
-# stood still, and the tracker would refuse the frame.
-_STAMP_LOCK = threading.Lock()
-_LAST_STAMP = 0
-
-
-def _next_stamp() -> int:
-    """A timestamp that rises, even when the clock does not."""
-    global _LAST_STAMP
-    with _STAMP_LOCK:
-        stamp = int(time.time() * 1000)
-        if stamp <= _LAST_STAMP:
-            stamp = _LAST_STAMP + 1
-        _LAST_STAMP = stamp
-        return stamp
-
-
-def _shared_landmarker(model_path: Path):
-    """The one native tracker of the process, or None."""
-    global _SHARED_LANDMARKER
-    with _SHARED_LOCK:
-        if _SHARED_LANDMARKER is not None:
-            return _SHARED_LANDMARKER
-        from mediapipe.tasks.python import BaseOptions
-        from mediapipe.tasks.python.vision import (
-            HandLandmarker, HandLandmarkerOptions, RunningMode,
-        )
-        options = HandLandmarkerOptions(
-            base_options=BaseOptions(
-                model_asset_path=str(model_path)),
-            running_mode=RunningMode.VIDEO,
-            # ONE HAND, AND NOT TWO.
-            #
-            # The owner asked for it, and it is also the right answer:
-            #
-            # * WITH TWO HANDS THE POINTER JUMPED FROM ONE HAND TO THE
-            #   OTHER. The code picks the hand that is doing something, and
-            #   when both were in the picture that choice changed from one
-            #   picture to the next: the pointer teleported from one hand
-            #   to the other, and no amount of smoothing can hide a jump
-            #   that big.
-            # * THE MODEL IS FASTER WITH ONE HAND. It looks for one hand
-            #   instead of two, and the picture of the hand reaches the
-            #   screen sooner.
-            # * ONE HAND IS ENOUGH TO BE A WHOLE MOUSE. The fingers that
-            #   are not making the pinch are the ones that hold the
-            #   modifier keys, exactly as on a real mouse.
-            #
-            # TWO HANDS ARE READ AGAIN, AND THE POINTER DOES NOT JUMP.
-            #
-            # The two hands were dropped because the pointer followed
-            # "the first one the tracker reported", and that is not
-            # always the same hand: the pointer teleported across the
-            # screen. The pointer now keeps ONE hand — the nearest one to
-            # where it already is — and the other hand is still read:
-            # two hands pinching and moving apart is the zoom, which is
-            # the gesture that two hands are good for.
-            num_hands=2,
-            min_hand_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        _SHARED_LANDMARKER = HandLandmarker.create_from_options(options)
-        return _SHARED_LANDMARKER
-
-
-def _close_shared_landmarker() -> None:
-    """Let go of the native tracker, in an orderly way.
-
-    THE ORDER IS THE WHOLE POINT.
-        The tracker is a native graph with threads of its own, and the
-        picture it is looking at arrives on the thread of the camera.
-        If the graph is freed while a frame is being tracked inside it,
-        the native code is left using memory that no longer exists — and
-        the program dies with an access violation in a thread that has
-        nothing to do with the hands.
-
-        So: the camera stops first (which waits for the thread that was
-        reading), and only then is the tracker closed. And it IS closed:
-        the interpreter used to free it on its own, whenever it pleased,
-        which is the same accident with worse timing.
-    """
-    global _SHARED_LANDMARKER
-    try:
-        from core.camera import stop_all as _stop_camera
-        _stop_camera()
-    except Exception:                                   # noqa: BLE001
-        pass
-    with _SHARED_LOCK:
-        landmarker = _SHARED_LANDMARKER
-        _SHARED_LANDMARKER = None
-    if landmarker is None:
-        return
-    try:
-        landmarker.close()
-    except Exception:                                   # noqa: BLE001
-        pass
-
-
-# THE TRACKER IS LET GO WHEN THE PROGRAM IS GOING AWAY.
-#
-# The order matters: this handler closes the tracker, and the camera's
-# own handler (which waits for the thread that was reading) has to run
-# BEFORE it. Calling the camera's stop from here makes the order the
-# same whoever registered first.
-atexit.register(_close_shared_landmarker)
-
-
-class HandTracker:
-    """Finds the hands in a frame.
-
-    Tries MediaPipe first, then the legacy solutions API, then falls back
-    to OpenCV alone. `backend` says which one it ended up with.
-    """
-
-    def __init__(self, model_path: str | os.PathLike | None = None):
-        self.model_path = Path(model_path) if model_path else _MODEL
-        self.backend = "none"
-        self.error = ""
-        self._landmarker = None
-        self._legacy = None
-        self._open()
-
-    def _open(self) -> None:
-        try:
-            if self.model_path.exists():
-                self._landmarker = _shared_landmarker(self.model_path)
-                self.backend = "mediapipe"
-                return
-            self.error = f"the hand model is missing: {self.model_path}"
-        except Exception as exc:                       # noqa: BLE001
-            self.error = f"{type(exc).__name__}: {exc}"
-        # The legacy API, when the installed MediaPipe still has it.
-        try:
-            import mediapipe as mp
-            self._legacy = mp.solutions.hands.Hands(
-                static_image_mode=False,
-                max_num_hands=2,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-            )
-            self.backend = "mediapipe-legacy"
-            self.error = ""
-        except Exception:
-            self._legacy = None
-        if self._legacy is None and self.backend == "none":
-            self.backend = "opencv"
-
-    def available(self) -> bool:
-        return self.backend != "none"
-
-    def track(self, frame_rgb) -> list[Hand]:
-        """The hands in an RGB frame."""
-        if frame_rgb is None:
-            return []
-        if self._landmarker is not None:
-            return self._track_tasks(frame_rgb)
-        if self._legacy is not None:
-            return self._track_legacy(frame_rgb)
-        return self._track_opencv(frame_rgb)
-
-    # -- MediaPipe, the new API ---------------------------------------------
-
-    def _track_tasks(self, frame_rgb) -> list[Hand]:
-        import mediapipe as mp
-        import numpy as np
-        # The picture arrives in RGB, which is what MediaPipe wants.
-        image = mp.Image(image_format=mp.ImageFormat.SRGB,
-                         data=np.ascontiguousarray(frame_rgb))
-        # The new API wants a monotonically rising timestamp.
-        stamp = _next_stamp()
-        # The tracker is the one of the whole process, so two cameras
-        # cannot be inside it at the same time: it is asked one frame at a
-        # time, and the frame that is left out is the frame nobody was
-        # looking at anyway.
-        with _SHARED_LOCK:
-            result = self._landmarker.detect_for_video(image, stamp)
-        hands: list[Hand] = []
-        landmarks = getattr(result, "hand_landmarks", None) or []
-        handedness = getattr(result, "handedness", None) or []
-        for index, points in enumerate(landmarks):
-            coords = [(lm.x, lm.y) for lm in points]
-            if len(coords) < 21:
-                continue
-            label = ""
-            try:
-                label = handedness[index][0].category_name
-            except Exception:
-                label = ""
-            hand = Hand(coords, label)
-            hand.measure()
-            hands.append(hand)
-        return hands
-
-    # -- MediaPipe, the legacy API ------------------------------------------
-
-    def _track_legacy(self, frame_rgb) -> list[Hand]:
-        import numpy as np
-
-        rgb = np.ascontiguousarray(frame_rgb)
-        result = self._legacy.process(rgb)
-        hands: list[Hand] = []
-        for item in getattr(result, "multi_hand_landmarks", None) or []:
-            coords = [(lm.x, lm.y) for lm in item.landmark]
-            if len(coords) < 21:
-                continue
-            label = ""
-            try:
-                label = result.multi_handedness[0]["classification"][0]["label"]
-            except Exception:
-                label = ""
-            hand = Hand(coords, label)
-            hand.measure()
-            hands.append(hand)
-        return hands
-
-    # -- OpenCV alone -------------------------------------------------------
-
-    def _track_opencv(self, frame_rgb) -> list[Hand]:
-        """Skin, hull, fingertips. Crude, but it needs nothing installed.
-
-        The fingertips are the vertices of the convex hull with the largest
-        distance from the centre; the pinch is the gap between the two
-        smallest of them.
-        """
-        import numpy as np
-
-        from core.camera import cv2_quiet
-
-        cv2 = cv2_quiet()
-        h, w = frame_rgb.shape[:2]
-        # The skin detector wants the colours the way the camera gives
-        # them, and the camera gives them the other way round.
-        bgr = cv2.cvtColor(np.ascontiguousarray(frame_rgb), cv2.COLOR_RGB2BGR)
-        ycrcb = cv2.cvtColor(bgr, cv2.COLOR_BGR2YCrCb)
-        mask = cv2.inRange(ycrcb, np.array([0, 135, 85], dtype=np.uint8),
-                           np.array([255, 180, 135], dtype=np.uint8))
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
-        hands: list[Hand] = []
-        if not contours:
-            return hands
-        contour = max(contours, key=cv2.contourArea)
-        if cv2.contourArea(contour) < 900:
-            return hands
-        hull = cv2.convexHull(contour)
-        hull_index = cv2.convexHull(contour, returnPoints=False).flatten()
-        points = [contour.reshape(-1, 2)[i - 1] for i in hull_index
-                  if 0 < i <= len(contour.reshape(-1, 2))]
-        if len(points) < 5:
-            return hands
-        points = np.array(points, dtype=np.float32)
-        centre = points.mean(axis=0)
-        order = np.argsort(-np.linalg.norm(points - centre, axis=1))
-        tips = points[order[:5]]
-        # Normalise: the fingers are in the upper part of the blob.
-        hand = Hand([(0.0, 0.0)] * 21)
-        hand.points = [(0.0, 0.0)] * 21
-        wrist = (float(centre[0]), float(centre[1]))
-        hand.points[WRIST] = wrist
-        # THE KNUCKLE THE POINTER IS AIMED AT. The blob has no fingers to
-        # read, but its centre is where the knuckle of the middle finger
-        # would be, and that is the point the pointer follows.
-        hand.points[MIDDLE_MCP] = (float(centre[0]) / w, float(centre[1]) / h)
-        for slot, (px, py) in enumerate(zip(tips, TIPS)):
-            hand.points[slot] = (float(px) / w, float(py) / h)
-        hand.span = max(1e-4, float(np.linalg.norm(tips[0] - centre)) / w)
-        hand.measure()
-        # The blob has no fingers to read: it is a skin-coloured shape, and
-        # the joints of it are a guess. So it is NOT a pose — calling it
-        # "fist" would hold the shift key down for ever.
-        hand.pose = "blob"
-        hands.append(hand)
-        return hands
-
-    def close(self) -> None:
-        """Release this tracker. Calling it twice is not a mistake.
-
-        The native tracker is NOT closed here: it is the one of the whole
-        process, and closing it would take the library out from under
-        anybody else who is still using it. What is closed is the legacy
-        OpenCV tracker, which belongs to this object alone, and the
-        reference to the shared one, which is dropped so that nobody asks
-        for a tracker that has stopped working.
-        """
-        self._landmarker = None
-        legacy = self._legacy
-        self._legacy = None
-        try:
-            if legacy is not None:
-                legacy.close()
-        except Exception:
-            pass
-
+# It is in `core/hand_spec.py`, which is arithmetic on numbers and
+# nothing else: no native library, no threads of its own, nothing that
+# can be freed under the feet of a repaint. The tracker that MEASURES
+# the hand is in `core/hand_tracker.py`, and it runs in the process that
+# holds the camera. What arrives here are numbers, and the picture the
+# interface draws is a picture and nothing more.
 
 # ── moving the real pointer ────────────────────────────────────────────────
 
@@ -1052,7 +558,9 @@ class GestureService(QObject):
         super().__init__(parent)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
-        self._tracker: HandTracker | None = None
+        # WHICH TRACKER FOUND THE HANDS. It is said in the other
+        # process, and it arrives with the hands.
+        self._backend = "none"
         self._driver = PointerDriver()
         self._lock = threading.Lock()
         self._hands: list[Hand] = []
@@ -1155,27 +663,24 @@ class GestureService(QObject):
         self._servo = QTimer(self)
         self._servo.setInterval(16)
         self._servo.timeout.connect(self._servo_step)
-        # The tracker is used by the thread of the camera and closed by
-        # the thread of the service: the two must not meet.
-        self._frame_lock = threading.Lock()
-        # THE LAST PICTURE, AND NOTHING ELSE.
+        # THE HANDS, AND NOTHING ELSE.
         #
         # The camera hands its frames to every reader one after the other,
-        # in the thread that reads the device. Decoding a JPEG and asking
-        # the tracker about it takes longer than the camera takes to
-        # produce the next picture, so doing it there held the other
-        # readers — the live picture of the head, the tile of the viewer —
-        # behind the tracker, and the picture on screen fell behind the
-        # hand by whole frames.
+        # in the thread that reads the device. Turning a hand into a pose
+        # and driving the pointer with it takes longer than the camera
+        # takes to produce the next picture, so doing it there held the
+        # other readers — the live picture of the head, the tile of the
+        # viewer — behind the mouse, and the pointer fell behind the hand
+        # by whole frames.
         #
-        # So the camera thread only LEAVES the picture here, overwriting
-        # the one before it. The tracker thread takes the newest picture
-        # and ignores the ones that piled up while it was busy: a picture
-        # that is already old when it is looked at is worth nothing, and
-        # throwing it away is what makes the hand feel close to the
+        # So the camera thread only LEAVES the numbers here, overwriting
+        # the ones before it. The thread of the service takes the newest
+        # ones and ignores the ones that piled up while it was busy: a
+        # hand that is already old when it is looked at is worth nothing,
+        # and throwing it away is what makes the hand feel close to the
         # screen instead of trailing behind it.
         self._latest_lock = threading.Lock()
-        self._latest_jpeg: bytes | None = None
+        self._latest_hands: dict | None = None
         self._latest_seq = 0
         self._tracked_seq = 0
         self._track_thread: threading.Thread | None = None
@@ -1203,8 +708,8 @@ class GestureService(QObject):
 
     @property
     def backend(self) -> str:
-        tracker = self._tracker
-        return tracker.backend if tracker else "none"
+        """Which tracker found the hands — said in the OTHER process."""
+        return self._backend or "none"
 
     @property
     def drives_pointer(self) -> bool:
@@ -1397,16 +902,14 @@ class GestureService(QObject):
             return "the camera is already being watched"
         self._stop.clear()
         with self._latest_lock:
-            self._latest_jpeg = None
+            self._latest_hands = None
             self._latest_seq = 0
             self._tracked_seq = 0
         # TWO THREADS, ON PURPOSE.
         #
-        # One waits for the camera and leaves the pictures in the slot;
-        # the other looks for the hands in the newest of them. The tracker
-        # is created, used and closed in that second thread, which is what
-        # the native library asks for, and the camera is never held
-        # waiting for the tracker.
+        # One waits for the camera and leaves the hands in the slot; the
+        # other takes the newest of them and does what they say. The
+        # camera is never held waiting for the mouse.
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="gesture")
         self._thread.start()
@@ -1421,16 +924,10 @@ class GestureService(QObject):
     def stop(self) -> str:
         """Stop watching — and WAIT until the threads are really gone.
 
-        The tracker holds native memory that the tracking library frees
-        when the Python object dies. If the window goes away while the
-        thread is still inside `detect_for_video`, that free lands on
-        memory the native code is still using, and the process dies with
-        an access violation instead of a goodbye.
-
-        So the order is fixed and it is not negotiable: the threads are
-        asked to stop, the threads are WAITED for, and only then is the
-        tracker released — and the tracker closes itself in the thread
-        that owns it, once that thread is really gone.
+        There is no native memory to release here any more: the tracker
+        is in the process that holds the camera, and that process is the
+        one that lets go of it. What is left here is the mouse: a button
+        that stays down, a modifier that stays held.
         """
         self._stop.set()
         thread = self._thread
@@ -1443,14 +940,6 @@ class GestureService(QObject):
             if tracker_thread.is_alive():
                 tracker_thread.join(timeout=5.0)
             self._track_thread = None
-        with self._lock:
-            tracker = self._tracker
-            self._tracker = None
-        if tracker is not None:
-            # Under the frame lock: a picture that is being tracked right
-            # now must be finished before the native memory is freed.
-            with self._frame_lock:
-                tracker.close()
         # The button and the modifiers are let go here as well: a stop that
         # leaves the shift held down is a stop that turns every later click
         # into a group selection.
@@ -1470,7 +959,7 @@ class GestureService(QObject):
     # -- the loop ------------------------------------------------------------
 
     def _loop(self) -> None:
-        """Wait for the camera, and leave every picture it gives to the tracker.
+        """Wait for the camera, and take the hands it finds.
 
         THE CAMERA IS NOT OPENED HERE. It is the one of the whole process
         (core/camera.py), and this service is one of its readers. Two
@@ -1478,19 +967,19 @@ class GestureService(QObject):
         camera, and the driver did not survive it: the whole program died
         with an access violation.
 
-        THE TRACKER IS NOT CREATED HERE EITHER. It lives in the thread
-        that looks for the hands (see `_track_loop`), and the native
-        tracker and the pictures belong to the same thread: a tracker
-        built in one thread and used in another is not a thing the native
-        library promises anything about.
+        THE TRACKER IS NOT HERE EITHER, AND NOT IN THIS PROCESS. The hands
+        are looked for in the process that holds the camera (see
+        `core/camera_worker.py`), and what arrives here are the NUMBERS
+        of the hand: no native object, no picture to decode, nothing that
+        can be freed under the feet of a repaint.
         """
         try:
             self.state_sig.emit("the hands are being looked for")
             self._enabled = True
             from core.camera import hub as _camera_hub
-            _camera_hub().subscribe(self._on_frame)
+            _camera_hub().subscribe_hands(self._on_hands)
             # The thread of the service waits here and does nothing else:
-            # the frames arrive in the callback, on the thread of the
+            # the hands arrive in the callback, on the thread of the
             # camera.
             while not self._stop.is_set():
                 time.sleep(0.05)
@@ -1498,93 +987,50 @@ class GestureService(QObject):
             self.state_sig.emit(f"the hand tracking stopped: {type(exc).__name__}")
         finally:
             try:
-                from core.camera import unsubscribe as _unsubscribe
-                _unsubscribe(self._on_frame)
+                from core.camera import unsubscribe_hands as _unsubscribe
+                _unsubscribe(self._on_hands)
             except Exception:
                 pass
             self._enabled = False
 
-    # -- the thread that looks for the hands ---------------------------------
+    # -- the thread that reads the hands --------------------------------------
 
     def _track_loop(self) -> None:
-        """Look for the hands in the newest picture, and only in that one.
+        """Take the newest hands, and do what they say.
 
-        This thread owns the tracker: it creates it, it uses it, and it
-        closes it. The pictures arrive through the slot that `_on_frame`
-        fills, and a picture that is already waiting when this thread
-        comes back for it is thrown away — it is old, and an old picture
-        of a hand is a hand that has moved.
+        This thread owns the work: it turns the numbers into poses, feeds
+        the recogniser and steers the pointer. The hands arrive through
+        the slot that `_on_hands` fills, and a hand that is already
+        waiting when this thread comes back for it is thrown away — it is
+        old, and an old hand is a hand that has moved.
         """
-        tracker = None
         try:
             while not self._stop.is_set():
                 with self._latest_lock:
-                    jpeg = self._latest_jpeg
+                    payload = self._latest_hands
                     seq = self._latest_seq
-                    self._latest_jpeg = None
-                if not jpeg:
+                    self._latest_hands = None
+                if not payload:
                     time.sleep(0.004)
                     continue
-                if tracker is None:
-                    try:
-                        tracker = HandTracker()
-                    except Exception:                   # noqa: BLE001
-                        return
-                    with self._lock:
-                        self._tracker = tracker
-                    if not tracker.available():
-                        self.state_sig.emit(f"no hand tracker: {tracker.error}")
-                        with self._lock:
-                            self._tracker = None
-                        try:
-                            tracker.close()
-                        except Exception:
-                            pass
-                        return
+                hands = hands_from_payload(payload.get("hands") or [])
+                backend = str(payload.get("backend") or "none")
+                if backend != self._backend:
+                    self._backend = backend
                     self.state_sig.emit(
-                        f"the hands are tracked with {tracker.backend}")
-                from core.camera import decode_jpeg
-
-                frame = decode_jpeg(jpeg)
-                if frame is None:
-                    continue
-                try:
-                    hands = tracker.track(frame)
-                except Exception:
-                    continue
+                        f"the hands are tracked with {backend}")
                 with self._lock:
                     self._tracked_seq = seq
-                with self._lock:
                     self._hands = hands
                 self.hands_sig.emit(hands)
                 # THE HAND IS READ, AND WHAT IT SAYS IS DONE — WHETHER IT
                 # IS DRIVING THE POINTER OR NOT.
                 self._procesa(hands)
         finally:
-            # THE TRACKER IS ALWAYS CLOSED, AND NEVER UNDER A PICTURE.
+            # There is no tracker to close here: it is in the other
+            # process, and that process is the one that closes it, in an
+            # orderly way, when it leaves.
             #
-            # It used to be closed only at the end of a successful watch,
-            # so a machine with no camera — or with no hand model, or with
-            # no OpenCV — kept the native library loaded and let the
-            # garbage collector free it whenever it pleased. That free
-            # landed on memory the library was still using, and the
-            # process died with an access violation instead of a goodbye.
-            #
-            # The close happens HERE, in the thread that owns the
-            # tracker, and never while a picture is being tracked.
-            #
-            # The camera is NOT closed here: it is the one of the whole
-            # process (core/camera.py), and this service is only one of
-            # its readers. Closing it here would take the camera away
-            # from the hands of the viewer and of the live stream.
-            with self._frame_lock:
-                with self._lock:
-                    self._tracker = None
-                if tracker is not None:
-                    try:
-                        tracker.close()
-                    except Exception:
-                        pass
             # A button left down is a button the user cannot get rid of:
             # if the hand disappeared while it was pinched, the button has
             # to come up here.
@@ -1600,19 +1046,19 @@ class GestureService(QObject):
                 self._hands = []
             self.hands_sig.emit([])
 
-    def _on_frame(self, ok: bool, jpeg: bytes) -> None:
-        """One picture of the camera, left for the tracker.
+    def _on_hands(self, payload) -> None:
+        """The hands the worker found, left for this service.
 
-        It runs on the thread of the camera, and it does ONE thing: it
-        leaves the picture in the slot. Decoding it and asking the
-        tracker about it happens in the thread of the tracker, so the
-        camera is never held waiting for the tracker, and the other
+        It runs on the thread that reads the camera, and it does ONE
+        thing: it leaves the numbers in the slot. Turning them into poses
+        and driving the pointer happens in the thread of the service, so
+        the camera is never held waiting for the mouse, and the other
         readers of the camera get their pictures on time.
         """
-        if not ok or not jpeg:
+        if not payload:
             return
         with self._latest_lock:
-            self._latest_jpeg = jpeg
+            self._latest_hands = payload
             self._latest_seq += 1
 
     def _map_x(self, value: float) -> int:

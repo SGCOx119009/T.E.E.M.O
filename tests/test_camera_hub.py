@@ -46,7 +46,12 @@ from core.camera import CameraHub  # noqa: E402
 
 
 def _fake_frames(count: int = 400) -> bytes:
-    """A few pictures, in the way the worker sends them."""
+    """A few pictures, in the way the worker sends them.
+
+    TWO MESSAGES FOR EVERY PICTURE: the picture itself, and the hands
+    that were found in it. The type comes first, so the reader knows what
+    it is reading.
+    """
     import cv2
     import numpy as np
 
@@ -58,8 +63,11 @@ def _fake_frames(count: int = 400) -> bytes:
         if not good:
             continue
         data = buf.tobytes()
-        out.write(len(data).to_bytes(4, "little"))
+        out.write(b"\x01" + len(data).to_bytes(4, "little"))
         out.write(data)
+        hands = b'{"backend": "mediapipe", "hands": []}'
+        out.write(b"\x02" + len(hands).to_bytes(4, "little"))
+        out.write(hands)
     return out.getvalue()
 
 
