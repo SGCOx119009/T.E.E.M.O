@@ -23,17 +23,21 @@ _HANDLER_OWN_GATE: dict[str, set[str]] = {
     # The list is SHORT on purpose, and every entry in it is checked by
     # `tests/test_policy_coverage.py`: a delegation to a handler that does
     # NOT ask is a hole in the gate, and a hole is how "delete the file"
-    # ended up running with nobody seeing it. Only three handlers in this
+    # ended up running with nobody seeing it. Only four handlers in this
     # product have a gate of their own:
     #   * `computer_settings` — for the three it cannot take back (restart,
     #     shutdown, toggle_wifi), with a warning that says why;
     #   * `meet_control` — because the preview of a call is the recipient
     #     and the message, and only the handler knows them;
     #   * `game_updater` — because the preview is the game, the platform and
-    #     whether the machine will be shut down afterwards.
+    #     whether the machine will be shut down afterwards;
+    #   * `dev_agent` — because the preview is the PLAN: which files will be
+    #     written, what each one is for, and that nothing will be run or
+    #     installed.
     "computer_settings": {"restart", "shutdown", "toggle_wifi"},
     "meet_control": {"create", "new"},
     "game_updater": {"install", "update", "schedule"},
+    "dev_agent": {"build", "improve"},
 }
 _SENSITIVE_NAME_RE = re.compile(
     r"(?:password|passwd|secret|token|api[_-]?key|authorization|credential|private[_-]?key|otp)",
@@ -351,9 +355,10 @@ def dispatch(
         "game_updater": "update",
         "reminder": "schedule",
         "task_planner": "preview",
+        "dev_agent": "build",
     }
     action_value = arguments.get(
-        "mode" if tool == "task_planner" else "action",
+        "mode" if tool in ("task_planner", "dev_agent") else "action",
         default_actions.get(tool, "execute"),
     )
     action = action_value.strip().lower() if isinstance(action_value, str) else "execute"

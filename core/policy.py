@@ -797,7 +797,8 @@ _ACTION_CLASS: dict[str, dict[str, str]] = {
                      "cancel_schedule": RISK_REVERSIBLE_SYS,
                      "list": RISK_READ, "download_status": RISK_READ,
                      "schedule_status": RISK_READ},
-    "dev_agent": {"build_project": RISK_EXTERNAL},
+    "dev_agent": {"build": RISK_EXTERNAL, "improve": RISK_EXTERNAL,
+                  "status": RISK_READ},
     "code_helper": {
         "write": RISK_WRITE_LOCAL, "edit": RISK_WRITE_LOCAL,
         "optimize": RISK_WRITE_LOCAL, "auto": RISK_WRITE_LOCAL,

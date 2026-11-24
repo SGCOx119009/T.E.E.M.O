@@ -1,4 +1,3 @@
-import subprocess
 import sys
 import hashlib
 import json
@@ -7,6 +6,8 @@ import shutil
 import threading
 import time
 from pathlib import Path
+
+from core import action_policy, confirm, outcome
 
 
 def get_base_dir():
@@ -18,7 +19,6 @@ def get_base_dir():
 BASE_DIR         = get_base_dir()
 API_CONFIG_PATH  = BASE_DIR / "config" / "api_keys.json"
 PROJECTS_DIR     = Path.home() / "Desktop" / "TEEMO Projects"
-MAX_FIX_ATTEMPTS = 5
 # Model choice, timeout and fallback ladder all live in core/gemini.py.
 from core import gemini
 
@@ -77,56 +77,6 @@ def _is_rate_limit(error: Exception) -> bool:
     msg = str(error).lower()
     return "429" in msg or "quota" in msg or "resource_exhausted" in msg
 
-
-def _parse_traceback(output: str, project_files: list[str]) -> tuple[str | None, int | None]:
-
-    pattern = re.compile(r'File ["\']([^"\']+\.py)["\'],\s+line\s+(\d+)', re.IGNORECASE)
-    matches = pattern.findall(output)
-
-    for raw_path, line_str in reversed(matches):
-        raw_name = Path(raw_path).name
-        for pf in project_files:
-            if Path(pf).name == raw_name or pf == raw_path or raw_path.endswith(pf):
-                return pf, int(line_str)
-
-    return None, None
-
-
-def _classify_error(output: str) -> str:
-
-    low = output.lower()
-
-    if any(x in low for x in ("no module named", "modulenotfounderror", "importerror")):
-        return "dependency_error"
-
-    if "syntaxerror" in low or "invalid syntax" in low:
-        return "syntax_error"
-    
-    if "cannot import" in low or "importerror" in low:
-        return "import_error"
-
-    if any(x in low for x in (
-        "traceback", "exception", "error:", "nameerror", "typeerror",
-        "attributeerror", "valueerror", "keyerror", "indexerror",
-        "zerodivisionerror", "filenotfounderror", "permissionerror",
-    )):
-        return "runtime_error"
-
-    return "none"
-
-
-def _has_error(output: str, run_command: str) -> bool:
-    
-    low = output.lower()
-
-    if "timed out" in low:
-        return False
-
-    if not output.strip():
-        return False
-
-    error_type = _classify_error(output)
-    return error_type != "none"
 
 class RateLimitError(Exception):
     pass
@@ -265,270 +215,123 @@ Code for {file_path}:"""
             raise RateLimitError(str(e))
         raise
 
-def _install_dependencies(dependencies: list[str], project_dir: Path) -> str:
-    if not dependencies:
-        return "No external dependencies."
+# ─────────────────────────────────────────────────────────────────────────────
+#  The plan, on the screen, before anything is written
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# WHY THE PLAN IS SHOWN FIRST
+#   A coding agent that writes first and explains afterwards asks the user to
+#   trust it. The plan is cheap to make and expensive to get wrong: it says
+#   which files will be created, what each one is for, and — the part that
+#   matters most — what the agent will NOT do with them.
+#
+# WHAT THE AGENT NEVER DOES, IN ANY MODE
+#   It does not run what it writes. It does not install its dependencies. It
+#   does not open an editor. What comes out of it is SOURCE, and what happens
+#   next is the user's decision. A model that can run what it just wrote can
+#   run anything; a model that can only write files cannot.
+#
+# WHAT IS CHECKED BEFORE THE BANNER
+#   Every path in the plan comes from a model, so every path is checked
+#   before it can become a file: it must stay inside the project, and it must
+#   not be the same file twice — on Windows `main.py` and `MAIN.py` ARE the
+#   same file, and the second one would quietly overwrite the first.
 
-    to_install = []
-    for dep in dependencies:
-        pkg_name = re.split(r"[>=<!]", dep)[0].strip()
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "show", pkg_name],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            to_install.append(dep)
-        else:
-            print(f"[DevAgent] ✓ Already installed: {pkg_name}")
 
-    if not to_install:
-        return f"All dependencies already installed: {', '.join(dependencies)}"
+def _plan_path_ok(rel: str) -> bool:
+    """Whether a path from the plan stays inside the project."""
+    rel = str(rel or "").strip().replace("\\", "/").lstrip("/")
+    if not rel or rel.startswith("~") or ":" in rel:
+        return False
+    return ".." not in Path(rel).parts
 
-    print(f"[DevAgent] 📦 Installing: {to_install}")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install"] + to_install,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=120, cwd=str(project_dir)
-        )
-        if result.returncode == 0:
-            return f"Installed: {', '.join(to_install)}"
-        return f"Install warning (non-fatal): {result.stderr[:200]}"
-    except subprocess.TimeoutExpired:
-        return "Dependency install timed out (non-fatal)."
-    except Exception as e:
-        return f"Install error (non-fatal): {e}"
 
-def _open_vscode(project_dir: Path) -> bool:
-    vscode_candidates = [
-        "code",
-        rf"C:\Users\{Path.home().name}\AppData\Local\Programs\Microsoft VS Code\bin\code.cmd",
-        r"C:\Program Files\Microsoft VS Code\bin\code.cmd",
-    ]
-    for cmd in vscode_candidates:
-        try:
-            subprocess.Popen(
-                [cmd, str(project_dir)],
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            time.sleep(1.5)
-            print(f"[DevAgent] 💻 VSCode opened: {project_dir}")
-            return True
-        except Exception:
+def _validate_plan(plan: dict) -> tuple[list[dict], list[str]]:
+    """(the files to write, why the plan cannot be trusted).
+
+    A plan with a problem in it is refused WHOLE, not repaired: half a plan
+    is how a project ends up with half its modules."""
+    files: list[dict] = []
+    problems: list[str] = []
+    seen: dict[str, str] = {}
+    for item in plan.get("files") or []:
+        if not isinstance(item, dict):
             continue
-    return False
+        raw = str(item.get("path") or "")
+        rel = raw.strip().replace("\\", "/").lstrip("/")
+        if not _plan_path_ok(rel):
+            problems.append(f"the path {raw!r} points outside the project")
+            continue
+        key = rel.casefold()
+        if key in seen:
+            problems.append(
+                f"the path {rel!r} is the same file as {seen[key]!r} on Windows")
+            continue
+        seen[key] = rel
+        files.append({**item, "path": rel})
+    if not files:
+        problems.append("the plan lists no file to write")
+    return files, problems
 
-def _run_project(run_command: str, project_dir: Path, timeout: int = 30) -> str:
-    print(f"[DevAgent] 🚀 Running: {run_command}")
-    try:
-        parts = run_command.split()
-        if parts[0].lower() == "python":
-            parts[0] = sys.executable
 
-        result = subprocess.run(
-            parts,
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=timeout,
-            cwd=str(project_dir)
-        )
+def _build_preview(proj_name: str, files: list[dict], entry_point: str,
+                   dependencies: list[str]) -> tuple[str, str]:
+    """(title, detail) for the banner: what will be written, and what will not."""
+    lines = [f"A new project called '{proj_name}', with {len(files)} file(s):",
+             ""]
+    for item in files:
+        what = str(item.get("description") or "").strip()
+        lines.append(f"  {item['path']}" + (f" \u2014 {what}" if what else ""))
+    lines += ["", f"Entry point: {entry_point}"]
+    if dependencies:
+        lines.append("It will need: " + ", ".join(dependencies))
+    lines += [
+        "",
+        "The project will NOT be run, and the dependencies will NOT be "
+        "installed. You get the source files only; what you do with them "
+        "afterwards is your decision.",
+    ]
+    return f"Write a new project: {proj_name}", "\n".join(lines)
 
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
 
-        combined_parts = []
-        if stdout:
-            combined_parts.append(f"STDOUT:\n{stdout}")
-        if stderr:
-            combined_parts.append(f"STDERR:\n{stderr}")
+def _improve_preview(folder: Path, changes: list[dict],
+                     summary: str) -> tuple[str, str]:
+    """(title, detail) for the banner of a change to an existing folder."""
+    lines = [f"The coding agent will change {len(changes)} file(s) in "
+             f"'{folder.name}':", ""]
+    for change in changes:
+        what = str(change.get("what", "")).strip()
+        lines.append(f"  [{change.get('action', 'edit')}] {change['path']}"
+                     + (f" \u2014 {what}" if what else ""))
+    lines += [""]
+    if summary:
+        lines += [summary, ""]
+    lines += [
+        "The originals are copied into .teemo_backup/ before anything is "
+        "changed, and 'undo' puts them back.",
+        "The project will NOT be run and its dependencies will NOT be "
+        "installed.",
+    ]
+    return f"Change the files in '{folder.name}'?", "\n".join(lines)
 
-        return "\n\n".join(combined_parts) if combined_parts else "Ran with no output."
 
-    except subprocess.TimeoutExpired:
-        return f"Timed out after {timeout}s — long-running app (server/GUI) is likely working."
-    except FileNotFoundError as e:
-        return f"Command not found: {e}"
-    except Exception as e:
-        return f"Run error: {e}"
+def _build_project(plan: dict, files: list[dict], description: str,
+                   language: str, project_dir: Path, proj_name: str,
+                   entry_point: str, dependencies: list[str],
+                   player=None, speak=None) -> str:
+    """Write the source files of a new project. Nothing else.
 
-def _try_auto_install(error_output: str, project_dir: Path) -> bool:
-    """If there is a ModuleNotFoundError, tries to auto-install the missing package."""
-    pattern = re.compile(
-        r"No module named ['\"]([a-zA-Z0-9_\-\.]+)['\"]", re.IGNORECASE
-    )
-    match = pattern.search(error_output)
-    if not match:
-        return False
-
-    pkg = match.group(1).replace("_", "-").split(".")[0]
-    print(f"[DevAgent] 🔧 Auto-installing missing package: {pkg}")
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", pkg],
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-            timeout=60, cwd=str(project_dir)
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-def _fix_files(
-    error_output: str,
-    project_description: str,
-    all_files: list[dict],
-    file_codes: dict[str, str],
-    language: str,
-    project_dir: Path,
-    entry_point: str,
-) -> dict[str, str]:
-
-    model = _get_model(MODEL_PLANNER)
-
-    error_file, error_line = _parse_traceback(error_output, list(file_codes.keys()))
-    error_type = _classify_error(error_output)
-
-    files_to_fix: list[str] = []
-
-    if error_file:
-        files_to_fix.append(error_file)
-        if error_type == "import_error":
-            for fi in all_files:
-                if error_file.replace("/", ".").replace(".py", "") in fi.get("imports", []):
-                    p = fi["path"]
-                    if p not in files_to_fix:
-                        files_to_fix.append(p)
-    else:
-        files_to_fix.append(entry_point)
-
-    updated_codes: dict[str, str] = {}
-
-    for fix_path in files_to_fix:
-        current_code = file_codes.get(fix_path, "")
-
-        other_ctx = ""
-        for fp, code in file_codes.items():
-            if fp != fix_path and code:
-                snippet = code[:1500] + ("..." if len(code) > 1500 else "")
-                other_ctx += f"\n--- {fp} ---\n{snippet}\n"
-
-        line_hint = f"\nError appears to be near line {error_line} in this file." if (
-            error_line and fix_path == error_file
-        ) else ""
-
-        prompt = f"""You are an expert {language} debugger. Fix the broken file below.
-
-Project goal: {project_description}
-
-All project files:
-{chr(10).join(f"  - {f['path']}: {f.get('description', '')}" for f in all_files)}
-
-Other files for context (read-only — fix only the target file):
-{other_ctx[:3500]}
-
-File to fix: {fix_path}{line_hint}
-Error type: {error_type}
-
-Error output:
-{error_output[:2500]}
-
-Current (broken) code:
-{current_code}
-
-Rules:
-- Output ONLY the complete fixed code. No explanation, no markdown, no backticks.
-- Fix ALL errors visible in the error output.
-- Keep all existing correct logic — do not remove working features.
-- Ensure import paths match the actual project file structure exactly.
-- Do NOT introduce new bugs or remove error handling.
-
-Fixed code for {fix_path}:"""
-
-        try:
-            response = model.generate_content(prompt)
-            fixed = _strip_fences(response.text)
-
-            full_path = project_dir / fix_path
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            full_path.write_text(fixed, encoding="utf-8")
-
-            updated_codes[fix_path] = fixed
-            print(f"[DevAgent] 🔧 Fixed: {fix_path}")
-
-        except Exception as e:
-            if _is_rate_limit(e):
-                raise RateLimitError(str(e))
-            print(f"[DevAgent] ⚠️ Could not fix {fix_path}: {e}")
-
-    return updated_codes
-
-def _build_project(
-    description: str,
-    language: str,
-    project_name: str,
-    timeout: int,
-    speak=None,
-    player=None,
-) -> str:
-
-    def log(msg: str):
-        _log(player, msg)
-
-    provider = _coding_provider()
-    log(f"Coding with {provider.partition('@')[2] or provider}, Gemini as backup."
-        if provider else "Coding with the background-request models.")
-    _update("planning")
-    log("Planning project structure...")
-    try:
-        plan = _plan_project(description, language)
-    except RateLimitError:
-        msg = "Rate limit reached, sir. Please try again in a moment."
-        if speak: speak(msg)
-        return msg
-    except ValueError as e:
-        msg = f"Planning failed: {e}"
-        if speak: speak(msg)
-        return msg
-
-    proj_name    = project_name or plan.get("project_name", "teemo_project")
-    proj_name    = re.sub(r"[^\w\-]", "_", proj_name)
-    project_dir  = PROJECTS_DIR / proj_name
-    project_dir.mkdir(parents=True, exist_ok=True)
-
-    files        = plan.get("files", [])
-    entry_point  = plan.get("entry_point", "main.py")
-    run_command  = plan.get("run_command", f"python {entry_point}")
-    dependencies = plan.get("dependencies", [])
-
-    log(f"Project: {proj_name} | Files: {len(files)} | Entry: {entry_point}")
-    with _state_lock:
-        if _JOB:
-            _JOB["folder"] = proj_name
-            _JOB["path"] = str(project_dir)
-            _JOB["summary"] = (f"New {language} project '{proj_name}': "
-                               f"{len(files)} files, run with `{run_command}`.")
-            _JOB["files"] = {f.get("path", ""): {"action": "create", "state": "waiting",
-                                                 "what": str(f.get("description", ""))}
-                             for f in files if f.get("path")}
+    No run, no install, no editor: this writes files, says which ones, and
+    leaves the next step to the human."""
     _update("writing")
-
-    def _dep_sort_key(fi: dict) -> int:
-        return len(fi.get("imports", []))
-
-    sorted_files = sorted(files, key=_dep_sort_key)
-
+    project_dir.mkdir(parents=True, exist_ok=True)
     file_codes: dict[str, str] = {}
 
-    for file_info in sorted_files:
+    for file_info in sorted(files, key=lambda fi: len(fi.get("imports", []))):
         file_path = file_info.get("path", "")
         if not file_path:
             continue
-
         _update(file=file_path, file_state="writing")
-        log(f"Writing {file_path}...")
         for attempt in range(2):
             try:
                 code = _write_file(
@@ -545,88 +348,40 @@ def _build_project(
                 break
             except RateLimitError:
                 if attempt == 0:
-                    log("Rate limit — waiting 20s...")
+                    _log(player, "Rate limit \u2014 waiting 20s before trying again...")
                     time.sleep(20)
-                else:
-                    _update(file=file_path, file_state="failed")
-                    log(f"Rate limit retry failed for {file_path}, skipping.")
+                    continue
+                _update(file=file_path, file_state="failed")
+                _log(player, f"Rate limit retry failed for {file_path}, skipping.")
+                break
             except Exception as e:
                 _update(file=file_path, file_state="failed")
-                log(f"Failed to write {file_path}: {e}")
+                _log(player, f"Failed to write {file_path}: {e}")
                 break
 
-    if not file_codes:
-        msg = "I could not write any project files, sir."
-        if speak: speak(msg)
-        return msg
+    written = sorted(file_codes)
+    if not written:
+        msg = (f"I could not write any file of '{proj_name}', sir. Nothing was "
+               "created.")
+        _update("failed", result=msg, finished=time.time())
+        if speak:
+            speak(f"[DEV_AGENT_DONE] {msg} | Tell the user briefly that nothing "
+                  "was written and why. Do not claim it worked.")
+        return outcome.failed("dev_agent",
+                              "no file of the project could be written")
 
+    msg = (f"The project '{proj_name}' is written, sir: {len(written)} file(s) "
+           f"({', '.join(written)}) in {project_dir}. I did not run it and I "
+           "did not install anything.")
     if dependencies:
-        _update("installing")
-        log(f"Installing {', '.join(dependencies)}...")
-        install_result = _install_dependencies(dependencies, project_dir)
-        log(install_result)
-
-    _open_vscode(project_dir)
-
-    last_output   = ""
-    auto_installs = 0  
-
-    _update("testing")
-    for attempt in range(1, MAX_FIX_ATTEMPTS + 1):
-        log(f"Running project (attempt {attempt}/{MAX_FIX_ATTEMPTS})...")
-        last_output = _run_project(run_command, project_dir, timeout)
-        log(f"Output preview: {last_output[:150]}")
-
-        if not _has_error(last_output, run_command):
-            msg = (
-                f"Project '{proj_name}' is working, sir. "
-                f"Built in {attempt} attempt{'s' if attempt > 1 else ''}. "
-                f"Saved to: {project_dir}"
-            )
-            if speak: speak(msg)
-            return f"{msg}\n\nOutput:\n{last_output}"
-
-        if attempt == MAX_FIX_ATTEMPTS:
-            break
-
-        error_type = _classify_error(last_output)
-        if error_type == "dependency_error" and auto_installs < 3:
-            installed = _try_auto_install(last_output, project_dir)
-            if installed:
-                auto_installs += 1
-                log("Missing dependency installed, retrying...")
-                time.sleep(1)
-                continue
-
-        log(f"Fixing errors (type: {error_type})...")
-        try:
-            updated = _fix_files(
-                error_output=last_output,
-                project_description=description,
-                all_files=files,
-                file_codes=file_codes,
-                language=language,
-                project_dir=project_dir,
-                entry_point=entry_point,
-            )
-            file_codes.update(updated)
-            for fixed in updated:
-                _update(file=fixed, file_state="done")
-                log(f"Fixed {fixed}")
-            time.sleep(1)
-        except RateLimitError:
-            msg = "Rate limit reached during fix. Project saved, check it manually in VSCode."
-            if speak: speak(msg)
-            return msg
-        except Exception as e:
-            log(f"Fix step failed: {e}")
-
-    msg = (
-        f"I couldn't fully fix '{proj_name}' after {MAX_FIX_ATTEMPTS} attempts, sir. "
-        f"Project is saved at {project_dir} — open it in VSCode and check manually."
-    )
-    if speak: speak(msg)
-    return f"{msg}\n\nLast error:\n{last_output[:600]}"
+        msg += (" It will need: " + ", ".join(dependencies) + " \u2014 not installed.")
+    _update("done", result=msg, finished=time.time())
+    if speak:
+        speak(f"[DEV_AGENT_DONE] {msg[:900]} | Tell the user briefly, in one or "
+              "two sentences, what was written and that nothing was run. "
+              "Do not read file paths aloud.")
+    return outcome.done("dev_agent", project=proj_name, files=len(written),
+                        verified=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1268,13 +1023,36 @@ def _test_and_fix(folder: Path, written: dict[str, str], changes: list,
     return problems
 
 
+def _await_decision(approved: threading.Event, timeout: float) -> bool:
+    """Wait for the human's answer to the banner on the screen.
+
+    `approved` is set by the confirmation's own callback, which runs only if
+    the human pressed CONFIRM. A refusal leaves it unset and takes the
+    pending confirmation away — that is how a refusal is noticed."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if approved.wait(0.1):
+            return True
+        with confirm._lock:
+            pending = confirm._pending
+        if pending is None:
+            # The banner is gone. The approval may still be on its way — the
+            # callback runs on its own thread — so give it a moment.
+            return approved.wait(0.25)
+    return False
+
+
 def _improve_folder(folder: Path, instruction: str, player=None) -> str:
-    """Plan, back up, write, check, fix, register undo. Runs to completion and
-    returns the summary; the caller decides whether that is on a thread."""
+    """Read the folder, plan the change, and ask before writing a word.
+
+    The plan goes on the screen first: which files change, what changes in
+    each, and that the originals are kept. Nothing is written until the human
+    says yes — and the job waits for that answer here, on its own thread, so
+    the assistant is not mute while they decide."""
     started = time.monotonic()
     provider = _coding_provider()
     who = provider.partition("@")[2] or provider or "the background-request models"
-    _log(player, f"Improving '{folder.name}' with {who}…")
+    _log(player, f"Improving '{folder.name}' with {who}\u2026")
 
     _update("reading")
     tree, texts, outlines = _scan(folder)
@@ -1286,6 +1064,7 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
     # Understand the project before touching it: what it is, its own rules,
     # and — when it has no rules file — a brief written once and cached.
     stack, baseline = None, None
+    guide = ""
     try:
         from core.code_checks import (describe_stack, detect_stack, project_guide,
                                       rules_file, run_tests)
@@ -1302,7 +1081,7 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
         if stack.get("test_cmd"):
             # How the tests stand BEFORE the change, so afterwards only
             # failures the change caused are blamed on it.
-            _log(player, f"Running the project's tests first ({stack['test_name']})…")
+            _log(player, f"Running the project's tests first ({stack['test_name']})\u2026")
             baseline = run_tests(folder, stack)
             if baseline and not baseline["ok"]:
                 _log(player, f"{len(baseline['failed']) or 'Some'} test(s) already "
@@ -1317,7 +1096,7 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
                    f"{guide}\n\n{context}")
 
     _update("planning")
-    _log(player, "Planning the changes…")
+    _log(player, "Planning the changes\u2026")
     try:
         plan = _plan_changes(folder, instruction, context)
     except Exception as e:
@@ -1355,6 +1134,40 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
                                          "what": str(c.get("what", "")),
                                          "state": "waiting"} for c in changes}
             _JOB["summary"] = summary
+
+    title, detail = _improve_preview(folder, changes, summary)
+    approved = threading.Event()
+
+    def approve() -> str:
+        # The banner's own callback only records the answer. The write
+        # happens on this job's thread, so the job keeps its place in the
+        # queue and the lock it holds.
+        approved.set()
+        return "status=started action=dev_agent -- the change was approved"
+
+    gate = action_policy.ask_once("dev_agent", "improve", title, detail,
+                                   run=approve)
+    if gate.startswith("[CONFIRMATION_PENDING]"):
+        _update("waiting for confirmation")
+        _log(player, "Waiting for you to approve the plan on the screen.")
+        if not _await_decision(approved, confirm.TIMEOUT_SECONDS + 5):
+            msg = ("You did not approve the change, sir. Nothing in the folder "
+                   "was touched.")
+            _log(player, msg)
+            return msg
+    elif not approved.is_set():
+        return ("I could not show you the plan, sir, so nothing in the folder "
+                "was touched.")
+
+    return _apply_changes(folder, instruction, player, changes, summary,
+                          context, texts, guide, stack, baseline, started, plan)
+
+
+def _apply_changes(folder: Path, instruction: str, player, changes: list[dict],
+                   summary: str, context: str, texts: dict[str, str],
+                   guide: str, stack: dict | None, baseline: dict | None,
+                   started: float, plan: dict) -> str:
+    """Write the planned change, check it, and make it undoable."""
     _update("writing")
     _log(player, f"Plan: {summary}")
     for c in changes:
@@ -1371,7 +1184,7 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
         target = folder / rel
         current = texts.get(rel, "")
         _update(file=rel, file_state="writing")
-        _log(player, f"Writing {rel}…")
+        _log(player, f"Writing {rel}\u2026")
         try:
             new = _write_change(c, plan, instruction, context, current,
                                 written=written)
@@ -1382,7 +1195,7 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
         why = _rejected(rel, current, new)
         if why:
             _update(file=rel, file_state="skipped")
-            _log(player, f"Kept {rel} as it was — {why}.")
+            _log(player, f"Kept {rel} as it was \u2014 {why}.")
             continue
         if c["action"] == "edit":
             dest = backup / rel
@@ -1402,7 +1215,7 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
 
     # Check that the files fit each other, then that each one parses.
     _update("checking")
-    _log(player, "Checking that the changed files fit together…")
+    _log(player, "Checking that the changed files fit together\u2026")
     try:
         mismatched = _review_interfaces(instruction, written, texts, rules=guide)
     except Exception as e:
@@ -1420,7 +1233,7 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
             continue
         why = _rejected(rel, written[rel], new)
         if why:
-            _log(player, f"Kept the previous {rel} — {why}.")
+            _log(player, f"Kept the previous {rel} \u2014 {why}.")
         else:
             (folder / rel).write_text(new, encoding="utf-8", newline="")
             written[rel] = new
@@ -1445,7 +1258,7 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
                 continue
             why = _rejected(rel, written[rel], new)
             if why:
-                _log(player, f"Kept the previous {rel} — {why}.")
+                _log(player, f"Kept the previous {rel} \u2014 {why}.")
             else:
                 (folder / rel).write_text(new, encoding="utf-8", newline="")
                 written[rel] = new
@@ -1483,7 +1296,6 @@ def _improve_folder(folder: Path, instruction: str, player=None) -> str:
     # and pay for it again on the next request.
     _refresh_brief(folder)
 
-    _open_vscode(folder)
     took = time.monotonic() - started
     parts = []
     if edited:
@@ -1535,6 +1347,29 @@ def _start_improve(folder_raw: str, instruction: str, speak=None, player=None) -
                     folder.name, who, speak, player)
 
 
+def _finish_job(result: str, name: str, player=None, speak=None) -> None:
+    """Close a job: its status, its result, and what the assistant says.
+
+    A job that is already closed is left alone: the write phase of a
+    confirmed change closes the job itself, and the thread that waited for
+    the confirmation must not close it a second time."""
+    with _state_lock:
+        if _JOB and _JOB.get("finished") is not None:
+            return
+        wrote = (any(f.get("state") == "done"
+                     for f in _JOB["files"].values()) if _JOB else False)
+    status = "done"
+    if not wrote:
+        status = "nothing changed"
+    elif ("couldn't fully fix" in result or "could not" in result.lower()
+          or "still fail their test" in result):
+        status = "finished with problems"
+    _update(status, result=result, finished=time.time())
+    if speak:
+        speak(f"[DEV_AGENT_DONE] {result[:900]} | Tell the user briefly, in one "
+              "or two sentences, what was done. Do not read file paths aloud.")
+
+
 def _run_job(job, name: str, who: str, speak=None, player=None) -> str:
     """Run a coding job on its own thread and answer the tool call at once.
 
@@ -1545,26 +1380,22 @@ def _run_job(job, name: str, who: str, speak=None, player=None) -> str:
     the work, and the result comes back into the conversation when it is done.
     The caller must already hold `_job_lock`; it is released here."""
     def work():
-        status = "done"
         try:
             result = job()
-            with _state_lock:
-                wrote = any(f.get("state") == "done" for f in _JOB["files"].values())
-            if not wrote:
-                status = "nothing changed"
-            elif ("couldn't fully fix" in result or "could not" in result.lower()
-                  or "still fail their test" in result):
-                status = "finished with problems"
+            if (isinstance(result, str)
+                    and result.startswith("[CONFIRMATION_PENDING]")):
+                # The work waits for the human: the banner is on the screen
+                # and the job goes on when they answer it.
+                _update("waiting for confirmation")
+                return
+            _finish_job(result, name, player, speak)
         except Exception as e:
-            status = "failed"
-            result = f"The coding job on '{name}' failed: {type(e).__name__}: {str(e)[:200]}"
+            result = (f"The coding job on '{name}' failed: "
+                      f"{type(e).__name__}: {str(e)[:200]}")
             _log(player, result)
+            _finish_job(result, name, player, speak)
         finally:
             _job_lock.release()
-        _update(status, result=result, finished=time.time())
-        if speak:
-            speak(f"[DEV_AGENT_DONE] {result[:900]} | Tell the user briefly, in one "
-                  f"or two sentences, what was done. Do not read file paths aloud.")
 
     threading.Thread(target=work, daemon=True, name="dev_agent-job").start()
     # Kept short on purpose: this is what the assistant turns into speech, and
@@ -1576,18 +1407,76 @@ def _run_job(job, name: str, who: str, speak=None, player=None) -> str:
 
 
 def _start_build(description: str, language: str, project_name: str,
-                 timeout: int, speak=None, player=None) -> str:
-    """A new project, built in the background like a folder job."""
+                 speak=None, player=None) -> str:
+    """Plan it, show the plan, and write it only if the human says yes.
+
+    The plan comes first and the banner comes with it: the user approves
+    WHAT will be written, not a promise that something will be."""
     global _job_name
-    if not _job_lock.acquire(blocking=False):
-        return f"I am still working on '{_job_name}', sir. One job at a time."
-    name = re.sub(r"[^\w\-]", "_", project_name) if project_name else "new project"
-    _job_name = name
+    _update("planning")
+    try:
+        plan = _plan_project(description, language)
+    except RateLimitError:
+        return outcome.failed("dev_agent",
+                              "the model is out of quota, so the project could "
+                              "not be planned")
+    except Exception as e:
+        return outcome.failed(
+            "dev_agent",
+            f"the project could not be planned ({type(e).__name__})")
+
+    files, problems = _validate_plan(plan)
+    if problems:
+        return outcome.failed(
+            "dev_agent",
+            "the plan was refused: " + "; ".join(problems[:4]))
+
+    proj_name = re.sub(r"[^\w\-]", "_",
+                        str(plan.get("project_name") or project_name
+                            or "teemo_project"))
+    entry_point = str(plan.get("entry_point") or "main.py")
+    dependencies = [str(d) for d in (plan.get("dependencies") or [])]
+    project_dir = PROJECTS_DIR / proj_name
+    if project_dir.exists():
+        return outcome.failed(
+            "dev_agent",
+            f"a project called '{proj_name}' already exists; I will not write "
+            "over it")
+
     who = _coding_provider().partition("@")[2] or "the coding model"
-    _new_job(PROJECTS_DIR / name, who, description, player, kind="build")
-    return _run_job(lambda: _build_project(description, language, project_name,
-                                           timeout, speak=None, player=player),
-                    name, who, speak, player)
+    _new_job(project_dir, who, description, player, kind="build")
+    with _state_lock:
+        if _JOB:
+            _JOB["files"] = {
+                f["path"]: {"action": "create", "state": "waiting",
+                            "what": str(f.get("description", ""))}
+                for f in files
+            }
+            _JOB["summary"] = (f"New {language} project '{proj_name}': "
+                               f"{len(files)} files, entry point {entry_point}.")
+
+    title, detail = _build_preview(proj_name, files, entry_point, dependencies)
+
+    def write_it() -> str:
+        # The write happens on the thread that resolves the confirmation, so
+        # the tool call answers at once and the user hears the assistant
+        # straight away.
+        if not _job_lock.acquire(timeout=60):
+            return outcome.failed(
+                "dev_agent",
+                f"the coding agent is busy with '{_job_name}'")
+        try:
+            return _build_project(
+                plan=plan, files=files, description=description,
+                language=language, project_dir=project_dir, proj_name=proj_name,
+                entry_point=entry_point, dependencies=dependencies,
+                player=player, speak=speak,
+            )
+        finally:
+            _job_lock.release()
+
+    return action_policy.ask_once("dev_agent", "build", title, detail,
+                                   run=write_it)
 
 
 def dev_agent(
@@ -1609,12 +1498,11 @@ def dev_agent(
         return _start_improve(folder, description, speak=speak, player=player)
     language     = p.get("language", "python").strip()
     project_name = p.get("project_name", "").strip()
-    timeout      = int(p.get("timeout", 30))
 
     if not description:
         return "Please describe the project you want me to build, sir."
 
-    return _start_build(description, language, project_name, timeout,
+    return _start_build(description, language, project_name,
                         speak=speak, player=player)
 
 
@@ -1627,6 +1515,8 @@ TOOL = {
         "a path they name: fixes bugs, adds features, refactors. When a folder is "
         "uploaded, ANY request to add, create or change something is improve. "
         "Both modes run in the background with progress on screen. "
+        "The plan is shown on the screen BEFORE anything is written, and the "
+        "user has to approve it; nothing is run, installed or opened. "
         "mode='build' creates a brand-new standalone project, only when no "
         "folder is meant. mode='status' reports what the coding agent is doing or "
         "did — use it whenever the user asks about the coding work. "
@@ -1654,10 +1544,6 @@ TOOL = {
             "project_name": {
                 "type": "STRING",
                 "description": "Optional project folder name"
-            },
-            "timeout": {
-                "type": "INTEGER",
-                "description": "Run timeout in seconds (default: 30)"
             }
         },
         "required": [

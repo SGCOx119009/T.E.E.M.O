@@ -174,7 +174,7 @@ class PolicyCoverageTests(unittest.TestCase):
         """
         if not action:
             return {}
-        if tool in ("task_planner", "web_search"):
+        if tool in ("task_planner", "web_search", "dev_agent"):
             return {"mode": action}
         return {"action": action}
 
@@ -341,7 +341,7 @@ class PolicyCoverageTests(unittest.TestCase):
         # running with nobody seeing it.
         self.assertEqual(
             set(action_policy._HANDLER_OWN_GATE),
-            {"computer_settings", "meet_control", "game_updater"},
+            {"computer_settings", "meet_control", "game_updater", "dev_agent"},
         )
 
     @staticmethod
