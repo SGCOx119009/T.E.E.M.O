@@ -459,12 +459,32 @@ def send_wake(cfg: dict) -> str:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def user_tz() -> timezone:
+    """The timezone the user's day happens in.
+
+    The configured offset wins: the phone can tell the server where the user
+    is, and that is more precise than any guess.
+
+    But when nothing has been configured, the answer is the MACHINE's own
+    timezone and not UTC. A desktop in Peru that believes it is in UTC
+    reports the wrong hour, reads every calendar event five hours out, and
+    tells the user to leave for an appointment before it starts.
+    """
     try:
         from memory.config_manager import load_api_keys
-        minutes = int(load_api_keys().get("user_tz_offset_min") or 0)
+        raw = load_api_keys().get("user_tz_offset_min")
+        if raw not in (None, ""):
+            minutes = int(raw)
+            if -840 <= minutes <= 840:
+                return timezone(timedelta(minutes=minutes))
     except Exception:
-        minutes = 0
-    return timezone(timedelta(minutes=minutes))
+        pass
+    try:
+        local = datetime.now().astimezone().tzinfo
+        if local is not None:
+            return local
+    except Exception:
+        pass
+    return timezone.utc
 
 
 def user_now() -> datetime:
